@@ -152,6 +152,20 @@ TEST(RunnerMemoryLimitUnderCap) {
     ASSERT_TRUE(r.memory_enforced);
 }
 
+TEST(RunnerSigkillNotMisreportedAsOom) {
+    Fixture f;
+    const auto cap = zeromesh::exec::ProbeSandboxResourceEnforcement();
+    if (!cap.cgroup_memory) {
+        std::fprintf(stderr, "SKIP RunnerSigkillNotMisreportedAsOom: no cgroup memory enforcement\n");
+        return;
+    }
+    RunSpec spec;
+    spec.mem_bytes = 64ULL * 1024 * 1024;
+    auto r = f.Sh("kill -9 $$");
+    ASSERT_EQ(r.exit_code, 137);
+    ASSERT_EQ(r.error, std::string());
+}
+
 TEST(RunnerMemoryLimitOverCap) {
     Fixture f;
     const auto cap = zeromesh::exec::ProbeSandboxResourceEnforcement();

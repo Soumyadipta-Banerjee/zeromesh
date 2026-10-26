@@ -25,11 +25,24 @@ std::string Describe(const char* what, const grpc::Status& st) {
            "): " + st.error_message();
 }
 
-// 10 s plus 1 s per MiB: a transfer slower than 1 MiB/s counts as stalled.
+// Base plus 1 s per MiB of known payload: a transfer slower than 1 MiB/s counts as stalled.
+// When any digest has unknown size (0), use a generous base so on-demand pulls do not hit the 10 s unary limit.
 void SetTransferDeadline(grpc::ClientContext& ctx, const std::vector<v1::Digest>& digests) {
     int64_t bytes = 0;
-    for (const auto& d : digests) bytes += std::max<int64_t>(d.size_bytes(), 0);
-    ctx.set_deadline(std::chrono::system_clock::now() + kNodeRpcTimeout + std::chrono::seconds(bytes >> 20));
+    bool any_unknown_size = false;
+    for (const auto& d : digests) {
+        if (d.size_bytes() <= 0) {
+            any_unknown_size = true;
+        } else {
+            bytes += d.size_bytes();
+        }
+    }
+    auto base = kNodeRpcTimeout;
+    if (any_unknown_size) {
+        constexpr auto kUnknownSizeTransferBase = std::chrono::seconds{120};
+        base = std::max(base, kUnknownSizeTransferBase);
+    }
+    ctx.set_deadline(std::chrono::system_clock::now() + base + std::chrono::seconds(bytes >> 20));
 }
 
 // For one admission: accepts the first server fingerprint seen and afterwards only

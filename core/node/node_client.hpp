@@ -6,7 +6,7 @@
 // Every other call goes through a channel whose TLS verifier accepts only the
 // fingerprint pinned for the peer's node id, with transport keepalive (pings every
 // 5 s, dead after 10 s without an answer). Unary RPCs have a 10 s deadline; blob
-// transfers get 10 s plus 1 s per MiB; Run has no deadline and relies on keepalive.
+// transfers get 10 s plus 1 s per MiB (120 s base when size is unknown); Run has no deadline and relies on keepalive.
 // Thread-safe: one client may serve many concurrent calls.
 
 #include "net/identity.hpp"

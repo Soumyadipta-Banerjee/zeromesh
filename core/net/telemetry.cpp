@@ -96,21 +96,28 @@ void ReadPowerSupply(const fs::path& dir, Telemetry& out) {
     out.on_ac = mains_online || !have_battery;
 }
 
-// Sum of IRQ counts whose device name looks like keyboard/mouse/touchpad input.
+bool InputIrqLine(const std::string& lower) {
+    static constexpr const char* kMarkers[] = {
+        "i8042", "keyboard", "mouse", "touchpad", "i2c_designware", "xhci_hcd", "hid",
+        "gpio-keys", "elan", "synaptics",
+    };
+    for (const char* m : kMarkers) {
+        if (lower.find(m) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// Sum of IRQ counts whose device name looks like keyboard/mouse/touchpad/USB input.
 uint64_t ReadInputIrqs(const fs::path& path) {
     std::ifstream in(path);
     std::string line;
     uint64_t total = 0;
     while (std::getline(in, line)) {
-        // " 12:  100 200  ...  i8042" or " 1: ...  keyboard"
         const auto colon = line.find(':');
         if (colon == std::string::npos) continue;
         std::string lower = line;
         for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (lower.find("i8042") == std::string::npos && lower.find("keyboard") == std::string::npos &&
-            lower.find("mouse") == std::string::npos && lower.find("touchpad") == std::string::npos) {
-            continue;
-        }
+        if (!InputIrqLine(lower)) continue;
         std::istringstream ls(line.substr(colon + 1));
         uint64_t n = 0;
         while (ls >> n) total += n;
@@ -154,7 +161,7 @@ Telemetry TelemetrySampler::Sample() {
         // Require a clear jump in input IRQs so background noise and test harness
         // activity do not flap the donor into sticky drain.
         const uint64_t irqs = ReadInputIrqs(sysroot_ / "proc/interrupts");
-        constexpr uint64_t kActivityDelta = 64;
+        constexpr uint64_t kActivityDelta = 8;
         if (have_irq_prev_ && irqs > prev_input_irqs_ &&
             (irqs - prev_input_irqs_) >= kActivityDelta) {
             t.user_active = true;

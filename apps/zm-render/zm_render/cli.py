@@ -41,6 +41,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Env provider: host (Blender on donor) or mirror (M5c)",
     )
     p.add_argument(
+        "--mirror",
+        type=Path,
+        action="append",
+        default=None,
+        dest="mirror_paths",
+        metavar="PATH",
+        help="Host path to export for --env mirror (repeatable; required with --env mirror)",
+    )
+    p.add_argument(
         "--encode",
         type=Path,
         default=None,
@@ -88,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.chunk < 1:
         print("zm-render: --chunk must be >= 1", file=sys.stderr)
         return 2
+    if args.env == "mirror" and not args.mirror_paths:
+        print("zm-render: --env mirror requires at least one --mirror PATH", file=sys.stderr)
+        return 2
 
     try:
         import zeromesh
@@ -110,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         chunk=args.chunk,
         out_dir=args.output,
         env=args.env,
+        mirror_paths=list(args.mirror_paths or []),
         encode=args.encode,
         blender_bin=args.blender,
         engine=args.engine,

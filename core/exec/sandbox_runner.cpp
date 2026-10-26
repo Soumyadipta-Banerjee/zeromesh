@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <sstream>
 
@@ -190,8 +191,11 @@ bool EnableSubtreeControllers(const fs::path& parent, const char* const* names, 
 
 bool CgroupFileWritable(const fs::path& p) { return access(p.c_str(), W_OK) == 0; }
 
-// Deepest cgroup along our ancestry that can host per-task limits (systemd scopes often lack them).
-std::optional<fs::path> FindTaskCgroupParent() {
+void JoinCgroup(const fs::path& dir);
+
+constexpr const char* kDaemonCgroupName = "zm-daemon";
+
+std::optional<fs::path> SelfCgroupSysfs() {
     std::ifstream cg("/proc/self/cgroup");
     std::string line;
     std::string rel;
@@ -202,27 +206,53 @@ std::optional<fs::path> FindTaskCgroupParent() {
         }
     }
     if (rel.empty() || rel[0] != '/') return std::nullopt;
+    return fs::path("/sys/fs/cgroup") / rel.substr(1);
+}
 
-    fs::path cur = fs::path("/sys/fs/cgroup") / rel.substr(1);
+// Deepest cgroup along our ancestry where we can create child cgroups with limits.
+// Does not touch cgroup.subtree_control on ancestors (systemd delegation breaks otherwise).
+std::optional<fs::path> FindDelegatableCgroupParent() {
+    auto cur = SelfCgroupSysfs();
+    if (!cur) return std::nullopt;
     const fs::path root = "/sys/fs/cgroup";
     while (true) {
-        static const char* kCtrls[] = {"memory", "cpu", "pids"};
-        EnableSubtreeControllers(cur, kCtrls, 3);
-
         const std::string probe_name = ".zm-cg-probe-" + RandomHex(4);
-        const fs::path probe = cur / probe_name;
+        const fs::path probe = *cur / probe_name;
         std::error_code ec;
         fs::create_directory(probe, ec);
         if (!ec) {
             const bool mem = CgroupFileWritable(probe / "memory.max");
             const bool cpu = CgroupFileWritable(probe / "cpu.max");
             fs::remove(probe, ec);
-            if (mem || cpu) return cur;
+            if (mem || cpu) return *cur;
         }
-        if (cur == root || cur.parent_path() == cur) break;
-        cur = cur.parent_path();
+        if (*cur == root || cur->parent_path() == *cur) break;
+        cur = cur->parent_path();
     }
     return std::nullopt;
+}
+
+std::optional<fs::path> g_task_cgroup_parent;
+std::once_flag g_task_cgroup_parent_once;
+
+// Parent of zm-daemon and zm-task-*; daemon processes live in zm-daemon (leaf).
+std::optional<fs::path> FindTaskCgroupParent() {
+    std::call_once(g_task_cgroup_parent_once, [] {
+        auto parent = FindDelegatableCgroupParent();
+        if (!parent) return;
+
+        static const char* kCtrls[] = {"memory", "cpu", "pids"};
+        if (!EnableSubtreeControllers(*parent, kCtrls, 3)) return;
+
+        const fs::path daemon_cg = *parent / kDaemonCgroupName;
+        std::error_code ec;
+        fs::create_directory(daemon_cg, ec);
+        if (ec) return;
+
+        JoinCgroup(daemon_cg);
+        g_task_cgroup_parent = *parent;
+    });
+    return g_task_cgroup_parent;
 }
 
 struct PreparedCgroup {
@@ -286,10 +316,6 @@ void ApplyRlimitMemory(uint64_t mem_bytes) {
 }
 
 void ApplyBaselineRlimits() {
-    rlimit rp{};
-    rp.rlim_cur = 4096;
-    rp.rlim_max = 4096;
-    setrlimit(RLIMIT_NPROC, &rp);
     rlimit rc{};
     rc.rlim_cur = rc.rlim_max = 0;
     setrlimit(RLIMIT_CORE, &rc);
@@ -471,12 +497,9 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     // bwrap reports a missing command as exit 1 + "bwrap: execvp ..."; use the shell convention.
     if (result.exit_code == 1 && result.stderr_head.rfind("bwrap: execvp ", 0) == 0) result.exit_code = 127;
 
-    if (!result.timed_out && !result.cancelled && result.memory_enforced) {
-        const bool cgroup_oom = task_cgroup && CgroupHadOomKill(task_cgroup->dir);
-        const bool oom_exit = result.exit_code == 137;
-        if (cgroup_oom || oom_exit) {
-            result.error = "task exceeded memory limit (killed)";
-        }
+    if (!result.timed_out && !result.cancelled && result.memory_enforced && task_cgroup &&
+        CgroupHadOomKill(task_cgroup->dir)) {
+        result.error = "task exceeded memory limit (killed)";
     }
     if (task_cgroup) RemoveTaskCgroup(task_cgroup->dir);
 

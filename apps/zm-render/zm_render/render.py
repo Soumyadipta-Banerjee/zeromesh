@@ -21,6 +21,7 @@ class RenderOptions:
     chunk: int = 1
     out_dir: Path = Path("renders")
     env: str = "host"
+    mirror_paths: list[Path] = field(default_factory=list)
     encode: Optional[Path] = None
     blender_bin: str = "blender"
     engine: Optional[str] = None
@@ -114,12 +115,17 @@ def build_job_spec(
     engine: Optional[str] = None,
     may_run_local: bool = True,
     may_run_remote: bool = True,
+    mirror_paths: Optional[list[str]] = None,
 ) -> Any:
     """Build a JobSpec with one task per chunk."""
     policy = common_pb2.Policy(
         may_run_local=may_run_local,
         may_run_remote=may_run_remote,
     )
+    env_params: dict[str, str] = {}
+    if env == "mirror" and mirror_paths:
+        env_params["mirror_paths"] = "\n".join(mirror_paths)
+
     tasks = []
     for ch in chunks:
         tasks.append(
@@ -130,7 +136,7 @@ def build_job_spec(
                 ),
                 input_root=input_root,
                 outputs=["out/"],
-                env_spec=common_pb2.EnvSpec(name=env),
+                env_spec=common_pb2.EnvSpec(name=env, params=env_params),
                 resources=common_pb2.Resources(cores=cores),
                 policy=policy,
                 env=_BLENDER_ENV,
@@ -202,6 +208,8 @@ def run_render(
         raise FileNotFoundError(f"scene not found: {blend}")
     if opts.env not in ("host", "mirror"):
         raise ValueError(f"--env must be host or mirror, got {opts.env!r}")
+    if opts.env == "mirror" and not opts.mirror_paths:
+        raise ValueError("--env mirror requires at least one --mirror PATH")
 
     warn_external_paths(blend, file=prog)
 
@@ -221,6 +229,10 @@ def run_render(
         print(f"  queue     frames {ch.start:>3}-{ch.end:<3}  ({ch.name})", file=prog, flush=True)
 
     root = client.upload(scene_dir)
+    mirror_paths = None
+    if opts.env == "mirror":
+        mirror_paths = [str(p.resolve()) for p in opts.mirror_paths]
+
     job_spec = build_job_spec(
         input_root=root,
         blend_rel=blend_rel,
@@ -232,6 +244,7 @@ def run_render(
         common_pb2=common_pb2,
         may_run_local=opts.may_run_local,
         may_run_remote=opts.may_run_remote,
+        mirror_paths=mirror_paths,
     )
     job = client.submit(job_spec)
     print(f"zm-render: submitted job {job.job_id}", file=prog, flush=True)

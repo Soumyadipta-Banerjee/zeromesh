@@ -77,15 +77,30 @@ TEST(TelemetryUserActiveFromInterrupts) {
               " 12:          5          5   IO-APIC  12-edge      i8042\n");
     TelemetrySampler sampler(root.path());
     ASSERT_FALSE(sampler.Sample().user_active);  // first sample establishes the baseline
-    // Small bump is noise, not activity.
+    // Small bump (<8 IRQs) is noise, not activity.
     WriteFile(root / "proc/interrupts",
               "           CPU0       CPU1\n"
-              "  1:         20         10   IO-APIC   1-edge      i8042\n"
+              "  1:         14         10   IO-APIC   1-edge      i8042\n"
               " 12:          5          5   IO-APIC  12-edge      i8042\n");
     ASSERT_FALSE(sampler.Sample().user_active);
     WriteFile(root / "proc/interrupts",
               "           CPU0       CPU1\n"
               "  1:        100        100   IO-APIC   1-edge      i8042\n"
               " 12:         50         50   IO-APIC  12-edge      i8042\n");
+    ASSERT_TRUE(sampler.Sample().user_active);
+}
+
+TEST(TelemetryUserActiveFromI2cTouchpad) {
+    TempDir root;
+    WriteFile(root / "proc/stat", ProcStat(0, 100));
+    WriteFile(root / "proc/meminfo", "MemTotal: 1000 kB\nMemAvailable: 500 kB\n");
+    WriteFile(root / "proc/interrupts",
+              "           CPU0\n"
+              " 33:          0          i2c_designware\n");
+    TelemetrySampler sampler(root.path());
+    ASSERT_FALSE(sampler.Sample().user_active);
+    WriteFile(root / "proc/interrupts",
+              "           CPU0\n"
+              " 33:         12          i2c_designware\n");
     ASSERT_TRUE(sampler.Sample().user_active);
 }

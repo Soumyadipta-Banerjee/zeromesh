@@ -4,7 +4,9 @@
 #include "net/tls.hpp"
 #include "node/blob_transfer.hpp"
 #include "node/convert.hpp"
+#include "node/mirror_manifest.hpp"
 #include "node/task_key.hpp"
+#include "store/merkle.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -75,6 +77,15 @@ struct RunStream {
 
 std::string MacBytes(const std::array<uint8_t, 32>& mac) { return std::string(mac.begin(), mac.end()); }
 
+void ProtectTreeHashes(std::unordered_set<std::string>& out, store::MerkleBuilder& merkle, const store::Digest& root) {
+    if (root.hash.empty()) return;
+    try {
+        for (const auto& d : merkle.CollectTree(root)) out.insert(d.hash);
+    } catch (...) {
+        out.insert(root.hash);
+    }
+}
+
 } // namespace
 
 NodeService::NodeService(std::string node_id, std::shared_ptr<net::PinStore> pins,
@@ -116,15 +127,32 @@ int NodeService::CoresInUseLocked() const {
 }
 
 std::unordered_set<std::string> NodeService::ProtectedBlobHashes() const {
+    if (!cas_) return {};
+    struct Snap {
+        std::vector<store::Digest> needed;
+        std::vector<std::string> input_roots;
+        std::vector<std::string> mirror_roots;
+    } snap;
+    {
+        std::lock_guard lock(mu_);
+        auto collect = [&](const v1::TaskSpec& spec, const std::vector<store::Digest>& needed) {
+            for (const auto& d : needed) snap.needed.push_back(d);
+            if (!spec.input_root().hash().empty()) snap.input_roots.push_back(spec.input_root().hash());
+            const auto& params = spec.env_spec().params();
+            auto it = params.find(kMirrorRootDigestParam);
+            if (it != params.end() && store::CasStore::IsValidHash(it->second)) {
+                snap.mirror_roots.push_back(it->second);
+            }
+        };
+        for (const auto& [_, r] : reserved_) collect(r.spec, r.needed);
+        for (const auto& [_, r] : running_) collect(r.spec, r.needed);
+    }
+
     std::unordered_set<std::string> out;
-    std::lock_guard lock(mu_);
-    for (const auto& [_, r] : reserved_) {
-        for (const auto& d : r.needed) out.insert(d.hash);
-        if (!r.spec.input_root().hash().empty()) out.insert(r.spec.input_root().hash());
-    }
-    for (const auto& [_, r] : running_) {
-        for (const auto& d : r.needed) out.insert(d.hash);
-    }
+    store::MerkleBuilder merkle(cas_);
+    for (const auto& d : snap.needed) out.insert(d.hash);
+    for (const auto& h : snap.input_roots) ProtectTreeHashes(out, merkle, store::Digest{h, 0});
+    for (const auto& h : snap.mirror_roots) ProtectTreeHashes(out, merkle, store::Digest{h, 0});
     return out;
 }
 
@@ -357,7 +385,8 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
         spec = std::move(it->second.spec);
         reserved_.erase(it);
         const bool preemptible = !spec.policy().has_preemptible() || spec.policy().preemptible();
-        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible, std::move(needed)};
+        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible, spec,
+                                  std::move(needed)};
     }
 
     auto stream = std::make_shared<RunStream>();

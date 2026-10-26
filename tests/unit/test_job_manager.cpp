@@ -307,6 +307,70 @@ TEST(JobWatchReplaysHistory) {
     ASSERT_EQ(events[3].job_id(), id);
 }
 
+TEST(JobProtectedBlobHashes_WalksInputTree) {
+    TempDir dir;
+    auto cas = std::make_shared<zeromesh::store::CasStore>(dir / "cas");
+    auto merkle = std::make_shared<zeromesh::store::MerkleBuilder>(cas);
+    auto cache = std::make_shared<zeromesh::node::ActionCache>(cas);
+    auto exec = std::make_shared<HoldExecutor>();
+    JobManager jm{cas, merkle, cache, exec};
+
+    TempDir inputs;
+    zeromesh::testing::WriteFile(inputs / "a.txt", "aaa");
+    zeromesh::testing::WriteFile(inputs / "b.txt", "bbb");
+    const auto root = merkle->BuildTree(inputs.path());
+    std::vector<std::string> tree_hashes;
+    for (const auto& d : merkle->CollectTree(root)) tree_hashes.push_back(d.hash);
+    ASSERT_TRUE(tree_hashes.size() >= static_cast<size_t>(3));
+
+    v1::TaskSpec t = Task("t", "x");
+    *t.mutable_input_root() = zeromesh::node::ToProto(root);
+    auto id = jm.Submit(Job({t}));
+
+    zeromesh::store::CasLimits limits;
+    limits.max_blob_bytes = 4096;
+    auto cas_gc = std::make_shared<zeromesh::store::CasStore>(dir / "cas", limits);
+    const auto filler = cas_gc->PutBlob(std::string(2000, 'z'));
+    const auto protect = jm.ProtectedBlobHashes();
+    cas_gc->CollectGarbage(0, protect);
+    for (const auto& h : tree_hashes) ASSERT_TRUE(cas_gc->HasBlob(h));
+    ASSERT_FALSE(cas_gc->HasBlob(filler.hash));
+
+    v1::TaskResult r;
+    r.set_exit_code(0);
+    exec->held.on_done(std::move(r));
+    Drain(jm, id);
+}
+
+TEST(JobProtectedBlobHashes_GracePeriodForFinishedOutputs) {
+    JobManager::ResetProtectedBlobTestingHooks();
+    const auto base = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point now = base;
+    JobManager::SetClockForTesting([&] { return now; });
+    JobManager::SetFinishedJobBlobGracePeriodForTesting(std::chrono::seconds(60));
+
+    Fixture f;
+    auto id = f.jm.Submit(Job({Task("t", "x")}));
+    Drain(f.jm, id);
+    const std::string stdout_hash = f.jm.Get(id)->results().at("t").stdout().hash();
+    ASSERT_FALSE(stdout_hash.empty());
+
+    auto protect = f.jm.ProtectedBlobHashes();
+    ASSERT_TRUE(protect.contains(stdout_hash));
+    f.cas->CollectGarbage(0, protect);
+    ASSERT_TRUE(f.cas->HasBlob(stdout_hash));
+
+    now = base + std::chrono::seconds(61);
+    protect = f.jm.ProtectedBlobHashes();
+    ASSERT_FALSE(protect.contains(stdout_hash));
+    const auto drop = f.cas->PutBlob("evict-stdout");
+    f.cas->CollectGarbage(0, protect);
+    ASSERT_FALSE(f.cas->HasBlob(stdout_hash));
+    ASSERT_FALSE(f.cas->HasBlob(drop.hash));
+
+    JobManager::ResetProtectedBlobTestingHooks();
+}
+
 TEST(JobRealLocalExecutor) {
     Fixture f;
     auto runner = std::make_shared<zeromesh::exec::SandboxRunner>(f.cas, f.merkle, f.dir / "scratch");

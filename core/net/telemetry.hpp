@@ -24,8 +24,8 @@ struct Telemetry {
 // reports 0. User activity for M4 sticky drain:
 //   1. If <sysroot>/run/zeromesh/user_active exists, it is an override ("1"/"0"/"true"/"false")
 //      — used by tests.
-//   2. Else sum keyboard/mouse/touchpad IRQ counts from <sysroot>/proc/interrupts; the
-//      user is active when the count rises by at least 64 since the previous sample
+//   2. Else sum keyboard/mouse/touchpad/USB IRQ counts from <sysroot>/proc/interrupts; the
+//      user is active when the count rises by at least 8 since the previous sample
 //      (filters noise). Not thread-safe: callers serialize calls to Sample().
 class TelemetrySampler {
 public:

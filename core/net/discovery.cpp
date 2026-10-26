@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cstdio>
 #include <charconv>
 #include <cmath>
 #include <exception>
@@ -277,11 +278,28 @@ bool TimestampAcceptable(int64_t unix_ms, std::chrono::milliseconds max_skew) {
 void ReplayTracker::Clear() {
     std::lock_guard<std::mutex> lock(mu_);
     nodes_.clear();
+    skew_log_last_.clear();
 }
 
 bool ReplayTracker::Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq,
                            int64_t timestamp_ms) {
-    if (!TimestampAcceptable(timestamp_ms) || node_id.empty() || boot_id.empty() || seq == 0) {
+    if (node_id.empty() || boot_id.empty() || seq == 0) return false;
+    if (!TimestampAcceptable(timestamp_ms)) {
+        std::lock_guard<std::mutex> lock(mu_);
+        const auto now = std::chrono::steady_clock::now();
+        const std::string key(node_id);
+        auto it = skew_log_last_.find(key);
+        if (it == skew_log_last_.end() ||
+            now - it->second >= std::chrono::seconds(5)) {
+            skew_log_last_[key] = now;
+            const int64_t wall_now = UnixMsNow();
+            const int64_t skew_ms = timestamp_ms - wall_now;
+            std::fprintf(stderr,
+                         "zeromesh discovery: rejecting packet from peer %s: clock skew %lld ms "
+                         "(timestamp %lld, local %lld)\n",
+                         key.c_str(), static_cast<long long>(skew_ms),
+                         static_cast<long long>(timestamp_ms), static_cast<long long>(wall_now));
+        }
         return false;
     }
     std::lock_guard<std::mutex> lock(mu_);
