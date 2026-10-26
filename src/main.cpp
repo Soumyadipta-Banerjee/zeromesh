@@ -1,5 +1,4 @@
 #include "discovery/peer_table.hpp"
-#include "executor/host_guard.hpp"
 #include "ui/tui.hpp"
 
 #include <iostream>

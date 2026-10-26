@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace zeromesh::executor {
+namespace zeromesh::exec {
 
 /**
  * @brief Direct Linux Landlock LSM interface for unprivileged kernel filesystem confinement.
@@ -40,4 +40,4 @@ private:
     std::vector<std::filesystem::path> rw_paths_;
 };
 
-} // namespace zeromesh::executor
+} // namespace zeromesh::exec

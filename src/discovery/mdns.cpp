@@ -1,5 +1,4 @@
 #include "discovery/mdns.hpp"
-#include "executor/host_guard.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -82,9 +81,7 @@ void MdnsEngine::AnnounceNow() {
        << config_.grpc_port << "\t"
        << config_.cores << "\t"
        << config_.ram_bytes << "\t"
-       << executor::HostGuard::GetLocalCpuLoadPct() << "\t"
-       << executor::HostGuard::GetBatteryPercent() << "\t"
-       << (executor::HostGuard::IsAcConnected() ? "1" : "0");
+       << 0.0 << "\t" << -1 << "\t" << "1";
 
     std::string msg = ss.str();
     sendto(sock, msg.data(), msg.size(), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));

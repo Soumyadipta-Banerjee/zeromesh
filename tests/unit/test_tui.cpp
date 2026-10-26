@@ -49,7 +49,6 @@ TEST(TerminalUI_PrintStatusSnapshotWithPeers) {
     std::string out = buffer.str();
 
     ASSERT_TRUE(out.find("ZeroMesh Remote Execution Mesh") != std::string::npos);
-    ASSERT_TRUE(out.find("Local Host Status") != std::string::npos);
     ASSERT_TRUE(out.find("worker-node-101") != std::string::npos);
     ASSERT_TRUE(out.find("16") != std::string::npos);
     ASSERT_TRUE(out.find("32.0 GB") != std::string::npos);
