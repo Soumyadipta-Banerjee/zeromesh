@@ -131,7 +131,7 @@ public:
         std::unordered_map<std::string, FileSnapshot> file_snapshot;
         std::vector<std::pair<std::string, uint16_t>> known_dht_peers;
         std::vector<std::pair<std::string, uint16_t>> known_chunk_peers;
-        std::mutex sync_mutex;
+        std::recursive_mutex sync_mutex;
     };
 
     TorrentEngine(std::filesystem::path storage_dir,
@@ -195,7 +195,7 @@ public:
                     node.last_seen = std::chrono::steady_clock::now();
                     dht_->InsertNode(node);
 
-                    std::lock_guard<std::mutex> lock(sync_state_.sync_mutex);
+                    std::lock_guard<std::recursive_mutex> lock(sync_state_.sync_mutex);
                     bool found = false;
                     for (const auto& kp : sync_state_.known_dht_peers) {
                         if (kp.first == p.ip_address && kp.second == dht_port_) {
@@ -256,7 +256,7 @@ public:
         node.last_seen = std::chrono::steady_clock::now();
         dht_->InsertNode(node);
 
-        std::lock_guard<std::mutex> lock(sync_state_.sync_mutex);
+        std::lock_guard<std::recursive_mutex> lock(sync_state_.sync_mutex);
         sync_state_.known_dht_peers.push_back({ip, dht_port});
         sync_state_.known_chunk_peers.push_back({ip, chunk_port > 0 ? chunk_port : chunk_port_});
     }
@@ -297,7 +297,7 @@ public:
 
         std::vector<std::pair<std::string, uint16_t>> peers_copy;
         {
-            std::lock_guard<std::mutex> lock(sync_state_.sync_mutex);
+            std::lock_guard<std::recursive_mutex> lock(sync_state_.sync_mutex);
             peers_copy = sync_state_.known_dht_peers;
         }
         for (const auto& peer : peers_copy) {
@@ -313,7 +313,7 @@ public:
                        uint16_t peer_chunk_port = 0,
                        const TorrentManifest* initial_manifest = nullptr) {
         {
-            std::lock_guard<std::mutex> lock(sync_state_.sync_mutex);
+            std::lock_guard<std::recursive_mutex> lock(sync_state_.sync_mutex);
             sync_state_.swarm_id = swarm_id;
             sync_state_.local_dir = dir_path;
             sync_state_.chunk_size_bytes = chunk_size_bytes;
@@ -367,8 +367,8 @@ public:
     }
 
     bool CheckLocalChangesAndPublish() {
-        std::unique_lock<std::mutex> lock(sync_state_.sync_mutex, std::try_to_lock);
-        if (!lock.owns_lock() || !sync_state_.active.load() || sync_state_.is_applying_remote.load()) {
+        std::unique_lock<std::recursive_mutex> lock(sync_state_.sync_mutex);
+        if (!sync_state_.active.load() || sync_state_.is_applying_remote.load()) {
             return false;
         }
         if (!std::filesystem::exists(sync_state_.local_dir) || !std::filesystem::is_directory(sync_state_.local_dir)) {
@@ -416,9 +416,6 @@ public:
         }
 
         if (!has_changes) return false;
-
-        // Debounce briefly to ensure file writes are flushed
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
         TorrentManifest manifest;
         manifest.name = sync_state_.local_dir.filename().empty() ? "shared_folder" : sync_state_.local_dir.filename().string();
@@ -488,8 +485,8 @@ public:
     }
 
     bool CheckRemoteUpdatesAndApply() {
-        std::unique_lock<std::mutex> lock(sync_state_.sync_mutex, std::try_to_lock);
-        if (!lock.owns_lock() || !sync_state_.active.load() || sync_state_.is_applying_remote.load()) {
+        std::unique_lock<std::recursive_mutex> lock(sync_state_.sync_mutex);
+        if (!sync_state_.active.load() || sync_state_.is_applying_remote.load()) {
             return false;
         }
 
@@ -713,7 +710,6 @@ public:
         manifest.swarm_id = info_hash;
         manifest.version = 1;
         manifest_json = manifest.Serialize();
-        info_hash = TorrentManifest::ComputeInfoHash(manifest_json);
 
         // Store manifest in CAS and announce in DHT
         cas_store_->PutBlob(manifest_json);
