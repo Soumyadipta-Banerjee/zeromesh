@@ -31,9 +31,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             meson ninja-build pkg-config bubblewrap \
-            g++ clang \
+            g++ clang python3-pip \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev python3-grpcio python3-grpc-tools python3-protobuf python3-pytest
+            libsodium-dev libssl-dev python3-pytest
+          sudo pip install --break-system-packages --upgrade grpcio grpcio-tools protobuf
 
       - name: Configure Linux kernel and network for sandboxing and discovery
         run: |
@@ -65,9 +66,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            meson ninja-build g++ pkg-config bubblewrap \
+            meson ninja-build g++ pkg-config bubblewrap python3-pip \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev python3-grpcio python3-grpc-tools python3-protobuf python3-pytest
+            libsodium-dev libssl-dev python3-pytest
+          sudo pip install --break-system-packages --upgrade grpcio grpcio-tools protobuf
 
       - name: Configure Linux kernel and network
         run: |
@@ -92,6 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
+      options: --privileged
 
     steps:
       - name: Check out repository
@@ -99,10 +102,16 @@ jobs:
 
       - name: Install dependencies via pacman
         run: |
+          pacman -Sy --noconfirm archlinux-keyring || true
           pacman -Syu --noconfirm \
-            base-devel meson ninja gcc pkgconf bubblewrap \
+            base-devel meson ninja gcc pkgconf bubblewrap iproute2 \
             protobuf grpc libsodium openssl \
             python python-pytest python-protobuf python-grpcio python-grpcio-tools
+
+      - name: Configure network and unprivileged namespaces
+        run: |
+          ip link set lo multicast on || true
+          ip route add 224.0.0.0/4 dev lo || true
 
       - name: Configure build
         run: meson setup build
@@ -134,6 +143,10 @@ jobs:
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
             libsodium-dev libssl-dev
 
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
+
       - name: Configure Linux kernel and network
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
@@ -147,7 +160,6 @@ jobs:
 
       - name: Install Python SDK and test
         run: |
-          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
           if [ -d "sdk/python" ]; then
             pip install ./sdk/python
             python -c "import zeromesh; print('ZeroMesh SDK version:', zeromesh.__version__)"
@@ -168,9 +180,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            meson ninja-build g++ pkg-config dpkg-dev \
+            meson ninja-build g++ pkg-config dpkg-dev python3-pip \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev python3-grpcio python3-grpc-tools
+            libsodium-dev libssl-dev python3-pytest
+          sudo pip install --break-system-packages --upgrade grpcio grpcio-tools protobuf
 
       - name: Build binaries
         run: |
