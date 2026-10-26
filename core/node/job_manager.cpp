@@ -161,8 +161,11 @@ private:
     std::shared_ptr<ActionCache> cache_;
     std::shared_ptr<Executor> executor_;
 
+    static constexpr size_t kFinishedJobsListed = 32;
+
     mutable std::mutex mu_;
     std::unordered_map<std::string, JobPtr> jobs_;
+    std::deque<std::string> job_order_;  // submit order (for monitor history)
 };
 
 std::string JobManager::Impl::Submit(v1::JobSpec spec) {
@@ -216,6 +219,7 @@ std::string JobManager::Impl::Submit(v1::JobSpec spec) {
             job->id = RandomHex(8);
         } while (jobs_.contains(job->id));
         jobs_[job->id] = job;
+        job_order_.push_back(job->id);
         for (size_t i = 0; i < job->tasks.size(); ++i) {
             job->tasks[i].task_id = job->id + "/" + job->tasks[i].spec.name();
             v1::JobEvent ev;
@@ -485,10 +489,23 @@ std::optional<v1::JobStatus> JobManager::Impl::Get(const std::string& job_id) co
 std::vector<v1::ActiveTask> JobManager::Impl::ListActive() const {
     std::lock_guard lock(mu_);
     std::vector<v1::ActiveTask> out;
-    for (const auto& [id, job] : jobs_) {
-        if (job->done) continue;
+
+    // Newest-first among finished jobs, but always include every in-flight job.
+    std::vector<JobPtr> open;
+    std::vector<JobPtr> finished;
+    for (auto it = job_order_.rbegin(); it != job_order_.rend(); ++it) {
+        auto jt = jobs_.find(*it);
+        if (jt == jobs_.end()) continue;
+        if (jt->second->done) finished.push_back(jt->second);
+        else open.push_back(jt->second);
+    }
+    if (finished.size() > kFinishedJobsListed) {
+        finished.resize(kFinishedJobsListed);
+    }
+
+    auto append_job = [&](const JobPtr& job, bool want_terminal) {
         for (const auto& t : job->tasks) {
-            if (t.state == v1::SUCCEEDED || t.state == v1::FAILED || t.state == v1::CANCELLED) continue;
+            if (IsTerminal(t.state) != want_terminal) continue;
             v1::ActiveTask a;
             a.set_job_id(job->id);
             a.set_task_name(t.spec.name());
@@ -499,7 +516,14 @@ std::vector<v1::ActiveTask> JobManager::Impl::ListActive() const {
             if (t.has_result && !t.result.executed_by().empty()) a.set_detail(t.result.executed_by());
             out.push_back(std::move(a));
         }
-    }
+    };
+
+    // Working rows first (open jobs, then any still-running tasks on a finishing job),
+    // then DONE/FAILED/CANCEL so the monitor never blanks mid-job.
+    for (const auto& job : open) append_job(job, false);
+    for (const auto& job : finished) append_job(job, false);
+    for (const auto& job : open) append_job(job, true);
+    for (const auto& job : finished) append_job(job, true);
     return out;
 }
 

@@ -33,14 +33,18 @@ std::string Clip(const std::string& s, size_t n) { return s.size() > n ? s.subst
 
 const char* StateName(v1::TaskState s) {
     switch (s) {
-        case v1::QUEUED: return "QUEUED";
-        case v1::PLACED: return "PLACED";
-        case v1::RUNNING: return "RUNNING";
+        case v1::QUEUED:
+        case v1::PLACED:
+        case v1::RUNNING: return "WORKING";
         case v1::SUCCEEDED: return "DONE";
         case v1::FAILED: return "FAILED";
         case v1::CANCELLED: return "CANCEL";
         default: return "?";
     }
+}
+
+bool IsWorking(v1::TaskState s) {
+    return s == v1::QUEUED || s == v1::PLACED || s == v1::RUNNING;
 }
 
 std::string ArgvJoin(const v1::ActiveTask& t, size_t max_len = 72) {
@@ -106,11 +110,26 @@ void RenderActivity(const v1::ActivitySnapshot& activity, std::ostream& os, bool
     const char* dim = color ? "\033[90m" : "";
     const char* cyan = color ? "\033[36m" : "";
     const char* green = color ? "\033[32m" : "";
+    const char* yellow = color ? "\033[33m" : "";
+    const char* red = color ? "\033[31m" : "";
     const char* reset = color ? "\033[0m" : "";
 
-    os << "\n" << bold << "Live tasks" << reset << "\n";
+    int working = 0, done = 0, failed = 0;
+    for (const auto& t : activity.tasks()) {
+        if (IsWorking(t.state())) ++working;
+        else if (t.state() == v1::SUCCEEDED) ++done;
+        else ++failed;
+    }
+
+    os << "\n" << bold << "Tasks" << reset;
+    if (activity.tasks_size() > 0) {
+        os << "  " << dim << working << " working · " << done << " done";
+        if (failed > 0) os << " · " << failed << " failed/cancel";
+        os << reset;
+    }
+    os << "\n";
     if (activity.tasks_size() == 0) {
-        os << "  " << dim << "(idle — no submitted or executing tasks)" << reset << "\n";
+        os << "  " << dim << "(idle — no tasks yet)" << reset << "\n";
         return;
     }
 
@@ -119,11 +138,15 @@ void RenderActivity(const v1::ActivitySnapshot& activity, std::ostream& os, bool
 
     for (const auto& t : activity.tasks()) {
         const char* role_color = t.role() == "executing" ? green : cyan;
+        const char* state_color = IsWorking(t.state())                      ? yellow
+                                  : t.state() == v1::SUCCEEDED               ? green
+                                  : t.state() == v1::FAILED                  ? red
+                                                                           : dim;
         std::string job = t.job_id().empty() ? "-" : (t.job_id().size() <= 8 ? t.job_id() : t.job_id().substr(0, 8));
         std::string name = t.task_name();
         if (name.size() > 18) name = name.substr(0, 15) + "...";
-        os << "  " << role_color << std::left << std::setw(10) << t.role() << reset << "  "
-           << std::setw(8) << StateName(t.state()) << "  " << std::setw(18) << name << "  " << std::right
+        os << "  " << role_color << std::left << std::setw(10) << t.role() << reset << "  " << state_color
+           << std::setw(8) << StateName(t.state()) << reset << "  " << std::setw(18) << name << "  " << std::right
            << std::setw(5) << t.cores() << "  " << ArgvJoin(t) << "\n";
         if (!t.detail().empty() || !t.job_id().empty()) {
             os << "             " << dim;

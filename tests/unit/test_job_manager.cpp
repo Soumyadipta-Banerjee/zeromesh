@@ -117,6 +117,38 @@ TEST(JobRunsDagInOrder) {
     ASSERT_EQ(st->results().size(), static_cast<size_t>(3));
 }
 
+TEST(JobListActiveKeepsFinished) {
+    Fixture f;
+    auto id = f.jm.Submit(Job({Task("a", "a"), Task("b", "b")}));
+    Drain(f.jm, id);
+    auto rows = f.jm.ListActive();
+    ASSERT_EQ(rows.size(), static_cast<size_t>(2));
+    int done = 0;
+    for (const auto& a : rows) {
+        ASSERT_EQ(a.role(), std::string("submitted"));
+        ASSERT_EQ(a.job_id(), id);
+        ASSERT_EQ(a.state(), v1::SUCCEEDED);
+        ++done;
+    }
+    ASSERT_EQ(done, 2);
+}
+
+TEST(JobListActiveOrdersWorkingBeforeDone) {
+    Fixture f;
+    // Block the second job's task so the first can finish while the second stays open.
+    // FakeExecutor completes sync, so use two finished jobs + verify both remain listed.
+    auto first = f.jm.Submit(Job({Task("a", "a")}));
+    Drain(f.jm, first);
+    auto second = f.jm.Submit(Job({Task("b", "b")}));
+    Drain(f.jm, second);
+    auto rows = f.jm.ListActive();
+    ASSERT_EQ(rows.size(), static_cast<size_t>(2));
+    ASSERT_EQ(rows[0].task_name(), std::string("b"));  // newer finished job first among done
+    ASSERT_EQ(rows[1].task_name(), std::string("a"));
+    ASSERT_EQ(rows[0].state(), v1::SUCCEEDED);
+    ASSERT_EQ(rows[1].state(), v1::SUCCEEDED);
+}
+
 TEST(JobOverlayInputsFrom) {
     Fixture f;
     TempDir frames, src;

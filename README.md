@@ -19,7 +19,8 @@ Teammates picking up work after M3: see the stream breakdown in [docs/team/TASKS
 - The `zmd` daemon: a gRPC `ClientApi` on an owner-only unix socket, a job manager for static
   task DAGs, an action cache, and local sandboxed execution.
 - `zm run [-o PATH]... -- CMD...` (runs CMD on this machine with the current directory as
-  input and writes its outputs back), `zm status`, `zm monitor` and `zm version`.
+  input and writes its outputs back), `zm status`, `zm monitor` (peers + task table that
+  keeps WORKING/DONE rows) and `zm version`.
 
 **What does not work yet:** running tasks on other machines, team security, and the SDK. These are milestones M2–M5. Earlier code for a REAPI server, FUSE filesystem, DHT,
 distributed shared memory and GPU offload is parked in [`frozen/`](frozen/README.md). Most of

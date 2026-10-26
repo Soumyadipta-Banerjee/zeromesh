@@ -121,7 +121,8 @@ message JobStatus {
   bool done = 5;
 }
 
-// Live task row for ClientApi.ListActivity / zm monitor.
+// One row in ClientApi.ListActivity (zm status / zm monitor).
+// Finished tasks stay listed (SUCCEEDED/FAILED/CANCELLED) until retention drops them.
 message ActiveTask {
   string job_id = 1;          // requester-side job id (empty for donor-only view)
   string task_name = 2;

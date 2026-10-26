@@ -48,3 +48,43 @@ TEST(Tui_NoPeers) {
     zeromesh::cli::RenderStatus(list, out, false);
     ASSERT_TRUE(out.str().find("(no peers yet)") != std::string::npos);
 }
+
+zeromesh::v1::ActiveTask Act(const std::string& role, const std::string& name, zeromesh::v1::TaskState state) {
+    zeromesh::v1::ActiveTask t;
+    t.set_role(role);
+    t.set_task_name(name);
+    t.set_state(state);
+    t.set_job_id("abcdef0123456789");
+    t.set_cores(2);
+    t.add_argv("blender");
+    t.add_argv("-b");
+    return t;
+}
+
+TEST(Tui_ActivityIdle) {
+    zeromesh::v1::ActivitySnapshot snap;
+    std::ostringstream out;
+    zeromesh::cli::RenderActivity(snap, out, false);
+    ASSERT_TRUE(out.str().find("(idle — no tasks yet)") != std::string::npos);
+}
+
+TEST(Tui_ActivityKeepsWorkingAndDone) {
+    zeromesh::v1::ActivitySnapshot snap;
+    *snap.add_tasks() = Act("submitted", "frames_1_8", zeromesh::v1::RUNNING);
+    *snap.add_tasks() = Act("submitted", "frames_9_16", zeromesh::v1::SUCCEEDED);
+    *snap.add_tasks() = Act("executing", "frames_17_24", zeromesh::v1::FAILED);
+
+    std::ostringstream out;
+    zeromesh::cli::RenderActivity(snap, out, false);
+    const std::string s = out.str();
+
+    ASSERT_TRUE(s.find("1 working · 1 done · 1 failed/cancel") != std::string::npos);
+    ASSERT_TRUE(s.find("WORKING") != std::string::npos);
+    ASSERT_TRUE(s.find("DONE") != std::string::npos);
+    ASSERT_TRUE(s.find("FAILED") != std::string::npos);
+    ASSERT_TRUE(s.find("frames_1_8") != std::string::npos);
+    ASSERT_TRUE(s.find("frames_9_16") != std::string::npos);  // finished row stays listed
+    ASSERT_TRUE(s.find("submitted") != std::string::npos);
+    ASSERT_TRUE(s.find("executing") != std::string::npos);
+    ASSERT_TRUE(s.find('\033') == std::string::npos);
+}

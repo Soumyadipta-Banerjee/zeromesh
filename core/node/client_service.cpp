@@ -547,11 +547,15 @@ grpc::Status ClientService::ListActivity(grpc::ServerContext*, const v1::Empty*,
         for (const auto& item : local_executor_->ListActive()) {
             v1::ActiveTask a;
             a.set_task_name(item.spec.name().empty() ? item.task_id : item.spec.name());
-            a.set_state(item.started ? v1::RUNNING : v1::QUEUED);
+            a.set_state(item.state);
             a.set_role("executing");
             for (const auto& arg : item.spec.argv()) a.add_argv(arg);
             a.set_cores(item.spec.resources().cores() > 0 ? item.spec.resources().cores() : 1);
-            a.set_detail(item.started ? "sandbox" : "queued");
+            if (item.state == v1::SUCCEEDED || item.state == v1::FAILED || item.state == v1::CANCELLED) {
+                a.set_detail("finished");
+            } else {
+                a.set_detail(item.started ? "sandbox" : "queued");
+            }
             *reply->add_tasks() = std::move(a);
         }
     }

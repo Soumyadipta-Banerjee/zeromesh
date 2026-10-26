@@ -83,19 +83,13 @@ zm-render shot.blend --frames 1-8 --env mirror -o /tmp/mirror_out
 
 Requires FUSE on the donor and the env-mirror plugin loaded by `zmd`.
 
-## Live monitor (both machines)
-
-`zm monitor` now shows **peers** and a **Live tasks** table:
-
-- `submitted` — jobs this node owns (requester view: every chunk of `zm-render`)
-- `executing` — sandboxes running on this node right now (donor view: Blender argv)
+## Monitor
 
 ```bash
-# on each machine, in its own terminal:
-./build/zm monitor
+./build/zm monitor   # peers + Tasks (WORKING / DONE stay listed)
 ```
 
-Then run `zm-render` on the requester; both monitors should fill with RUNNING tasks.
+Use `--remote-only` on `zm-render` / `zm run` to force peer donors.
 
 ## Local smoke (one machine, no friend)
 
