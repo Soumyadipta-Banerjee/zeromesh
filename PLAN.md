@@ -42,7 +42,7 @@ small core, with features attached through narrow plugin interfaces.
 | `zmd` daemon, ClientApi, job manager, local execution | Real (`core/node`, `zmd/`); tests in `tests/integration/test_local_daemon.py` |
 | NodeApi, placement, team security | Real (`core/node`, `core/sched`); wired in `zmd` (Task 17); see M3 below |
 | FUSE filesystem | Frozen until M5 (`env-mirror` plugin) |
-| REAPI front-end | Frozen until M6 (it was a print-only stub) |
+| REAPI front-end | Plugin on `stream/m6-reapi` (`plugins/frontend-reapi`); enable with `ZM_ENABLE_REAPI=1`. Tick M6 when `integration_reapi` passes with `recc`. |
 | DHT, DSM, GPU, Byzantine/TPM, torrent GUI | Frozen; see [`frozen/README.md`](frozen/README.md) |
 
 ## 3. Milestones
@@ -61,8 +61,8 @@ Each milestone is done **only** when its acceptance test passes.
   *Acceptance:* `zm run --each 'cases/*' -- ./sim {}` with 20 CPU-bound cases (each ~30 s single-threaded, inputs under 10 MB) on 3 machines completes in under 45% of the single-machine time. Killing one donor's `zmd` mid-job still completes all 20 correctly.
 - [ ] **M5: SDK + first app + mirror mode.** Python SDK, `zm-render`, and the `env-mirror` plugin.
   *Acceptance:* `zm-render shot.blend --frames 1-240` on 4 machines produces the same frames as a local render. A donor without Blender installed renders frames through mirror mode.
-- [x] **M6: REAPI front-end plugin.**
-  *Acceptance:* `integration_reapi` passes: CMake compile actions run on a peer, the resulting executable runs, and a direct recc link action is pinned to the requester.
+- [ ] **M6: REAPI front-end plugin.**
+  *Acceptance:* a CMake project builds through `recc` against `zmd`, with compile actions observed running on a peer. (`integration_reapi` automates this once recc is installed.)
 
 ## 4. Architectural Decision Records
 

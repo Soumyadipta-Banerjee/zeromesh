@@ -1,8 +1,6 @@
 #pragma once
 
-// frontend-reapi: exposes a REAPI v2 front-end on top of the core's ClientApi.
-// M6 stream. This is an early scaffold: the plugin loads and starts/stops with
-// zmd, but the full REAPI service implementation is still in progress.
+// frontend-reapi: REAPI v2 front-end on top of the core's ClientApi (M6).
 
 #include "plugin/plugin.hpp"
 

@@ -10,7 +10,15 @@ if command -v recc >/dev/null 2>&1; then
 else
     echo "Installing recc via package manager..."
     if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update && sudo apt-get install -y recc
+        # Debian/Ubuntu do not currently ship `recc` in the main archive.
+        if apt-cache show recc >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y recc
+        else
+            echo "recc is not in apt on this distro."
+            echo "Build/install from https://gitlab.com/BuildGrid/buildbox/buildbox (recc),"
+            echo "or use a distro that packages it (Fedora/dnf, Homebrew, Arch AUR)."
+            exit 1
+        fi
     elif command -v dnf >/dev/null 2>&1; then
         sudo dnf install -y recc
     elif command -v pacman >/dev/null 2>&1; then
@@ -25,7 +33,7 @@ else
     elif command -v brew >/dev/null 2>&1; then
         brew install recc
     else
-        echo "Please install recc manually from: https://gitlab.com/BuildGrid/recc"
+        echo "Please install recc manually from: https://gitlab.com/BuildGrid/buildbox/buildbox"
         exit 1
     fi
 fi

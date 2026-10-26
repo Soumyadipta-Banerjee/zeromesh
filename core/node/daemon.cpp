@@ -320,7 +320,10 @@ int Daemon::Run() {
             grpc::CreateChannel("unix:" + sock.string(), grpc::InsecureChannelCredentials()));
         for (plugin::IFrontend* fe : registry->Frontends()) {
             plugin::PluginConfig cfg;
-            std::string err;
+            // Front-ends opt in via env until zmd grows a real config file.
+            if (const char* en = std::getenv("ZM_ENABLE_REAPI")) {
+                cfg.values["enabled"] = en;
+            }
             try {
                 if (!fe->Start(*frontend_handle, cfg)) {
                     std::cerr << "zmd: front-end '" << fe->Name() << "' failed to start\n";

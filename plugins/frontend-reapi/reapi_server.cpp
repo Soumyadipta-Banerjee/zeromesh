@@ -7,8 +7,10 @@
 
 #include <google/protobuf/any.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -446,8 +448,8 @@ grpc::Status ExecutionServiceImpl::Execute(grpc::ServerContext*,
         }
     }
 
-    // Cache the successful result.
-    {
+    // Cache successful results only (REAPI ActionCache semantics).
+    if (ar.exit_code() == 0) {
         reapi::UpdateActionResultRequest uar;
         *uar.mutable_action_digest() = req->action_digest();
         *uar.mutable_action_result() = ar;

@@ -9,6 +9,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>

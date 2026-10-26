@@ -15,7 +15,7 @@ put your name next to it in the table below (via a PR), and start.
 | [M5a: Python SDK](#m5a-python-sdk-sdkpython) | _open_ | M |
 | [M5b: zm-render](#m5b-zm-render-appszm-render) | _open_ | M |
 | [M5c: env-mirror](#m5c-env-mirror-pluginsenv-mirror) | Shravan (suggested) | L |
-| [M6: frontend-reapi](#m6-frontend-reapi-pluginsfrontend-reapi) | complete | L |
+| [M6: frontend-reapi](#m6-frontend-reapi-pluginsfrontend-reapi) | in review (`stream/m6-reapi`) | L |
 | [Ops: CI, packaging, acceptance, docs](#ops-ci-packaging-acceptance-docs) | _open_ | M |
 
 Sizes are rough: S is a few days, M is one to two weeks, L is two weeks or more for one person.
@@ -333,7 +333,7 @@ bubblewrap, C++20, careful security thinking about path handling and symlinks.
 
 ## M6: frontend-reapi (`plugins/frontend-reapi`)
 
-**Owner:** completed. **Size:** L. **Branch:** `restructure/core-plugin-final`.
+**Owner:** in review. **Size:** L. **Branch:** `stream/m6-reapi`.
 
 **Goal.** Build a REAPI v2 front-end as an `IFrontend` plugin, so `recc`, Bazel and CMake
 builds can send compile actions to the team through `zmd`. Revive what is useful in
@@ -361,11 +361,9 @@ developers can then use ZeroMesh without changing their build.
   `ByteStream.Read` / `Write`, `ActionCache.GetActionResult` / `UpdateActionResult`,
   `Execution.Execute` / `WaitExecution`.
 
-**Contract gap (the core owner does this first):** `plugin::ClientApiHandle` is only
-forward-declared in `core/plugin/plugin.hpp`, and `plugin::Registry` creates front-ends but
-has no accessor, and `zmd` never starts them. The core owner defines the handle (for example
-the socket path plus a `ClientApi` stub) and makes `zmd` call `Start`/`Stop` on loaded
-front-ends.
+**Contract (done on this branch):** `plugin::ClientApiHandle` is defined in
+`core/plugin/client_api_handle.hpp` (unix socket + `ClientApi` stub). `Registry::Frontends()`
+exposes loaded front-ends; `zmd` calls `Start`/`Stop` after the ClientApi server is up.
 
 **Work items:**
 - [x] Map a REAPI `Action` + `Command` to a `TaskSpec`. File blob digests are the same (SHA-256 of
@@ -373,7 +371,7 @@ front-ends.
   formats. Translate the input root, and translate outputs back into an `ActionResult`.
 - [x] Pin link and archive actions locally: when `IsCriticalPath(argv)` is true, set
   `may_run_remote=false`. This heuristic lives only in the plugin, never in `core/sched`.
-- [x] Disabled by default. Enabled by config, and listening on loopback only.
+- [x] Disabled by default. Enabled by `ZM_ENABLE_REAPI=1` / PluginConfig, listening on loopback only.
 - [x] Update `scripts/install_recc.sh` with apt, dnf, brew and Arch package-manager guidance.
 - [x] Remove the revived `frozen/reapi/` and `frozen/scheduler/` directories and document
   their migration in `frozen/README.md`.
@@ -382,7 +380,7 @@ front-ends.
 `proto/zeromesh/v1/` without agreement, other plugins.
 
 **Acceptance test:**
-1. [x] Automated integration (`meson test -C build integration_reapi`, skipped with a clear message when
+1. [ ] Automated integration (`meson test -C build integration_reapi`, skipped with a clear message when
    `recc` isn't installed): two `zmd` processes in one team, with the plugin loaded on A.
    Build `tests/data/reapi-hello` (4 or more `.cpp` files) with
    `RECC_SERVER=127.0.0.1:8980 cmake -DCMAKE_CXX_COMPILER_LAUNCHER=recc … && cmake --build`.
@@ -390,7 +388,7 @@ front-ends.
    action submitted through `recc` is pinned to A. `RECC_LINK` is scoped to that action because
    this `recc` release leaves CMake's normal final link local.
 2. [x] Unit tests cover compiler-driver links, linker aliases, archives, and compile-only actions.
-3. [x] Two-node manual acceptance behavior is exercised by the automated integration test.
+3. [ ] Two-node manual acceptance is covered once `integration_reapi` is green with `recc` installed.
 
 **Suggested skills:** REAPI v2 and the Bazel remote execution model, gRPC C++ servers,
 protobuf, CMake and recc.
