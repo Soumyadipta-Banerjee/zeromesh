@@ -50,6 +50,7 @@ core_sources = files(
   'src/ui/tui.cpp',
   'core/plugin/loader.cpp',
   'core/node/task_key.cpp',
+  'plugins/env-host/env_host.cpp',
 )
 
 zm_core = static_library('zm_core', core_sources,
@@ -78,6 +79,7 @@ test_bin = executable('unit_tests',
     'tests/unit/test_plugin.cpp',
     'tests/unit/test_task_key.cpp',
     'tests/unit/test_ignore.cpp',
+    'tests/unit/test_env_host.cpp',
   ),
   include_directories: inc,
   link_with: zm_core,
@@ -89,7 +91,11 @@ fake_env = shared_module('zm_fake_env', 'tests/plugins/fake_env.cpp',
 fake_env_badabi = shared_module('zm_fake_env_badabi', 'tests/plugins/fake_env.cpp',
   include_directories: inc, name_prefix: 'lib', cpp_args: ['-DFAKE_ABI=99'])
 
+env_host_module = shared_module('zm_env_host',
+  files('plugins/env-host/env_host.cpp', 'plugins/env-host/entry.cpp'),
+  include_directories: inc, name_prefix: 'lib')
+
 test('all_unit_tests', test_bin,
-  depends: [fake_env, fake_env_badabi],
+  depends: [fake_env, fake_env_badabi, env_host_module],
   env: {'ZM_TEST_PLUGIN_DIR': meson.current_build_dir()},
 )
