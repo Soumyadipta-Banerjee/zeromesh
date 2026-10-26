@@ -1,8 +1,8 @@
-#include "discovery/peer_table.hpp"
+#include "net/peer_table.hpp"
 
 #include <algorithm>
 
-namespace zeromesh::discovery {
+namespace zeromesh::net {
 
 void PeerTable::Upsert(Peer peer) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -67,35 +67,6 @@ std::vector<Peer> PeerTable::ListActive(std::chrono::milliseconds max_age) const
     return active;
 }
 
-std::optional<Peer> PeerTable::SelectBestWorker() const {
-    auto active = ListActive();
-    if (active.empty()) {
-        return std::nullopt;
-    }
-
-    // Filter out donors with critically low battery (< 20% and not charging)
-    std::vector<Peer> candidates;
-    for (const auto& peer : active) {
-        if (peer.battery_pct >= 0 && peer.battery_pct < 20 && !peer.is_charging) {
-            continue; // protect low-battery donor
-        }
-        candidates.push_back(peer);
-    }
-
-    if (candidates.empty()) {
-        candidates = std::move(active);
-    }
-
-    // Sort by compute headroom: available cores weighted by idle capacity
-    std::sort(candidates.begin(), candidates.end(), [](const Peer& a, const Peer& b) {
-        double score_a = static_cast<double>(a.cores) * (100.0 - a.cpu_load_pct);
-        double score_b = static_cast<double>(b.cores) * (100.0 - b.cpu_load_pct);
-        return score_a > score_b;
-    });
-
-    return candidates.front();
-}
-
 size_t PeerTable::PruneStale(std::chrono::milliseconds max_age) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto cutoff = std::chrono::steady_clock::now() - max_age;
@@ -117,4 +88,4 @@ size_t PeerTable::Count() const {
     return peers_.size();
 }
 
-} // namespace zeromesh::discovery
+} // namespace zeromesh::net
