@@ -5,6 +5,14 @@ for a live demo. Branch: `demo/m5-all`. Worktree: `../zeromesh-demo`.
 
 ## One-time on each machine
 
+On this laptop the deps live in `../zeromesh/.deps`. After build:
+
+```bash
+source scripts/demo_env.sh   # PKG_CONFIG / LD_LIBRARY_PATH / venv / PATH
+```
+
+## One-time on each machine (full)
+
 ```bash
 git clone <repo> zeromesh && cd zeromesh
 git checkout demo/m5-all          # or copy this worktree
