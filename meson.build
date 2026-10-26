@@ -22,7 +22,7 @@ python3 = find_program('python3')
 
 subdir('proto/zeromesh/v1')
 
-inc = include_directories('src', 'core', '.', 'proto')
+inc = include_directories('core', '.', 'proto')
 
 zm_proto = static_library('zm_proto', zm_proto_cpp,
   include_directories: inc,
@@ -49,7 +49,6 @@ core_sources = files(
   'core/exec/landlock.cpp',
   'core/exec/priority.cpp',
   'core/exec/sandbox_runner.cpp',
-  'src/ui/tui.cpp',
   'core/plugin/loader.cpp',
   'core/node/task_key.cpp',
   'core/net/team.cpp',
@@ -63,6 +62,8 @@ core_sources = files(
   'core/node/action_cache.cpp',
   'core/node/local_executor.cpp',
   'core/node/job_manager.cpp',
+  'core/node/client_service.cpp',
+  'core/node/daemon.cpp',
 )
 
 zm_core = static_library('zm_core', core_sources,
@@ -70,7 +71,21 @@ zm_core = static_library('zm_core', core_sources,
   dependencies: common_deps,
 )
 
-zm_bin = executable('zm', 'src/main.cpp',
+# CLI pieces live in their own library so unit tests can reach the TUI renderer.
+zm_cli = static_library('zm_cli',
+  files('cli/client.cpp', 'cli/run_cmd.cpp', 'cli/status_cmd.cpp', 'cli/tui.cpp'),
+  include_directories: inc,
+  dependencies: common_deps,
+)
+
+zm_bin = executable('zm', 'cli/main.cpp',
+  include_directories: inc,
+  link_with: [zm_cli, zm_core],
+  dependencies: common_deps,
+  install: true,
+)
+
+zmd_bin = executable('zmd', 'zmd/main.cpp',
   include_directories: inc,
   link_with: zm_core,
   dependencies: common_deps,
@@ -99,7 +114,7 @@ test_bin = executable('unit_tests',
     'tests/unit/test_admission.cpp',
   ),
   include_directories: inc,
-  link_with: zm_core,
+  link_with: [zm_cli, zm_core],
   dependencies: common_deps,
 )
 
@@ -115,4 +130,16 @@ env_host_module = shared_module('zm_env_host',
 test('all_unit_tests', test_bin,
   depends: [fake_env, fake_env_badabi, env_host_module],
   env: {'ZM_TEST_PLUGIN_DIR': meson.current_build_dir()},
+)
+
+# End-to-end tests against real zmd/zm binaries (plain unittest + grpcio).
+test('integration_local', python3,
+  args: [files('tests/integration/test_local_daemon.py')],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.current_build_dir() / 'proto',
+  },
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 120,
+  is_parallel: false,
 )
