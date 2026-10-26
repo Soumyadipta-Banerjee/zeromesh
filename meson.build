@@ -163,6 +163,8 @@ env_mirror_module = shared_module('zm_env_mirror',
 test('all_unit_tests', test_bin,
   depends: [fake_env, fake_env_badabi, env_host_module],
   env: {'ZM_TEST_PLUGIN_DIR': meson.current_build_dir()},
+  # M4 placer retry tests sleep through real donor loss/drain (~20s together).
+  timeout: 120,
 )
 
 # End-to-end tests against real zmd/zm binaries (plain unittest + grpcio).
@@ -185,6 +187,17 @@ test('integration_remote', python3,
   },
   depends: [zmd_bin, zm_bin] + zm_proto_py,
   timeout: 180,
+  is_parallel: false,
+)
+
+test('integration_fanout', python3,
+  args: [files('tests/integration/test_fanout.py')],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.current_build_dir() / 'proto',
+  },
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 240,
   is_parallel: false,
 )
 

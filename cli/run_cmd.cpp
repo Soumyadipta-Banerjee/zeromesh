@@ -1,6 +1,7 @@
 #include "cli/run_cmd.hpp"
 
 #include <fcntl.h>
+#include <glob.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/eventfd.h>
@@ -13,8 +14,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
 #include <iostream>
+#include <map>
 #include <string_view>
 #include <thread>
 
@@ -22,11 +23,15 @@ namespace zeromesh::cli {
 
 const char* const kRunUsage =
     "Usage: zm run [-o PATH]... [--remote-only|--local-only] [--cores N] [--mem SIZE]\n"
-    "              [--env NAME] [--force-large] -- COMMAND [ARGS...]\n"
+    "              [--env NAME] [--force-large] [--each GLOB] -- COMMAND [ARGS...]\n"
     "\n"
     "Uploads the current directory, runs COMMAND in a sandbox (anywhere in the team), streams\n"
     "its output and writes its outputs back. Without -o, every file the command creates or\n"
-    "modifies is an output. Exits with the command's exit code.\n";
+    "modifies is an output. Exits with the command's exit code.\n"
+    "\n"
+    "With --each GLOB, one task runs per match. Every {} in COMMAND is replaced by the match\n"
+    "path relative to the current directory. All tasks share one upload. Exit is non-zero if\n"
+    "any task failed; failures are listed on stderr.\n";
 
 namespace {
 
@@ -126,7 +131,88 @@ void ReplayLogs(Client& client, const v1::TaskResult& r) {
     }
 }
 
+void FillTaskResources(v1::TaskSpec* t, const RunOptions& opts) {
+    t->mutable_env_spec()->set_name(opts.env);
+    if (opts.cores > 0) t->mutable_resources()->set_cores(opts.cores);
+    if (opts.mem_bytes > 0) t->mutable_resources()->set_mem_bytes(opts.mem_bytes);
+    t->mutable_policy()->set_may_run_local(!opts.remote_only);
+    t->mutable_policy()->set_may_run_remote(!opts.local_only);
+}
+
+int ResultExitCode(const v1::TaskResult& r) {
+    if (r.cancelled()) return 130;
+    if (!r.error().empty() || r.timed_out()) return 1;
+    return r.exit_code();
+}
+
+std::string DescribeFailure(const std::string& name, const v1::TaskResult& r) {
+    if (r.cancelled()) return name + ": cancelled";
+    if (!r.error().empty()) return name + ": " + r.error();
+    if (r.timed_out()) return name + ": timed out";
+    return name + ": exit code " + std::to_string(r.exit_code());
+}
+
 } // namespace
+
+std::string ReplaceBraces(std::string_view s, std::string_view replacement) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        if (i + 1 < s.size() && s[i] == '{' && s[i + 1] == '}') {
+            out.append(replacement);
+            i += 2;
+        } else {
+            out.push_back(s[i]);
+            ++i;
+        }
+    }
+    return out;
+}
+
+bool ExpandEachGlob(const std::string& pattern, const std::filesystem::path& cwd,
+                    std::vector<std::string>* matches, std::string* error) {
+    if (pattern.empty()) {
+        *error = "--each needs a non-empty glob";
+        return false;
+    }
+    const std::filesystem::path abs =
+        (std::filesystem::path(pattern).is_absolute()) ? std::filesystem::path(pattern) : cwd / pattern;
+
+    glob_t g {};
+    const int rc = glob(abs.c_str(), GLOB_NOSORT | GLOB_ERR, nullptr, &g);
+    if (rc == GLOB_NOMATCH) {
+        globfree(&g);
+        *error = "--each matched no files: " + pattern;
+        return false;
+    }
+    if (rc != 0) {
+        globfree(&g);
+        *error = "--each glob failed: " + pattern;
+        return false;
+    }
+
+    matches->clear();
+    matches->reserve(g.gl_pathc);
+    std::error_code ec;
+    for (size_t i = 0; i < g.gl_pathc; ++i) {
+        std::filesystem::path p = g.gl_pathv[i];
+        std::filesystem::path rel = std::filesystem::relative(p, cwd, ec);
+        if (ec) {
+            globfree(&g);
+            *error = "--each: cannot relativize " + p.string() + ": " + ec.message();
+            return false;
+        }
+        matches->push_back(rel.generic_string());
+    }
+    globfree(&g);
+    std::sort(matches->begin(), matches->end());
+    matches->erase(std::unique(matches->begin(), matches->end()), matches->end());
+    if (matches->empty()) {
+        *error = "--each matched no files: " + pattern;
+        return false;
+    }
+    return true;
+}
 
 std::optional<int64_t> ParseSize(const std::string& s) {
     size_t i = 0;
@@ -199,6 +285,10 @@ std::optional<RunOptions> ParseRunArgs(const std::vector<std::string>& args, std
             o.env = *v;
         } else if (a == "--force-large") {
             o.force_large = true;
+        } else if (a == "--each") {
+            auto v = value(a);
+            if (!v) return std::nullopt;
+            o.each_glob = *v;
         } else if (!a.empty() && a[0] == '-') {
             *error = "unknown option '" + a + "'";
             return std::nullopt;
@@ -226,6 +316,15 @@ int RunCommand(Client& client, const RunOptions& opts) {
         return 1;
     }
 
+    std::vector<std::string> each_matches;
+    if (opts.each_glob) {
+        std::string err;
+        if (!ExpandEachGlob(*opts.each_glob, cwd, &each_matches, &err)) {
+            std::cerr << "zm: " << err << "\n";
+            return 1;
+        }
+    }
+
     v1::UploadTreeReply up;
     {
         grpc::ClientContext ctx;
@@ -237,19 +336,39 @@ int RunCommand(Client& client, const RunOptions& opts) {
     }
 
     v1::JobSpec job;
-    job.set_name("zm run");
-    v1::TaskSpec* t = job.add_tasks();
-    t->set_name("run");
-    for (const auto& a : opts.argv) t->add_argv(a);
-    *t->mutable_input_root() = up.root();
-    t->set_working_dir(".");
-    for (const auto& o : opts.outputs) t->add_outputs(o);
-    t->set_capture_changed(opts.outputs.empty());
-    t->mutable_env_spec()->set_name(opts.env);
-    if (opts.cores > 0) t->mutable_resources()->set_cores(opts.cores);
-    if (opts.mem_bytes > 0) t->mutable_resources()->set_mem_bytes(opts.mem_bytes);
-    t->mutable_policy()->set_may_run_local(!opts.remote_only);
-    t->mutable_policy()->set_may_run_remote(!opts.local_only);
+    job.set_name(opts.each_glob ? "zm run --each" : "zm run");
+
+    struct TaskSlot {
+        std::string name;
+        std::string label;  // shown in failure lists (--each path, else "run")
+    };
+    std::vector<TaskSlot> slots;
+
+    auto add_task = [&](const std::string& name, const std::string& label,
+                        const std::vector<std::string>& argv) {
+        v1::TaskSpec* t = job.add_tasks();
+        t->set_name(name);
+        for (const auto& a : argv) t->add_argv(a);
+        *t->mutable_input_root() = up.root();
+        t->set_working_dir(".");
+        for (const auto& o : opts.outputs) t->add_outputs(o);
+        t->set_capture_changed(opts.outputs.empty());
+        FillTaskResources(t, opts);
+        slots.push_back({name, label});
+    };
+
+    if (each_matches.empty()) {
+        add_task("run", "run", opts.argv);
+    } else {
+        for (size_t i = 0; i < each_matches.size(); ++i) {
+            const std::string& match = each_matches[i];
+            std::vector<std::string> argv;
+            argv.reserve(opts.argv.size());
+            for (const auto& a : opts.argv) argv.push_back(ReplaceBraces(a, match));
+            // Stable unique name; the match path is the user-facing label.
+            add_task("each-" + std::to_string(i), match, argv);
+        }
+    }
 
     std::string job_id;
     {
@@ -260,7 +379,7 @@ int RunCommand(Client& client, const RunOptions& opts) {
         job_id = reply.job_id();
     }
 
-    std::optional<v1::TaskResult> result;
+    std::map<std::string, v1::TaskResult> results;
     {
         CancelOnInterrupt guard(client.stub(), job_id);
         grpc::ClientContext ctx;
@@ -271,45 +390,83 @@ int RunCommand(Client& client, const RunOptions& opts) {
         while (reader->Read(&ev)) {
             if (ev.log_fd() == 1 || ev.log_fd() == 2) {
                 WriteAll(ev.log_fd(), ev.log_chunk());
-            } else if (ev.task_name() == "run" && ev.has_result() &&
+            } else if (ev.has_result() &&
                        (ev.state() == v1::SUCCEEDED || ev.state() == v1::FAILED || ev.state() == v1::CANCELLED)) {
-                result = ev.result();
+                results[ev.task_name()] = ev.result();
+            } else if (ev.state() == v1::QUEUED && ev.detail().starts_with("retry ")) {
+                std::cerr << "zm: " << ev.task_name() << ": " << ev.detail() << "\n";
             }
         }
         grpc::Status s = reader->Finish();
-        if (!s.ok() && !result) return ReportRpcError("watching the job failed", s);
-    }
-    if (!result) {
-        std::cerr << "zm: the job ended without a result\n";
-        return 1;
+        if (!s.ok() && results.size() < slots.size()) return ReportRpcError("watching the job failed", s);
     }
 
-    if (result->cache_hit()) ReplayLogs(client, *result);
-    if (result->cancelled()) {
-        std::cerr << "zm: cancelled\n";
-        return 130;
-    }
-    if (!result->error().empty()) {
-        std::cerr << "zm: " << result->error() << "\n";
-        return 1;
-    }
-    if (result->timed_out()) {
-        std::cerr << "zm: the command timed out\n";
-        return 1;
-    }
-
-    {
+    // Single-task `zm run` keeps the old quiet exit-code behaviour. `--each` lists failures.
+    const bool multi = slots.size() > 1 || opts.each_glob.has_value();
+    std::vector<std::string> failures;
+    int exit_code = 0;
+    for (const auto& slot : slots) {
+        auto it = results.find(slot.name);
+        if (it == results.end()) {
+            if (!multi) {
+                std::cerr << "zm: the job ended without a result\n";
+                return 1;
+            }
+            failures.push_back(slot.label + ": the job ended without a result");
+            if (exit_code == 0) exit_code = 1;
+            continue;
+        }
+        const v1::TaskResult& r = it->second;
+        if (r.cache_hit()) ReplayLogs(client, r);
+        if (!multi) {
+            if (r.cancelled()) {
+                std::cerr << "zm: cancelled\n";
+                return 130;
+            }
+            if (!r.error().empty()) {
+                std::cerr << "zm: " << r.error() << "\n";
+                return 1;
+            }
+            if (r.timed_out()) {
+                std::cerr << "zm: the command timed out\n";
+                return 1;
+            }
+            grpc::ClientContext ctx;
+            v1::FetchRequest req;
+            req.set_job_id(job_id);
+            req.set_task_name(slot.name);
+            req.set_dest_path(cwd.string());
+            req.set_only_changed(true);
+            v1::FetchReply reply;
+            grpc::Status s = client.stub().FetchOutputs(&ctx, req, &reply);
+            if (!s.ok()) return ReportRpcError("cannot write outputs back", s);
+            return r.exit_code();
+        }
+        const int code = ResultExitCode(r);
+        if (code != 0) {
+            failures.push_back(DescribeFailure(slot.label, r));
+            if (exit_code == 0) exit_code = code;
+            continue;
+        }
         grpc::ClientContext ctx;
         v1::FetchRequest req;
         req.set_job_id(job_id);
-        req.set_task_name("run");
+        req.set_task_name(slot.name);
         req.set_dest_path(cwd.string());
         req.set_only_changed(true);
         v1::FetchReply reply;
         grpc::Status s = client.stub().FetchOutputs(&ctx, req, &reply);
-        if (!s.ok()) return ReportRpcError("cannot write outputs back", s);
+        if (!s.ok()) {
+            failures.push_back(slot.label + ": cannot write outputs back: " + s.error_message());
+            if (exit_code == 0) exit_code = 1;
+        }
     }
-    return result->exit_code();
+
+    if (!failures.empty()) {
+        std::cerr << "zm: " << failures.size() << " task(s) failed:\n";
+        for (const auto& f : failures) std::cerr << "  " << f << "\n";
+    }
+    return exit_code;
 }
 
 } // namespace zeromesh::cli

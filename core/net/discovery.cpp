@@ -314,6 +314,16 @@ void Discovery::Send(const std::string& msg) const {
     close(sock);
 }
 
+void Discovery::SetLocalState(PeerState state) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    local_state_ = state;
+}
+
+PeerState Discovery::local_state() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return local_state_;
+}
+
 void Discovery::AnnounceNow() {
     const auto team = Team();
     if (!team) return;
@@ -332,6 +342,7 @@ void Discovery::AnnounceNow() {
         a.telemetry.mem_available = config_.ram_bytes;
     }
     a.arch = a.telemetry.arch.empty() ? arch_ : a.telemetry.arch;
+    a.state = local_state();
 
     Send(FormatAnnouncement(a, *team));
 }
@@ -339,6 +350,7 @@ void Discovery::AnnounceNow() {
 void Discovery::BroadcastNodeDraining(const std::string& reason) {
     const auto team = Team();
     if (!team) return;
+    SetLocalState(PeerState::Draining);
     Send(FormatDrain(config_.node_id, reason, *team));
 }
 

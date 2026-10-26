@@ -114,6 +114,41 @@ int NodeService::CoresInUseLocked() const {
     return n;
 }
 
+void NodeService::SetDraining(bool draining, std::string reason) {
+    std::lock_guard lock(mu_);
+    draining_ = draining;
+    drain_reason_ = draining ? std::move(reason) : std::string{};
+}
+
+bool NodeService::IsDraining() const {
+    std::lock_guard lock(mu_);  // mu_ is mutable
+    return draining_;
+}
+
+std::vector<std::string> NodeService::RequestersWithWork() const {
+    std::lock_guard lock(mu_);
+    std::set<std::string> ids;
+    for (const auto& [key, _] : reserved_) ids.insert(key.first);
+    for (const auto& [key, _] : running_) ids.insert(key.first);
+    return {ids.begin(), ids.end()};
+}
+
+int NodeService::CancelPreemptible() {
+    std::vector<std::string> exec_ids;
+    {
+        std::lock_guard lock(mu_);
+        for (const auto& [key, r] : running_) {
+            if (r.preemptible) exec_ids.push_back(r.exec_id);
+        }
+        // Drop reservations so requesters cannot start a run after we drain.
+        reserved_.clear();
+    }
+    for (const auto& id : exec_ids) {
+        if (executor_) executor_->Cancel(id);
+    }
+    return static_cast<int>(exec_ids.size());
+}
+
 grpc::Status NodeService::RequirePinned(const grpc::ServerContext& ctx, std::string* peer_node_id) const {
     std::string fp = net::PeerFingerprint(ctx);
     if (fp.empty()) return Denied("no client certificate");
@@ -220,6 +255,9 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
 
     std::lock_guard lock(mu_);
     PurgeExpiredLocked();
+    if (draining_) {
+        return reject(drain_reason_.empty() ? "node is draining" : "node is draining: " + drain_reason_);
+    }
     const TaskKey key{peer, req->task_id()};
     if (running_.contains(key)) return reject("task " + req->task_id() + " is already running here");
     reserved_.erase(key);  // a repeated offer replaces the old reservation
@@ -303,7 +341,8 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
         if (it == reserved_.end()) return no_reservation();
         spec = std::move(it->second.spec);
         reserved_.erase(it);
-        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1)};
+        const bool preemptible = !spec.policy().has_preemptible() || spec.policy().preemptible();
+        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible};
     }
 
     auto stream = std::make_shared<RunStream>();
