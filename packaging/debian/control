@@ -1,0 +1,15 @@
+Package: zeromesh
+Version: 0.1.0-1
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: ZeroMesh Maintainers <maintainers@zeromesh.net>
+Depends: libc6 (>= 2.34), libprotobuf32t64 | libprotobuf-dev, libgrpc++1.51t64 | libgrpc++-dev, libsodium23 | libsodium-dev, libssl3 | libssl-dev, bubblewrap, python3 (>= 3.9), python3-protobuf, python3-grpcio
+Description: Zero-setup peer-to-peer compute and storage mesh daemon and CLI
+ ZeroMesh pools idle Linux machines on a LAN into a single, low-latency compute
+ mesh. It features content-addressable caching, mTLS authentication, sandbox
+ execution, and a pluggable architecture.
+ .
+ Firewall ports:
+  - 8981/tcp: NodeApi mutual TLS remote execution
+  - 8988/udp: Multicast team discovery

@@ -96,6 +96,11 @@ zmd_bin = executable('zmd', 'zmd/main.cpp',
   install: true,
 )
 
+install_data('packaging/systemd/zmd.service',
+  install_dir: get_option('prefix') / 'lib/systemd/user',
+)
+
+
 test_bin = executable('unit_tests',
   files(
     'tests/unit/test_main.cpp',

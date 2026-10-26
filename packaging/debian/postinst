@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        echo "ZeroMesh installed successfully."
+        echo ""
+        echo "To run the ZeroMesh daemon as your user:"
+        echo "  systemctl --user daemon-reload"
+        echo "  systemctl --user enable --now zmd"
+        echo ""
+        echo "To allow zmd to continue running while logged out:"
+        echo "  loginctl enable-linger \$USER"
+        echo ""
+        echo "Network ports:"
+        echo "  - TCP 8981 (NodeApi mTLS communications)"
+        echo "  - UDP 8988 (Team multicast discovery)"
+        ;;
+esac
+
+exit 0
