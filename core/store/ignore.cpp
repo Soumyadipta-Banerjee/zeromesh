@@ -39,6 +39,13 @@ bool GlobSegments(const std::vector<std::string>& pat, size_t pi,
 
 IgnoreRules IgnoreRules::None() { return IgnoreRules{}; }
 
+IgnoreRules IgnoreRules::FromLines(const std::vector<std::string>& lines) {
+    IgnoreRules r;
+    r.Add(".git");
+    for (const auto& line : lines) r.Add(line);
+    return r;
+}
+
 IgnoreRules IgnoreRules::ForRoot(const std::filesystem::path& root) {
     IgnoreRules r;
     r.Add(".git");

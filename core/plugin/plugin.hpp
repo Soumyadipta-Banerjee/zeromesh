@@ -46,10 +46,24 @@ struct Availability {
     std::string reason;
 };
 
+// Provides blob data to plugins that need it (e.g. env-mirror fetches the
+// requester's file chunks). The core supplies an implementation backed by
+// NodeClient::PullBlobs; plugins may define stubs for testing.
+class IBlobSource {
+public:
+    virtual ~IBlobSource() = default;
+    /// Fetches a blob by its SHA-256 hex hash. Returns nullopt on failure.
+    virtual std::optional<std::string> FetchBlob(const std::string& hash) = 0;
+};
+
 struct TaskContext {
     std::string task_id;
     EnvParams env;
     std::filesystem::path scratch_dir;
+    /// Node id of the machine that submitted the task (empty for local tasks).
+    std::string requester_node_id;
+    /// Blob source connected to the requester; null for local / host-env tasks.
+    IBlobSource* blob_source{nullptr};
 };
 
 template <class T>
