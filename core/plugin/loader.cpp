@@ -23,8 +23,14 @@ void Registry::RegisterEnv(std::unique_ptr<IEnvProvider> env) {
     envs_.push_back(std::move(env));
 }
 
+void Registry::RegisterFrontend(std::unique_ptr<IFrontend> frontend) {
+    if (!frontend) return;
+    if (Frontend(frontend->Name()) != nullptr) return;
+    frontends_.push_back(std::move(frontend));
+}
+
 bool Registry::LoadFile(const std::filesystem::path& so, std::string* error) {
-    void* handle = dlopen(so.c_str(), RTLD_NOW | RTLD_LOCAL);
+    void* handle = dlopen(so.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (handle == nullptr) {
         if (error) *error = std::string("dlopen failed: ") + dlerror();
         return false;
@@ -91,6 +97,19 @@ std::vector<std::string> Registry::EnvNames() const {
     std::vector<std::string> names;
     for (const auto& e : envs_) names.emplace_back(e->Name());
     return names;
+}
+
+std::vector<IFrontend*> Registry::Frontends() const {
+    std::vector<IFrontend*> out;
+    for (const auto& f : frontends_) out.push_back(f.get());
+    return out;
+}
+
+IFrontend* Registry::Frontend(std::string_view name) const {
+    for (const auto& f : frontends_) {
+        if (f->Name() == name) return f.get();
+    }
+    return nullptr;
 }
 
 } // namespace zeromesh::plugin

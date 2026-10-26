@@ -13,6 +13,15 @@ else
         sudo apt-get update && sudo apt-get install -y recc
     elif command -v dnf >/dev/null 2>&1; then
         sudo dnf install -y recc
+    elif command -v pacman >/dev/null 2>&1; then
+        if pacman -Si recc >/dev/null 2>&1; then
+            sudo pacman -S --needed recc
+        elif command -v yay >/dev/null 2>&1; then
+            yay -S --needed recc
+        else
+            echo "recc is not in the configured pacman repositories. Install yay, then run: yay -S recc"
+            exit 1
+        fi
     elif command -v brew >/dev/null 2>&1; then
         brew install recc
     else

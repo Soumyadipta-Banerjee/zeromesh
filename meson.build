@@ -50,6 +50,7 @@ core_sources = files(
   'core/exec/priority.cpp',
   'core/exec/sandbox_runner.cpp',
   'core/plugin/loader.cpp',
+  'core/plugin/client_api_handle.cpp',
   'core/node/task_key.cpp',
   'core/net/team.cpp',
   'core/net/identity.cpp',
@@ -93,6 +94,7 @@ zmd_bin = executable('zmd', 'zmd/main.cpp',
   include_directories: inc,
   link_with: zm_core,
   dependencies: common_deps,
+  link_args: ['-rdynamic'],
   install: true,
 )
 
@@ -120,6 +122,8 @@ test_bin = executable('unit_tests',
     'tests/unit/test_node_api.cpp',
     'tests/unit/test_rank.cpp',
     'tests/unit/test_placer.cpp',
+    'tests/unit/test_reapi_heuristics.cpp',
+    'plugins/frontend-reapi/heuristics.cpp',
   ),
   include_directories: inc,
   link_with: [zm_cli, zm_core],
@@ -134,6 +138,32 @@ fake_env_badabi = shared_module('zm_fake_env_badabi', 'tests/plugins/fake_env.cp
 env_host_module = shared_module('zm_env_host',
   files('plugins/env-host/env_host.cpp', 'plugins/env-host/entry.cpp'),
   include_directories: inc, name_prefix: 'lib')
+
+# REAPI v2 proto (used by frontend-reapi plugin).
+reapi_proto_cpp = custom_target('proto_cpp_reapi',
+  input: 'plugins/frontend-reapi/proto/remote_execution.proto',
+  output: ['remote_execution.pb.cc', 'remote_execution.pb.h', 'remote_execution.grpc.pb.cc', 'remote_execution.grpc.pb.h'],
+  command: [protoc, '-I', meson.project_source_root() / 'plugins/frontend-reapi/proto', '-I', '/usr/include',
+            '--cpp_out=' + meson.project_build_root(),
+            '--grpc_out=' + meson.project_build_root(),
+            '--plugin=protoc-gen-grpc=' + grpc_cpp_plugin.full_path(),
+            'remote_execution.proto'],
+)
+
+bytestream_proto_cpp = custom_target('proto_cpp_bytestream',
+  input: 'plugins/frontend-reapi/proto/bytestream.proto',
+  output: ['bytestream.pb.cc', 'bytestream.pb.h', 'bytestream.grpc.pb.cc', 'bytestream.grpc.pb.h'],
+  command: [protoc, '-I', meson.project_source_root() / 'plugins/frontend-reapi/proto', '-I', '/usr/include',
+            '--cpp_out=' + meson.project_build_root(),
+            '--grpc_out=' + meson.project_build_root(),
+            '--plugin=protoc-gen-grpc=' + grpc_cpp_plugin.full_path(),
+            'bytestream.proto'],
+)
+
+frontend_reapi_module = shared_module('zm_frontend_reapi',
+  sources: files('plugins/frontend-reapi/frontend_reapi.cpp', 'plugins/frontend-reapi/entry.cpp', 'plugins/frontend-reapi/reapi_server.cpp', 'plugins/frontend-reapi/heuristics.cpp') + reapi_proto_cpp + bytestream_proto_cpp,
+  include_directories: inc, name_prefix: 'lib',
+  dependencies: [grpc_dep, protobuf_dep])
 
 test('all_unit_tests', test_bin,
   depends: [fake_env, fake_env_badabi, env_host_module],
@@ -159,6 +189,17 @@ test('integration_remote', python3,
     'PYTHONPATH': meson.current_build_dir() / 'proto',
   },
   depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 180,
+  is_parallel: false,
+)
+
+test('integration_reapi', python3,
+  args: [files('tests/integration/test_reapi.py')],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.current_build_dir() / 'proto',
+  },
+  depends: [zmd_bin, zm_bin, frontend_reapi_module, env_host_module] + zm_proto_py,
   timeout: 180,
   is_parallel: false,
 )

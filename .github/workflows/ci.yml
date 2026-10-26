@@ -2,31 +2,97 @@ name: ZeroMesh CI
 
 on:
   push:
-    branches: [ main, master, develop, 'restructure/**' ]
+    branches: [ main, master, develop, 'restructure/**', 'stream/**' ]
   pull_request:
     branches: [ main, master, develop ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Build & test
-    runs-on: ubuntu-latest
-
+    name: Build & test (${{ matrix.os }}, ${{ matrix.compiler }}, ${{ matrix.sanitize }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04]
+        compiler: [gcc, clang]
+        sanitize: [none, asan-ubsan]
+        exclude:
+          # Sanitizer job only on one OS/compiler to keep cost bounded.
+          - os: ubuntu-24.04
+            sanitize: asan-ubsan
+          - compiler: clang
+            sanitize: asan-ubsan
+    env:
+      CC: ${{ matrix.compiler == 'clang' && 'clang' || 'gcc' }}
+      CXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install build tools and dependencies
+      - name: Install build tools and dependencies (Ubuntu)
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build g++ pkg-config bubblewrap \
+          sudo apt-get install -y meson ninja-build pkg-config bubblewrap \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
             libsodium-dev libssl-dev python3-grpcio python3-grpc-tools
 
       - name: Allow unprivileged user namespaces (needed by bubblewrap)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
+      - name: Configure
+        run: |
+          if [ "${{ matrix.sanitize }}" = "asan-ubsan" ]; then
+            meson setup build -Db_sanitize=address,undefined
+          else
+            meson setup build
+          fi
+
       - name: Build
-        run: make build
+        run: ninja -C build
 
       - name: Test
+        run: meson test -C build --print-errorlogs
+
+  arch:
+    name: Build & test (Arch Linux)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed meson ninja gcc pkg-config bubblewrap \
+            grpc protobuf libsodium openssl python python-grpcio python-grpcio-tools
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Allow unprivileged user namespaces
+        run: sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Build
+        run: make build
+      - name: Test
         run: make test
+
+  sdk-python:
+    name: Python SDK tests
+    runs-on: ubuntu-latest
+    # Activates once sdk/python exists (M5a).
+    if: ${{ hashFiles('sdk/python/pyproject.toml') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build g++ pkg-config bubblewrap \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
+            libsodium-dev libssl-dev python3-grpcio python3-grpc-tools python3-pip python3-venv
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Build
+        run: make build
+      - name: Test
+        run: meson test -C build sdk_python --print-errorlogs

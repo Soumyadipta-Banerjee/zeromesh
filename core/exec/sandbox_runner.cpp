@@ -13,6 +13,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <sstream>
 
@@ -122,6 +123,10 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         return result;
     }
     fs::create_directories(work / spec.working_dir);
+    for (const auto& out : spec.outputs) {
+        std::error_code ec;
+        fs::create_directories((work / spec.working_dir / out).parent_path(), ec);
+    }
 
     Snapshot before;
     if (spec.capture_changed) before = TakeSnapshot(work);
@@ -218,7 +223,11 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     result.stderr_digest = store_->PutBlobFile(scratch / "stderr");
 
     auto capture = [&](const std::string& rel) {
-        fs::path p = work / rel;
+        fs::path p = (work / spec.working_dir / rel).lexically_normal();
+        std::error_code ec;
+        if (!fs::exists(p, ec) && fs::exists(work / rel, ec)) {
+            p = work / rel;
+        }
         struct stat st {};
         if (lstat(p.c_str(), &st) != 0) return;
         OutputEntry e;

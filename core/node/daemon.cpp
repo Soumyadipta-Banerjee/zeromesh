@@ -18,6 +18,7 @@
 #include "node/node_service.hpp"
 #include "node/state.hpp"
 #include "plugin/loader.hpp"
+#include "plugin/client_api_handle.hpp"
 #include "sched/placer.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
@@ -196,6 +197,8 @@ int Daemon::Run() {
 
     std::unique_ptr<grpc::Server> client_server;
     std::unique_ptr<grpc::Server> node_server;
+    std::shared_ptr<plugin::ClientApiHandle> frontend_handle;
+    std::vector<plugin::IFrontend*> active_frontends;
     std::shared_ptr<JobManager> jobs;
     std::shared_ptr<LocalExecutor> local_executor;
     std::shared_ptr<sched::Placer> placer;
@@ -311,6 +314,25 @@ int Daemon::Run() {
             throw std::runtime_error("cannot listen on NodeApi 0.0.0.0:" + std::to_string(config_.node_port));
         }
 
+        // Start any front-end plugins (e.g. frontend-reapi) against the daemon's own ClientApi.
+        frontend_handle = std::make_shared<plugin::ClientApiHandle>(
+            sock.string(),
+            grpc::CreateChannel("unix:" + sock.string(), grpc::InsecureChannelCredentials()));
+        for (plugin::IFrontend* fe : registry->Frontends()) {
+            plugin::PluginConfig cfg;
+            std::string err;
+            try {
+                if (!fe->Start(*frontend_handle, cfg)) {
+                    std::cerr << "zmd: front-end '" << fe->Name() << "' failed to start\n";
+                } else {
+                    active_frontends.push_back(fe);
+                    std::cerr << "zmd: front-end '" << fe->Name() << "' started\n";
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "zmd: front-end '" << fe->Name() << "' threw: " << e.what() << "\n";
+            }
+        }
+
         admit_thread = std::thread([&]() {
             while (!admit_stop.load()) {
                 auto team_key = team->Get();
@@ -356,6 +378,9 @@ int Daemon::Run() {
         std::cerr << "zmd: " << e.what() << "\n";
         admit_stop = true;
         if (admit_thread.joinable()) admit_thread.join();
+        for (plugin::IFrontend* fe : active_frontends) { try { fe->Stop(); } catch (...) {} }
+        active_frontends.clear();
+        frontend_handle.reset();
         if (discovery) discovery->Stop();
         if (node_server) node_server->Shutdown();
         if (client_server) client_server->Shutdown();
@@ -384,6 +409,11 @@ int Daemon::Run() {
     // Stop admission, then discovery; Drain peers with tasks in flight; shut down both servers.
     admit_stop = true;
     if (admit_thread.joinable()) admit_thread.join();
+    for (plugin::IFrontend* fe : active_frontends) {
+        try { fe->Stop(); } catch (...) {}
+    }
+    active_frontends.clear();
+    frontend_handle.reset();
     if (discovery) {
         discovery->BroadcastNodeDraining("shutting down");
         discovery->Stop();

@@ -21,6 +21,7 @@ public:
     Registry& operator=(const Registry&) = delete;
 
     void RegisterEnv(std::unique_ptr<IEnvProvider> env);
+    void RegisterFrontend(std::unique_ptr<IFrontend> frontend);
 
     // dlopen + ABI check. On failure returns false and explains in *error.
     bool LoadFile(const std::filesystem::path& so, std::string* error);
@@ -31,6 +32,10 @@ public:
 
     [[nodiscard]] IEnvProvider* Env(std::string_view name) const;
     [[nodiscard]] std::vector<std::string> EnvNames() const;
+
+    // Front-ends loaded from shared plugins (and any registered built-ins).
+    [[nodiscard]] std::vector<IFrontend*> Frontends() const;
+    [[nodiscard]] IFrontend* Frontend(std::string_view name) const;
 
 private:
     std::vector<std::unique_ptr<IEnvProvider>> envs_;

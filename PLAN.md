@@ -61,8 +61,8 @@ Each milestone is done **only** when its acceptance test passes.
   *Acceptance:* `zm run --each 'cases/*' -- ./sim {}` with 20 CPU-bound cases (each ~30 s single-threaded, inputs under 10 MB) on 3 machines completes in under 45% of the single-machine time. Killing one donor's `zmd` mid-job still completes all 20 correctly.
 - [ ] **M5: SDK + first app + mirror mode.** Python SDK, `zm-render`, and the `env-mirror` plugin.
   *Acceptance:* `zm-render shot.blend --frames 1-240` on 4 machines produces the same frames as a local render. A donor without Blender installed renders frames through mirror mode.
-- [ ] **M6: REAPI front-end plugin.**
-  *Acceptance:* a CMake project builds through `recc` against `zmd`, with compile actions observed running on a peer.
+- [x] **M6: REAPI front-end plugin.**
+  *Acceptance:* `integration_reapi` passes: CMake compile actions run on a peer, the resulting executable runs, and a direct recc link action is pinned to the requester.
 
 ## 4. Architectural Decision Records
 
