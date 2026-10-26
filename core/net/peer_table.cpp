@@ -83,6 +83,11 @@ size_t PeerTable::PruneStale(std::chrono::milliseconds max_age) {
     return removed;
 }
 
+void PeerTable::Clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    peers_.clear();
+}
+
 size_t PeerTable::Count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return peers_.size();
