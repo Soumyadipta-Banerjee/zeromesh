@@ -26,15 +26,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install build tools and dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             meson ninja-build pkg-config bubblewrap \
-            g++ clang python3-pip \
+            g++ clang \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev python3-pytest
-          sudo pip install --break-system-packages --upgrade grpcio grpcio-tools protobuf
+            libsodium-dev libssl-dev
+          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
 
       - name: Configure Linux kernel and network for sandboxing and discovery
         run: |
@@ -62,14 +67,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install build tools and dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            meson ninja-build g++ pkg-config bubblewrap python3-pip \
+            meson ninja-build g++ pkg-config bubblewrap \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev python3-pytest
-          sudo pip install --break-system-packages --upgrade grpcio grpcio-tools protobuf
+            libsodium-dev libssl-dev
+          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
 
       - name: Configure Linux kernel and network
         run: |
@@ -176,14 +186,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install build tools and dpkg-dev
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            meson ninja-build g++ pkg-config dpkg-dev python3-pip \
+            meson ninja-build g++ pkg-config dpkg-dev \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev python3-pytest
-          sudo pip install --break-system-packages --upgrade grpcio grpcio-tools protobuf
+            libsodium-dev libssl-dev
+          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
 
       - name: Build binaries
         run: |
