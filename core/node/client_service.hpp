@@ -1,6 +1,9 @@
 #pragma once
 
+#include "net/discovery.hpp"
 #include "net/peer_table.hpp"
+#include "net/pin_store.hpp"
+#include "net/team.hpp"
 #include "net/telemetry.hpp"
 #include "node/job_manager.hpp"
 #include "store/merkle.hpp"
@@ -8,8 +11,11 @@
 #include "zeromesh/v1/client.grpc.pb.h"
 
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace zeromesh::node {
@@ -27,14 +33,29 @@ struct ClientServiceOptions {
     uint64_t upload_limit_bytes{kDefaultUploadLimitBytes};
 };
 
+// Shared team membership state for ClientService Team* RPCs and NodeService Admit.
+// Owned by the Daemon; Create/Join/Leave update the file, discovery and pins.
+struct TeamState {
+    std::filesystem::path state_dir;
+    std::shared_ptr<net::PinStore> pins;
+    std::shared_ptr<net::Discovery> discovery;
+    std::mutex mu;
+    std::optional<net::TeamKey> key;
+    // Fired after membership changes (clear the admitted-client cache).
+    std::function<void()> on_changed;
+
+    [[nodiscard]] std::optional<net::TeamKey> Get();
+    // Replaces membership. Clears pins, updates the team file and Discovery::SetTeam.
+    void Apply(std::optional<net::TeamKey> next);
+};
+
 // zeromesh.v1.ClientApi (spec §6.1), served by zmd on its owner-only unix socket. The client
-// runs on the same machine, so UploadTree and FetchOutputs take local paths. Team* RPCs return
-// UNIMPLEMENTED until Task 17.
+// runs on the same machine, so UploadTree and FetchOutputs take local paths.
 class ClientService final : public v1::ClientApi::Service {
 public:
     ClientService(std::shared_ptr<store::CasStore> cas, std::shared_ptr<store::MerkleBuilder> merkle,
                   std::shared_ptr<JobManager> jobs, std::shared_ptr<net::PeerTable> peers,
-                  ClientServiceOptions options);
+                  ClientServiceOptions options, std::shared_ptr<TeamState> team = nullptr);
 
     grpc::Status PutObjects(grpc::ServerContext* ctx, grpc::ServerReader<v1::Chunk>* reader,
                             v1::PutObjectsReply* reply) override;
@@ -64,6 +85,7 @@ private:
     std::shared_ptr<JobManager> jobs_;
     std::shared_ptr<net::PeerTable> peers_;
     ClientServiceOptions options_;
+    std::shared_ptr<TeamState> team_;
 
     std::mutex telemetry_mu_;
     net::TelemetrySampler telemetry_;

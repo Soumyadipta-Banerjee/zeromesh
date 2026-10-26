@@ -27,34 +27,15 @@ M3 pieces that exist and are unit-tested, but that `zmd` doesn't use yet:
 - `core/node/{donor_policy,blob_transfer}.*`, plus NodeApi Offer/Push/Pull/Run/Cancel/Drain (Task 15)
 - `core/sched/{rank,placer}.*`: placement, local vs remote (Task 16). Tested in-process with two nodes in `tests/unit/test_placer.cpp`.
 
-## TODO: where to pick up (plan Task 17)
+## Task 17 status (done locally)
 
-All of this goes in `core/node/daemon.{hpp,cpp}`, `core/node/client_service.*` and `cli/`:
+Daemon wiring, Team RPCs, `zm team`, Placer, admission loop, `integration_remote`, and
+`tests/acceptance/m3_two_machines.md` are in. Automated tests pass; **do not tick M3 in
+PLAN.md** until someone runs the two-machine acceptance. Next: whole-branch review, then
+push and open a PR (only when asked).
 
-1. **Make long-lived pieces `Daemon` members:** PeerTable, TelemetrySampler, `net::Identity::LoadOrCreate(state_dir, node_id)`, `net::PinStore(state_dir)`, `net::Discovery`, the team key (`std::optional<net::TeamKey>` loaded with `net::TeamFile::Load`, behind a mutex).
-2. **Start the NodeApi server** on `0.0.0.0:<node_port>` with `net::ServerCreds(identity)`. **You must call `net::AllowKeepalivePings(builder)`**, or the server rejects clients' keepalive pings. Construct it with the full ctor:
-   `NodeService(node_id, pins, team_fn, identity.fingerprint, self_info_fn, cas, registry, local_executor, telemetry_fn, DonorPolicy::Load(config_dir), peer_table)`.
-3. **Swap the JobManager executor** from `LocalExecutor` to
-   `sched::Placer(local_executor, peer_table, client_factory, cas, merkle, node_id, telemetry_fn)`.
-   `client_factory` returns a pinned `std::shared_ptr<node::NodeClient>` for an admitted peer, or nullptr.
-4. **Add an admission loop:** a thread that every ~2 s takes active same-team peers that aren't pinned yet (`PinStore::FingerprintFor(id)` empty) and runs `NodeClient::Admit(team)`, with a 30 s backoff on failure. Keep admitted clients in a map, `node_id → shared_ptr<NodeClient>`.
-5. **Team RPCs** in `ClientService` (they return UNIMPLEMENTED today):
-   - TeamCreate: generate, save, `Discovery::SetTeam`, return the phrase.
-   - TeamJoin: `ParsePhrase`, returning INVALID_ARGUMENT "invalid team phrase" on failure.
-   - TeamLeave: `SetTeam(nullopt)`, `TeamFile::Remove`, `PinStore::Clear`.
-   - TeamInfo.
-6. **CLI:** `zm team create|join '<phrase>'|leave|info`. Print the phrase **single-quoted**, because its check symbol can be `* ~ $ =`. `zm status` should show peers and whether they're admitted.
-7. **On SIGTERM:** stop discovery, `NodeClient::Drain` to peers with tasks in flight, then shut down both servers.
-8. **Integration test** `tests/integration/test_remote_exec.py`, registered as `integration_remote` with `is_parallel: false`. It runs 3 `zmd` on one machine (separate `ZM_STATE_DIR`/`ZM_RUNTIME_DIR`, random `ZM_NODE_PORT`s, one shared random `ZM_DISCOVERY_PORT`). A creates a team, B joins it, C uses its own team. Tests:
-   - peers discovered and admitted (B yes, C no)
-   - `zm run --remote-only -- sh -c 'printf %s "$ZM_NODE_ID" > out.txt'` gives B's id
-   - remote logs stream back
-   - a missing command gives "no node can run this task"
-   - a C identity calling B gets PERMISSION_DENIED
-   - a bad phrase gives "invalid team phrase"
-9. **Write** `tests/acceptance/m3_two_machines.md` (two real Linux machines; firewall 8981/tcp and 8988/udp; on Ubuntu set `kernel.apparmor_restrict_unprivileged_userns=0` for bwrap). Tick M3 in PLAN.md **only** after a person runs it on two machines.
-
-After Task 17, do the final whole-branch review, then push and open a PR.
+`core/net/tls.cpp` uses the gRPC 1.51 `StaticDataCertificateProvider` API (Ubuntu noble /
+conda-forge). Newer gRPC renamed some of those types — re-check if you bump past 1.51.
 
 ## Known gaps and decisions to revisit (from the ledger)
 

@@ -38,6 +38,11 @@ std::optional<std::string> PinStore::FingerprintFor(std::string_view node_id) co
     return it->second;
 }
 
+size_t PinStore::Count() const {
+    std::lock_guard lock(mu_);
+    return fp_by_node_.size();
+}
+
 void PinStore::Pin(std::string node_id, std::string fp) {
     if (!IsValidNodeId(node_id)) throw std::invalid_argument("pin: invalid node id");
     if (!IsFingerprint(fp)) throw std::invalid_argument("pin: invalid fingerprint");

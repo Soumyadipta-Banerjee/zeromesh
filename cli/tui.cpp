@@ -64,17 +64,20 @@ void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color) {
         os << "  " << dim << "(no peers yet)" << reset << "\n";
         return;
     }
-    os << "  " << std::left << std::setw(20) << "NODE ID" << "  " << std::setw(24) << "HOST" << "  "
+    os << "  " << std::left << std::setw(10) << "NODE ID" << "  " << std::setw(24) << "HOST" << "  "
        << std::right << std::setw(9) << "CORES" << "  " << std::setw(9) << "MEM" << "  " << std::setw(7) << "CPU"
-       << "  " << std::left << "STATE\n";
+       << "  " << std::left << std::setw(10) << "STATE" << "  ADMITTED\n";
     for (const auto& p : peers.peers()) {
         if (p.is_self()) continue;
         std::string host = p.hostname() + " (" + p.address() + ":" + std::to_string(p.node_port()) + ")";
         std::string cores = std::to_string(p.cores_free()) + "/" + std::to_string(p.cores_total());
         const char* state_color = p.state() == "active" ? green : yellow;
-        os << "  " << std::left << std::setw(20) << Clip(p.node_id(), 20) << "  " << std::setw(24) << Clip(host, 24)
+        // First 8 chars of the node id, per the plan's status layout.
+        std::string id8 = p.node_id().size() <= 8 ? p.node_id() : p.node_id().substr(0, 8);
+        os << "  " << std::left << std::setw(10) << id8 << "  " << std::setw(24) << Clip(host, 24)
            << "  " << std::right << std::setw(9) << cores << "  " << std::setw(9) << Gib(p.mem_available()) << "  "
-           << std::setw(7) << Pct(p.cpu_load_pct()) << "  " << state_color << p.state() << reset << "\n";
+           << std::setw(7) << Pct(p.cpu_load_pct()) << "  " << state_color << std::left << std::setw(10)
+           << p.state() << reset << "  " << (p.admitted() ? "yes" : "no") << "\n";
     }
 }
 

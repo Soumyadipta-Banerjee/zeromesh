@@ -3,6 +3,7 @@
 #include "cli/client.hpp"
 #include "cli/run_cmd.hpp"
 #include "cli/status_cmd.hpp"
+#include "cli/team_cmd.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -21,6 +22,8 @@ void PrintUsage(std::ostream& os) {
        << "  run [opts] -- CMD...  Run CMD on the mesh with the current directory as input\n"
        << "  status                Show this node and its peers\n"
        << "  monitor               Live view of this node and its peers (Ctrl-C to exit)\n"
+       << "  team create|join|leave|info\n"
+       << "                        Create or join a team (quote the join phrase)\n"
        << "  version               Show the version\n\n"
        << "Global options:\n"
        << "  --socket PATH         zmd socket (default: $XDG_RUNTIME_DIR/zeromesh/zmd.sock)\n\n"
@@ -68,7 +71,7 @@ int main(int argc, char** argv) {
         PrintUsage(std::cout);
         return 0;
     }
-    if (cmd != "run" && cmd != "status" && cmd != "monitor") {
+    if (cmd != "run" && cmd != "status" && cmd != "monitor" && cmd != "team") {
         std::cerr << "zm: unknown command '" << cmd << "'\n\n";
         PrintUsage(std::cerr);
         return 1;
@@ -83,6 +86,8 @@ int main(int argc, char** argv) {
             std::cerr << "zm run: " << error << "\n\n" << cli::kRunUsage;
             return 1;
         }
+    } else if (cmd == "team") {
+        // Subcommands parse their own args inside TeamCommand.
     } else if (!rest.empty()) {
         std::cerr << "zm " << cmd << ": unexpected argument '" << rest.front() << "'\n";
         return 1;
@@ -97,5 +102,6 @@ int main(int argc, char** argv) {
 
     if (cmd == "run") return cli::RunCommand(*client, *run_opts);
     if (cmd == "status") return cli::StatusCommand(*client);
+    if (cmd == "team") return cli::TeamCommand(*client, rest);
     return cli::MonitorCommand(*client);
 }

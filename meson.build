@@ -77,7 +77,7 @@ zm_core = static_library('zm_core', core_sources,
 
 # CLI pieces live in their own library so unit tests can reach the TUI renderer.
 zm_cli = static_library('zm_cli',
-  files('cli/client.cpp', 'cli/run_cmd.cpp', 'cli/status_cmd.cpp', 'cli/tui.cpp'),
+  files('cli/client.cpp', 'cli/run_cmd.cpp', 'cli/status_cmd.cpp', 'cli/team_cmd.cpp', 'cli/tui.cpp'),
   include_directories: inc,
   dependencies: common_deps,
 )
@@ -149,5 +149,16 @@ test('integration_local', python3,
   },
   depends: [zmd_bin, zm_bin] + zm_proto_py,
   timeout: 120,
+  is_parallel: false,
+)
+
+test('integration_remote', python3,
+  args: [files('tests/integration/test_remote_exec.py')],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.current_build_dir() / 'proto',
+  },
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 180,
   is_parallel: false,
 )

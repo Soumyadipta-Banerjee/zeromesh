@@ -2,13 +2,23 @@
 
 #include "plugins/env-host/env_host.hpp"
 #include "exec/sandbox_runner.hpp"
+#include "net/discovery.hpp"
+#include "net/identity.hpp"
 #include "net/peer_table.hpp"
+#include "net/pin_store.hpp"
+#include "net/team.hpp"
+#include "net/telemetry.hpp"
+#include "net/tls.hpp"
 #include "node/action_cache.hpp"
 #include "node/client_service.hpp"
+#include "node/donor_policy.hpp"
 #include "node/job_manager.hpp"
 #include "node/local_executor.hpp"
+#include "node/node_client.hpp"
+#include "node/node_service.hpp"
 #include "node/state.hpp"
 #include "plugin/loader.hpp"
+#include "sched/placer.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
@@ -25,15 +35,22 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 namespace zeromesh::node {
 
@@ -73,6 +90,12 @@ void PrepareRuntimeDir(const fs::path& dir) {
     if (chmod(dir.c_str(), 0700) != 0) {
         throw std::runtime_error("cannot chmod " + dir.string() + ": " + std::strerror(errno));
     }
+}
+
+std::string Hostname() {
+    char host[256] = {};
+    if (gethostname(host, sizeof(host) - 1) != 0) return "unknown";
+    return host;
 }
 
 } // namespace
@@ -171,12 +194,40 @@ int Daemon::Run() {
         ~FdCloser() { close(fd); }
     } sfd_closer{sfd};
 
-    std::unique_ptr<grpc::Server> server;
+    std::unique_ptr<grpc::Server> client_server;
+    std::unique_ptr<grpc::Server> node_server;
     std::shared_ptr<JobManager> jobs;
-    std::shared_ptr<LocalExecutor> executor;
-    std::unique_ptr<ClientService> service;
+    std::shared_ptr<LocalExecutor> local_executor;
+    std::shared_ptr<sched::Placer> placer;
+    std::unique_ptr<ClientService> client_service;
+    std::unique_ptr<NodeService> node_service;
+    std::shared_ptr<net::Discovery> discovery;
+    std::shared_ptr<TeamState> team;
+    std::shared_ptr<net::PinStore> pins;
+    net::Identity identity;
+    std::string node_id;
+
+    // Admitted peers: node_id -> NodeClient. Cleared on team change.
+    std::mutex clients_mu;
+    std::unordered_map<std::string, std::shared_ptr<NodeClient>> clients;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> admit_backoff;
+
+    std::atomic<bool> admit_stop{false};
+    std::thread admit_thread;
+
+    std::mutex telemetry_mu;
+    net::TelemetrySampler telemetry_sampler;
+    auto telemetry_fn = [&]() {
+        std::lock_guard lock(telemetry_mu);
+        return telemetry_sampler.Sample();
+    };
+
     try {
         auto state = NodeState::LoadOrCreate(config_.state_dir);
+        node_id = state.node_id();
+        identity = net::Identity::LoadOrCreate(config_.state_dir, node_id);
+        pins = std::make_shared<net::PinStore>(config_.state_dir);
+
         auto cas = std::make_shared<store::CasStore>(config_.state_dir / "cas");
         auto merkle = std::make_shared<store::MerkleBuilder>(cas);
         auto runner = std::make_shared<exec::SandboxRunner>(cas, merkle, config_.state_dir / "scratch");
@@ -185,31 +236,129 @@ int Daemon::Run() {
         registry->LoadSearchPath();
         int hw = static_cast<int>(std::thread::hardware_concurrency());
         int slots = std::max(1, hw - 1);
-        executor = std::make_shared<LocalExecutor>(runner, registry, state.node_id(), slots);
+        local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, slots);
         auto cache = std::make_shared<ActionCache>(cas);
-        jobs = std::make_shared<JobManager>(cas, merkle, cache, executor);
         auto peers = std::make_shared<net::PeerTable>();
 
+        team = std::make_shared<TeamState>();
+        team->state_dir = config_.state_dir;
+        team->pins = pins;
+        if (auto existing = net::TeamFile::Load(config_.state_dir)) {
+            std::lock_guard lock(team->mu);
+            team->key = *existing;
+        }
+        team->on_changed = [&]() {
+            std::lock_guard lock(clients_mu);
+            clients.clear();
+            admit_backoff.clear();
+        };
+
+        net::DiscoveryConfig disc_cfg;
+        disc_cfg.node_id = node_id;
+        disc_cfg.hostname = Hostname();
+        disc_cfg.node_port = config_.node_port;
+        disc_cfg.discovery_port = config_.discovery_port;
+        disc_cfg.team = team->Get();
+        disc_cfg.telemetry = telemetry_fn;
+        discovery = std::make_shared<net::Discovery>(peers, disc_cfg);
+        team->discovery = discovery;
+        if (!discovery->Start()) throw std::runtime_error("cannot start discovery");
+
+        auto client_factory = [&](const net::Peer& p) -> std::shared_ptr<NodeClient> {
+            if (p.ip_address.empty() || p.node_port <= 0) return nullptr;
+            std::lock_guard lock(clients_mu);
+            if (auto it = clients.find(p.id); it != clients.end()) return it->second;
+            if (!pins->FingerprintFor(p.id)) return nullptr;
+            auto c = std::make_shared<NodeClient>(p.ip_address + ":" + std::to_string(p.node_port), identity, pins,
+                                                    p.id);
+            clients[p.id] = c;
+            return c;
+        };
+
+        placer = std::make_shared<sched::Placer>(local_executor, peers, client_factory, cas, merkle, node_id,
+                                                 telemetry_fn);
+        jobs = std::make_shared<JobManager>(cas, merkle, cache, placer);
+
         ClientServiceOptions opts;
-        opts.node_id = state.node_id();
+        opts.node_id = node_id;
         opts.node_port = config_.node_port;
         opts.upload_limit_bytes = UploadLimitFromEnv();
-        service = std::make_unique<ClientService>(cas, merkle, jobs, peers, opts);
+        client_service = std::make_unique<ClientService>(cas, merkle, jobs, peers, opts, team);
 
-        grpc::ServerBuilder builder;
-        builder.AddListeningPort("unix:" + sock.string(), grpc::InsecureServerCredentials());
-        builder.RegisterService(service.get());
+        DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
+        node_service = std::make_unique<NodeService>(
+            node_id, pins, [team]() { return team->Get(); }, identity.fingerprint,
+            [svc = client_service.get()]() { return svc->SelfInfo(); }, cas, registry, local_executor, telemetry_fn,
+            policy, peers);
+
+        grpc::ServerBuilder client_builder;
+        client_builder.AddListeningPort("unix:" + sock.string(), grpc::InsecureServerCredentials());
+        client_builder.RegisterService(client_service.get());
         mode_t old_umask = umask(0177);  // the socket is created 0600, closing the chmod race
-        server = builder.BuildAndStart();
+        client_server = client_builder.BuildAndStart();
         umask(old_umask);
-        if (!server) throw std::runtime_error("cannot listen on " + sock.string());
+        if (!client_server) throw std::runtime_error("cannot listen on " + sock.string());
         if (chmod(sock.c_str(), 0600) != 0) {
             throw std::runtime_error("cannot chmod " + sock.string() + ": " + std::strerror(errno));
         }
-        std::cerr << "zmd: node " << state.node_id() << " listening on " << sock.string() << "\n";
+
+        grpc::ServerBuilder node_builder;
+        net::AllowKeepalivePings(node_builder);
+        node_builder.AddListeningPort("0.0.0.0:" + std::to_string(config_.node_port), net::ServerCreds(identity));
+        node_builder.RegisterService(node_service.get());
+        node_server = node_builder.BuildAndStart();
+        if (!node_server) {
+            throw std::runtime_error("cannot listen on NodeApi 0.0.0.0:" + std::to_string(config_.node_port));
+        }
+
+        admit_thread = std::thread([&]() {
+            while (!admit_stop.load()) {
+                auto team_key = team->Get();
+                if (team_key) {
+                    peers->PruneStale();
+                    for (const auto& p : peers->ListActive()) {
+                        if (p.id == node_id) continue;
+                        if (pins->FingerprintFor(p.id)) {
+                            // Ensure a cached client exists for already-pinned peers.
+                            (void)client_factory(p);
+                            continue;
+                        }
+                        auto now = std::chrono::steady_clock::now();
+                        {
+                            std::lock_guard lock(clients_mu);
+                            if (auto it = admit_backoff.find(p.id); it != admit_backoff.end() && now < it->second) {
+                                continue;
+                            }
+                        }
+                        if (p.ip_address.empty() || p.node_port <= 0) continue;
+                        auto c = std::make_shared<NodeClient>(p.ip_address + ":" + std::to_string(p.node_port),
+                                                                identity, pins, p.id);
+                        std::string err;
+                        if (c->Admit(*team_key, &err)) {
+                            std::lock_guard lock(clients_mu);
+                            clients[p.id] = std::move(c);
+                            admit_backoff.erase(p.id);
+                        } else {
+                            std::lock_guard lock(clients_mu);
+                            admit_backoff[p.id] = now + std::chrono::seconds(30);
+                        }
+                    }
+                }
+                for (int i = 0; i < 20 && !admit_stop.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+        });
+
+        std::cerr << "zmd: node " << node_id << " listening on " << sock.string() << " and NodeApi :"
+                  << config_.node_port << "\n";
     } catch (const std::exception& e) {
         std::cerr << "zmd: " << e.what() << "\n";
-        if (server) server->Shutdown();
+        admit_stop = true;
+        if (admit_thread.joinable()) admit_thread.join();
+        if (discovery) discovery->Stop();
+        if (node_server) node_server->Shutdown();
+        if (client_server) client_server->Shutdown();
         fs::remove(sock, ec);
         return 1;
     }
@@ -232,13 +381,46 @@ int Daemon::Run() {
         if (fds[1].revents & POLLIN) break;
     }
 
-    // Running WatchJob streams end when their contexts are cancelled at the deadline.
-    server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(2));
-    server->Wait();
-    server.reset();
-    service.reset();
+    // Stop admission, then discovery; Drain peers with tasks in flight; shut down both servers.
+    admit_stop = true;
+    if (admit_thread.joinable()) admit_thread.join();
+    if (discovery) {
+        discovery->BroadcastNodeDraining("shutting down");
+        discovery->Stop();
+    }
+    if (placer) {
+        for (const auto& peer_id : placer->NodesWithInFlight()) {
+            std::shared_ptr<NodeClient> c;
+            {
+                std::lock_guard lock(clients_mu);
+                if (auto it = clients.find(peer_id); it != clients.end()) c = it->second;
+            }
+            if (c) {
+                std::string err;
+                c->Drain("shutting down", &err);
+            }
+        }
+    }
+
+    auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
+    if (node_server) node_server->Shutdown(deadline);
+    if (client_server) client_server->Shutdown(deadline);
+    if (node_server) node_server->Wait();
+    if (client_server) client_server->Wait();
+    node_server.reset();
+    client_server.reset();
+    node_service.reset();
+    client_service.reset();
     jobs.reset();      // cancels unfinished jobs
-    executor.reset();  // kills running sandboxes and joins its workers
+    placer.reset();    // cancels remote work and joins workers
+    {
+        std::lock_guard lock(clients_mu);
+        clients.clear();
+    }
+    local_executor.reset();  // kills running sandboxes and joins its workers
+    discovery.reset();
+    team.reset();
+    pins.reset();
     fs::remove(sock, ec);
     return 0;
 }

@@ -21,5 +21,11 @@ subprojects/packagecache/
 # ZeroMesh local runtime cache
 .zeromesh/
 
+# Local build deps / venvs (not for the tree)
+.deps/
+.venv/
+
 # Python
 __pycache__/
+*.pyc
+cscope.out*

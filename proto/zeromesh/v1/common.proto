@@ -135,6 +135,7 @@ message PeerInfo {
   bool on_ac = 11;
   string state = 12;       // "active" | "draining" | "offline"
   bool is_self = 13;
+  bool admitted = 14;      // true when this peer's cert is pinned (team member)
 }
 
 message Empty {}

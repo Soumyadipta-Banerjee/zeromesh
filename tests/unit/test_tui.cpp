@@ -34,7 +34,8 @@ TEST(Tui_RendersSelfAndPeers) {
 
     ASSERT_TRUE(s.find("0123456789abcdef0123456789abcdef") != std::string::npos);  // full self id
     ASSERT_TRUE(s.find("devbox-alpha") != std::string::npos);
-    ASSERT_TRUE(s.find("worker-node-101") != std::string::npos);
+    ASSERT_TRUE(s.find("worker-") != std::string::npos);  // first 8 chars of peer id
+    ASSERT_TRUE(s.find("ADMITTED") != std::string::npos);
     ASSERT_TRUE(s.find("12/16") != std::string::npos);
     ASSERT_TRUE(s.find("32.0 GB") != std::string::npos);
     ASSERT_TRUE(s.find('\033') == std::string::npos);  // no colour when asked for none

@@ -100,6 +100,16 @@ Placer::~Placer() {
     workers_.clear();  // joins
 }
 
+std::vector<std::string> Placer::NodesWithInFlight() const {
+    std::lock_guard lock(shared_->mu);
+    std::vector<std::string> out;
+    out.reserve(shared_->in_flight.size());
+    for (const auto& [id, n] : shared_->in_flight) {
+        if (n > 0 && id != local_id_) out.push_back(id);
+    }
+    return out;
+}
+
 void Placer::ReapFinishedLocked() {
     std::erase_if(workers_, [](const Worker& w) { return w.task->worker_done.load(); });
 }

@@ -36,7 +36,7 @@ message TeamInfoReply {
   int32 peers_pinned = 3;
 }
 
-// Served by zmd on unix://$XDG_RUNTIME_DIR/zeromesh/zmd.sock (mode 0600).
+// Served by zmd on a unix socket under the runtime dir (zmd.sock, mode 0600).
 service ClientApi {
   rpc PutObjects(stream Chunk) returns (PutObjectsReply);
   rpc GetObjects(Digests) returns (stream Chunk);
