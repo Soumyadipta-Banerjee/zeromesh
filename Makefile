@@ -1,4 +1,4 @@
-.PHONY: all setup build clean check run status
+.PHONY: all setup build clean check run status test
 
 all: build
 
@@ -8,6 +8,9 @@ setup:
 build:
 	@if [ ! -d "build" ]; then meson setup build; fi
 	ninja -C build
+
+test: build
+	./build/unit_tests
 
 clean:
 	rm -rf build
