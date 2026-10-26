@@ -18,7 +18,41 @@
 #include <thread>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 namespace zeromesh::examples {
+
+inline std::string GetLocalLanIp() {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return "127.0.0.1";
+
+    struct sockaddr_in loopback{};
+    loopback.sin_family = AF_INET;
+    loopback.sin_port = htons(9); // Discard port
+    inet_pton(AF_INET, "8.8.8.8", &loopback.sin_addr);
+
+    // Connecting a UDP socket does NOT send any packets on the wire,
+    // but causes the kernel routing table to bind the local interface IP.
+    if (connect(sock, reinterpret_cast<struct sockaddr*>(&loopback), sizeof(loopback)) < 0) {
+        close(sock);
+        return "127.0.0.1";
+    }
+
+    struct sockaddr_in local_addr{};
+    socklen_t addr_len = sizeof(local_addr);
+    if (getsockname(sock, reinterpret_cast<struct sockaddr*>(&local_addr), &addr_len) < 0) {
+        close(sock);
+        return "127.0.0.1";
+    }
+
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &local_addr.sin_addr, ip_str, sizeof(ip_str));
+    close(sock);
+    return std::string(ip_str);
+}
 
 inline dht::Key HexToKey(const std::string& hex) {
     dht::Key k{};
@@ -277,24 +311,65 @@ public:
     /**
      * @brief Downloads a directory given its info-hash, reconstructs all files,
      * and announces them to become a seeder.
+     * Optionally accepts a bootstrap peer IP, DHT port, and chunk port.
      */
     DownloadResult DownloadTorrent(const std::string& info_hash,
                                   const std::filesystem::path& dest_parent_dir,
-                                  ProgressCallback progress_cb = nullptr) {
+                                  ProgressCallback progress_cb = nullptr,
+                                  const std::string& bootstrap_peer_ip = "",
+                                  uint16_t bootstrap_dht_port = 0,
+                                  uint16_t bootstrap_chunk_port = 0) {
         if (progress_cb) {
-            progress_cb(0.02f, "Querying DHT for manifest: " + info_hash.substr(0, 16) + "...", 0, 1);
+            progress_cb(0.02f, "Connecting to swarm & resolving manifest: " + info_hash.substr(0, 16) + "...", 0, 1);
         }
 
-        // Step 1: Retrieve manifest JSON
+        // If a bootstrap peer is specified in the magnet link, register it into our DHT immediately
+        if (!bootstrap_peer_ip.empty() && bootstrap_dht_port > 0) {
+            dht::DhtNode node;
+            // Generate synthetic deterministic node ID from IP & port if unknown
+            auto synthetic_key = HexToKey(info_hash);
+            synthetic_key[0] ^= 0xAA;
+            node.id = synthetic_key;
+            node.ip_address = bootstrap_peer_ip;
+            node.port = bootstrap_dht_port;
+            node.last_seen = std::chrono::steady_clock::now();
+            dht_->InsertNode(node);
+        }
+
+        // Step 1: Retrieve manifest JSON with retry loop
         std::string manifest_json;
-        auto val = dht_->FindValue(HexToKey(info_hash));
-        if (val) {
-            manifest_json = *val;
-        } else {
-            // Attempt chunk fetch fallback from providers
+        constexpr int kMaxManifestRetries = 10;
+        for (int attempt = 1; attempt <= kMaxManifestRetries; ++attempt) {
+            // First check DHT key-value store
+            auto val = dht_->FindValue(HexToKey(info_hash));
+            if (val) {
+                manifest_json = *val;
+                break;
+            }
+
+            // Fallback: chunk fetch from DHT providers
             auto res = chunk_fetcher_->FetchChunk(info_hash);
             if (res.success) {
                 manifest_json = res.data;
+                break;
+            }
+
+            // Fallback: direct TCP fetch from bootstrap peer if known
+            if (!bootstrap_peer_ip.empty() && bootstrap_chunk_port > 0) {
+                auto direct_res = chunk_fetcher_->FetchFromPeerDirect(bootstrap_peer_ip, bootstrap_chunk_port, info_hash);
+                if (direct_res.success) {
+                    manifest_json = direct_res.data;
+                    break;
+                }
+            }
+
+            if (attempt < kMaxManifestRetries) {
+                if (progress_cb) {
+                    progress_cb(0.02f + 0.01f * attempt,
+                                "Locating seeders in swarm (attempt " + std::to_string(attempt) + "/" +
+                                std::to_string(kMaxManifestRetries) + ")...", 0, 1);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         }
 
@@ -369,7 +444,12 @@ public:
                                 downloaded_bytes, total_bytes);
                 }
 
-                auto chunk_res = chunk_fetcher_->FetchChunk(ch_hash);
+                vfs::ChunkResult chunk_res = chunk_fetcher_->FetchChunk(ch_hash);
+                // If DHT provider lookup didn't find it yet, try direct fetch from bootstrap peer
+                if (!chunk_res.success && !bootstrap_peer_ip.empty() && bootstrap_chunk_port > 0) {
+                    chunk_res = chunk_fetcher_->FetchFromPeerDirect(bootstrap_peer_ip, bootstrap_chunk_port, ch_hash);
+                }
+
                 if (!chunk_res.success) {
                     std::string err = "Chunk " + ch_hash.substr(0, 16) + "... for file '" + file.relative_path + "' failed to fetch from any DHT provider";
                     if (progress_cb) {
@@ -405,6 +485,7 @@ public:
 
         return {true, "", downloaded_bytes, total_bytes};
     }
+
 
 private:
     std::filesystem::path storage_dir_;
