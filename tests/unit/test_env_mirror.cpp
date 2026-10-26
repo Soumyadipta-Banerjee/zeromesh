@@ -5,6 +5,7 @@
 #include "plugins/env-mirror/mirror_cache.hpp"
 #include "plugins/env-mirror/mirror_fuse.hpp"
 #include "plugins/env-mirror/env_mirror.hpp"
+#include "node/requester_blob_source.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
@@ -79,13 +80,14 @@ TEST(EnvMirrorMountReadOnlyFailsWithEROFS) {
     uint64_t total_bytes = 0;
     auto root_digest = builder.BuildTree(export_dir.path(), rules, &total_bytes);
 
-    auto chunk_source = std::make_shared<CasChunkSource>(cas);
-    auto env = MakeMirrorEnv(chunk_source);
+    auto env = MakeMirrorEnv();
+    node::LocalCasBlobSource blob_source(cas);
 
     plugin::TaskContext ctx;
     ctx.task_id = "task-erofs-test";
     ctx.scratch_dir = scratch.path();
     ctx.env.params["root_digest"] = root_digest.hash;
+    ctx.blob_source = &blob_source;
 
     auto prep = env->Prepare(ctx);
     ASSERT_TRUE(prep.value.has_value());
@@ -117,11 +119,22 @@ TEST(EnvMirrorReleaseLeavesNoMountBehind) {
     }
 
     TempDir scratch;
+    TempDir cas_dir;
+    auto cas = std::make_shared<store::CasStore>(cas_dir.path());
+    store::MerkleBuilder builder(cas);
+    TempDir export_dir;
+    WriteFile(export_dir / "x", "x\n");
+    uint64_t total_bytes = 0;
+    auto root_digest = builder.BuildTree(export_dir.path(), store::IgnoreRules::None(), &total_bytes);
+
     auto env = MakeMirrorEnv();
+    node::LocalCasBlobSource blob_source(cas);
 
     plugin::TaskContext ctx;
     ctx.task_id = "task-release-test";
     ctx.scratch_dir = scratch.path();
+    ctx.env.params["root_digest"] = root_digest.hash;
+    ctx.blob_source = &blob_source;
 
     auto prep = env->Prepare(ctx);
     ASSERT_TRUE(prep.value.has_value());
@@ -153,13 +166,14 @@ TEST(EnvMirrorReadContentThroughMount) {
     uint64_t total_bytes = 0;
     auto root_digest = builder.BuildTree(src_dir.path(), store::IgnoreRules::None(), &total_bytes);
 
-    auto chunk_source = std::make_shared<CasChunkSource>(cas);
-    auto env = MakeMirrorEnv(chunk_source);
+    auto env = MakeMirrorEnv();
+    node::LocalCasBlobSource blob_source(cas);
 
     plugin::TaskContext ctx;
     ctx.task_id = "task-read-test";
     ctx.scratch_dir = scratch.path();
     ctx.env.params["root_digest"] = root_digest.hash;
+    ctx.blob_source = &blob_source;
 
     auto prep = env->Prepare(ctx);
     ASSERT_TRUE(prep.value.has_value());
@@ -184,6 +198,7 @@ TEST(EnvMirrorCheckMethod) {
 
     plugin::EnvParams ok_params;
     ok_params.argv = {"ls"};
+    ok_params.params["root_digest"] = "a" + std::string(63, 'b');
     ASSERT_TRUE(env->Check(ok_params).ok);
 
     plugin::EnvParams unreachable;

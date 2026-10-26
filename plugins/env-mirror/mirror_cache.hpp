@@ -45,6 +45,13 @@ public:
     /// Returns the cache directory.
     [[nodiscard]] const std::filesystem::path& CacheDir() const { return cache_dir_; }
 
+    /// Reads up to `size` bytes at `offset` from a cached chunk file without loading the whole blob.
+    [[nodiscard]] std::optional<size_t> ReadRange(const std::string& chunk_hash, off_t offset, char* buf,
+                                                  size_t size);
+
+    /// Removes all cached chunk files (per-task cleanup).
+    void Clear();
+
 private:
     struct CacheEntry {
         std::string hash;

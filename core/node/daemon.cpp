@@ -51,6 +51,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace zeromesh::node {
@@ -203,6 +204,8 @@ int Daemon::Run() {
     std::unique_ptr<ClientService> client_service;
     std::unique_ptr<NodeService> node_service;
     std::shared_ptr<net::PeerTable> peers;
+    std::shared_ptr<store::CasStore> cas;
+    std::shared_ptr<ActionCache> cache;
     std::shared_ptr<net::Discovery> discovery;
     std::shared_ptr<TeamState> team;
     std::shared_ptr<net::PinStore> pins;
@@ -213,10 +216,12 @@ int Daemon::Run() {
     std::mutex clients_mu;
     std::unordered_map<std::string, std::shared_ptr<NodeClient>> clients;
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> admit_backoff;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> ping_last;
 
     std::atomic<bool> admit_stop{false};
     std::thread admit_thread;
     std::thread drain_thread;
+    std::thread gc_thread;
 
     std::mutex telemetry_mu;
     net::TelemetrySampler telemetry_sampler;
@@ -232,17 +237,18 @@ int Daemon::Run() {
         identity = net::Identity::LoadOrCreate(config_.state_dir, node_id);
         pins = std::make_shared<net::PinStore>(config_.state_dir);
 
-        auto cas = std::make_shared<store::CasStore>(config_.state_dir / "cas");
+        store::CasLimits cas_limits;
+        if (const char* cap = std::getenv("ZM_CAS_MAX_BYTES"); cap && *cap) {
+            cas_limits.max_blob_bytes = std::strtoull(cap, nullptr, 10);
+        }
+        cas = std::make_shared<store::CasStore>(config_.state_dir / "cas", cas_limits);
         auto merkle = std::make_shared<store::MerkleBuilder>(cas);
         auto runner = std::make_shared<exec::SandboxRunner>(cas, merkle, config_.state_dir / "scratch");
         auto registry = std::make_shared<plugin::Registry>();
         registry->RegisterEnv(envhost::Make());
         registry->RegisterEnv(mirror::MakeMirrorEnv());
         registry->LoadSearchPath();
-        int hw = static_cast<int>(std::thread::hardware_concurrency());
-        int slots = std::max(1, hw - 1);
-        local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, slots);
-        auto cache = std::make_shared<ActionCache>(cas);
+        cache = std::make_shared<ActionCache>(cas);
         peers = std::make_shared<net::PeerTable>();
 
         team = std::make_shared<TeamState>();
@@ -256,6 +262,7 @@ int Daemon::Run() {
             std::lock_guard lock(clients_mu);
             clients.clear();
             admit_backoff.clear();
+            ping_last.clear();
         };
 
         net::DiscoveryConfig disc_cfg;
@@ -279,6 +286,15 @@ int Daemon::Run() {
             clients[p.id] = c;
             return c;
         };
+
+        NodeClientFactory client_for_node = [&](const std::string& peer_id) -> std::shared_ptr<NodeClient> {
+            auto peer = peers->Get(peer_id);
+            return peer ? client_factory(*peer) : nullptr;
+        };
+        int hw = static_cast<int>(std::thread::hardware_concurrency());
+        int slots = std::max(1, hw - 1);
+        local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, slots,
+                                                         config_.state_dir / "scratch", cas, client_for_node);
 
         placer = std::make_shared<sched::Placer>(local_executor, peers, client_factory, cas, merkle, node_id,
                                                  telemetry_fn);
@@ -326,8 +342,31 @@ int Daemon::Run() {
                     for (const auto& p : peers->ListActive()) {
                         if (p.id == node_id) continue;
                         if (pins->FingerprintFor(p.id)) {
-                            // Ensure a cached client exists for already-pinned peers.
                             (void)client_factory(p);
+                            std::shared_ptr<NodeClient> client;
+                            {
+                                std::lock_guard lock(clients_mu);
+                                if (auto it = clients.find(p.id); it != clients.end()) client = it->second;
+                            }
+                            if (client) {
+                                const auto now = std::chrono::steady_clock::now();
+                                bool due = true;
+                                {
+                                    std::lock_guard lock(clients_mu);
+                                    if (auto it = ping_last.find(p.id);
+                                        it != ping_last.end() && now - it->second < std::chrono::seconds(5)) {
+                                        due = false;
+                                    }
+                                }
+                                if (due) {
+                                    std::string err;
+                                    if (auto rtt = client->PingRtt(&err)) {
+                                        peers->RecordMeasuredLatency(p.id, *rtt);
+                                        std::lock_guard lock(clients_mu);
+                                        ping_last[p.id] = now;
+                                    }
+                                }
+                            }
                             continue;
                         }
                         auto now = std::chrono::steady_clock::now();
@@ -409,6 +448,27 @@ int Daemon::Run() {
             }
         });
 
+        // Reclaim CAS toward 90% of the cap. Protected digests are inputs of live jobs.
+        gc_thread = std::thread([&]() {
+            while (!admit_stop.load()) {
+                if (cas) {
+                    const uint64_t target = cas->MaxBlobBytes() * 9 / 10;
+                    std::unordered_set<std::string> protect;
+                    if (node_service) {
+                        for (const auto& h : node_service->ProtectedBlobHashes()) protect.insert(h);
+                    }
+                    if (jobs) {
+                        for (const auto& h : jobs->ProtectedBlobHashes()) protect.insert(h);
+                    }
+                    cas->CollectGarbage(target, protect);
+                }
+                if (cache) cache->PruneStale();
+                for (int i = 0; i < 300 && !admit_stop.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            }
+        });
+
         std::cerr << "zmd: node " << node_id << " listening on " << sock.string() << " and NodeApi :"
                   << config_.node_port << "\n";
     } catch (const std::exception& e) {
@@ -416,6 +476,7 @@ int Daemon::Run() {
         admit_stop = true;
         if (admit_thread.joinable()) admit_thread.join();
         if (drain_thread.joinable()) drain_thread.join();
+        if (gc_thread.joinable()) gc_thread.join();
         if (discovery) discovery->Stop();
         if (node_server) node_server->Shutdown();
         if (client_server) client_server->Shutdown();
@@ -445,6 +506,7 @@ int Daemon::Run() {
     admit_stop = true;
     if (admit_thread.joinable()) admit_thread.join();
     if (drain_thread.joinable()) drain_thread.join();
+    if (gc_thread.joinable()) gc_thread.join();
     if (discovery) {
         discovery->BroadcastNodeDraining("shutting down");
         discovery->Stop();

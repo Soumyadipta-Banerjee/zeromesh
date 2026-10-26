@@ -63,6 +63,8 @@ core_sources = files(
   'core/node/node_client.cpp',
   'core/node/donor_policy.cpp',
   'core/node/blob_transfer.cpp',
+  'core/node/mirror_manifest.cpp',
+  'core/node/requester_blob_source.cpp',
   'core/sched/rank.cpp',
   'core/sched/placer.cpp',
   'plugins/env-host/env_host.cpp',

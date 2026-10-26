@@ -12,7 +12,6 @@ namespace zeromesh::mirror {
 /**
  * @brief Factory function creating an env-mirror IEnvProvider instance.
  */
-std::unique_ptr<plugin::IEnvProvider> MakeMirrorEnv(
-    std::shared_ptr<IChunkSource> fallback_chunk_source = nullptr);
+std::unique_ptr<plugin::IEnvProvider> MakeMirrorEnv();
 
 } // namespace zeromesh::mirror

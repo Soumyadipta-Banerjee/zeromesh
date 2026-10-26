@@ -111,6 +111,7 @@ class Client:
         outputs: Optional[List[str]] = None,
         env: str = "host",
         env_params: Optional[Dict[str, str]] = None,
+        mirror_paths: Optional[List[str]] = None,
         cores: int = 1,
         mem_bytes: int = 0,
         arch: str = "",
@@ -148,7 +149,10 @@ class Client:
         policy = common_pb2.Policy(**policy_kwargs)
 
         resources = common_pb2.Resources(cores=cores, mem_bytes=mem_bytes, arch=arch)
-        env_spec = common_pb2.EnvSpec(name=env, params=env_params or {})
+        params = dict(env_params or {})
+        if mirror_paths:
+            params["mirror_paths"] = "\n".join(mirror_paths)
+        env_spec = common_pb2.EnvSpec(name=env, params=params)
         output_list = list(outputs) if outputs else []
 
         tasks = []

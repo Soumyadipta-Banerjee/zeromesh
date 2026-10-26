@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -12,6 +14,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <unistd.h>
+#include <algorithm>
 #include <vector>
 
 namespace zeromesh::store {
@@ -121,9 +124,16 @@ private:
     uint64_t count_{0};
 };
 
+std::chrono::steady_clock::time_point SteadyFromFileTime(std::filesystem::file_time_type ft) {
+    const auto sctp = std::chrono::time_point_cast<std::chrono::steady_clock::duration>(
+        ft - std::filesystem::file_time_type::clock::now() + std::chrono::steady_clock::now());
+    return sctp;
+}
+
 } // namespace
 
-CasStore::CasStore(std::filesystem::path base_path) {
+CasStore::CasStore(std::filesystem::path base_path, CasLimits limits)
+    : limits_(limits) {
     if (base_path.empty()) {
         const char* home = std::getenv("HOME");
         if (home) {
@@ -140,6 +150,186 @@ CasStore::CasStore(std::filesystem::path base_path) {
 
     std::filesystem::create_directories(blobs_dir_);
     std::filesystem::create_directories(ac_dir_);
+    ScanBlobsOnDisk();
+}
+
+void CasStore::SetMaxBlobBytes(uint64_t bytes) {
+    std::lock_guard lock(store_mutex_);
+    limits_.max_blob_bytes = bytes;
+}
+
+uint64_t CasStore::MaxBlobBytes() const {
+    std::lock_guard lock(store_mutex_);
+    return limits_.max_blob_bytes;
+}
+
+uint64_t CasStore::BlobBytes() const {
+    std::lock_guard lock(store_mutex_);
+    return blob_bytes_;
+}
+
+uint64_t CasStore::ReservedIncomingBytes() const {
+    std::lock_guard lock(store_mutex_);
+    return reserved_incoming_;
+}
+
+void CasStore::ScanBlobsOnDisk() {
+    std::lock_guard lock(store_mutex_);
+    blobs_.clear();
+    lru_order_.clear();
+    lru_iters_.clear();
+    blob_bytes_ = 0;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(blobs_dir_, ec)) return;
+
+    for (const auto& entry : std::filesystem::directory_iterator(blobs_dir_, ec)) {
+        if (ec || !entry.is_regular_file()) continue;
+        const std::string hash = entry.path().filename().string();
+        if (!IsValidHash(hash)) continue;
+        std::error_code size_ec;
+        const auto sz = static_cast<uint64_t>(entry.file_size(size_ec));
+        if (size_ec) continue;
+        const auto when = SteadyFromFileTime(entry.last_write_time(ec));
+        RegisterBlobLocked(hash, sz, when);
+    }
+}
+
+void CasStore::RegisterBlobLocked(const std::string& hash, uint64_t size,
+                                  std::chrono::steady_clock::time_point when) const {
+    if (blobs_.contains(hash)) return;
+    blobs_[hash] = BlobMeta{size, when};
+    lru_order_.push_front(hash);
+    lru_iters_[hash] = lru_order_.begin();
+    blob_bytes_ += size;
+}
+
+void CasStore::PromoteLruLocked(const std::string& hash) const {
+    auto it = lru_iters_.find(hash);
+    if (it == lru_iters_.end()) return;
+    lru_order_.erase(it->second);
+    lru_order_.push_front(hash);
+    lru_iters_[hash] = lru_order_.begin();
+    blobs_[hash].last_used = std::chrono::steady_clock::now();
+}
+
+void CasStore::TouchBlobLocked(const std::string& hash) const {
+    if (!blobs_.contains(hash)) return;
+    PromoteLruLocked(hash);
+    TouchBlobOnDisk(blobs_dir_ / hash);
+}
+
+void CasStore::TouchBlobOnDisk(const std::filesystem::path& path) const {
+    timeval tv[2];
+    if (::gettimeofday(&tv[0], nullptr) != 0) return;
+    tv[1] = tv[0];
+    ::utimes(path.c_str(), tv);
+}
+
+void CasStore::DropFromMemCacheLocked(const std::string& hash) {
+    std::lock_guard lock(mem_cache_mutex_);
+    auto it = mem_cache_.find(hash);
+    if (it == mem_cache_.end()) return;
+    cur_mem_bytes_ -= it->second.size();
+    mem_cache_.erase(it);
+}
+
+bool CasStore::DeleteBlobLocked(const std::string& hash) {
+    auto it = blobs_.find(hash);
+    if (it == blobs_.end()) return false;
+
+    std::error_code ec;
+    std::filesystem::remove(blobs_dir_ / hash, ec);
+    blob_bytes_ -= it->second.size;
+    blobs_.erase(it);
+    if (auto lit = lru_iters_.find(hash); lit != lru_iters_.end()) {
+        lru_order_.erase(lit->second);
+        lru_iters_.erase(lit);
+    }
+    DropFromMemCacheLocked(hash);
+    return true;
+}
+
+CasStore::GcStats CasStore::CollectGarbage(uint64_t target_bytes,
+                                           const std::unordered_set<std::string>& protect_hashes) {
+    GcStats stats;
+    std::lock_guard lock(store_mutex_);
+    if (blob_bytes_ <= target_bytes) return stats;
+
+    std::vector<std::pair<std::chrono::steady_clock::time_point, std::string>> victims;
+    victims.reserve(blobs_.size());
+    for (const auto& [hash, meta] : blobs_) {
+        if (protect_hashes.contains(hash)) continue;
+        victims.push_back({meta.last_used, hash});
+    }
+    std::sort(victims.begin(), victims.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    for (const auto& [_, hash] : victims) {
+        if (blob_bytes_ <= target_bytes) break;
+        auto it = blobs_.find(hash);
+        if (it == blobs_.end()) continue;
+        const uint64_t freed = it->second.size;
+        if (!DeleteBlobLocked(hash)) continue;
+        stats.bytes_freed += freed;
+        ++stats.blobs_removed;
+    }
+    return stats;
+}
+
+bool CasStore::CanAdmitIncoming(uint64_t bytes) const {
+    std::lock_guard lock(store_mutex_);
+    return blob_bytes_ + reserved_incoming_ + bytes <= limits_.max_blob_bytes;
+}
+
+bool CasStore::ReserveIncoming(uint64_t bytes) {
+    std::lock_guard lock(store_mutex_);
+    if (blob_bytes_ + reserved_incoming_ + bytes > limits_.max_blob_bytes) return false;
+    reserved_incoming_ += bytes;
+    return true;
+}
+
+void CasStore::ReleaseIncoming(uint64_t bytes) {
+    std::lock_guard lock(store_mutex_);
+    reserved_incoming_ = (bytes >= reserved_incoming_) ? 0 : reserved_incoming_ - bytes;
+}
+
+void CasStore::NoteBlobCommitted(const std::string& hash, uint64_t size_bytes) {
+    if (!IsValidHash(hash)) return;
+    std::lock_guard lock(store_mutex_);
+    if (blobs_.contains(hash)) {
+        PromoteLruLocked(hash);
+        return;
+    }
+    RegisterBlobLocked(hash, size_bytes, std::chrono::steady_clock::now());
+    TouchBlobOnDisk(blobs_dir_ / hash);
+}
+
+bool CasStore::AdmitPeerIngest(const std::string& peer_id, uint64_t bytes) {
+    std::lock_guard lock(store_mutex_);
+    if (blob_bytes_ + reserved_incoming_ + bytes > limits_.max_blob_bytes) return false;
+    if (peer_id.empty()) return true;
+
+    const auto now = std::chrono::steady_clock::now();
+    auto& window = peer_ingest_[peer_id];
+    while (!window.events.empty() && now - window.events.front().first > limits_.peer_ingest_window) {
+        window.bytes -= window.events.front().second;
+        window.events.pop_front();
+    }
+    return window.bytes + bytes <= limits_.peer_ingest_window_bytes;
+}
+
+void CasStore::RecordPeerIngest(const std::string& peer_id, uint64_t bytes) {
+    if (peer_id.empty() || bytes == 0) return;
+    std::lock_guard lock(store_mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    auto& window = peer_ingest_[peer_id];
+    while (!window.events.empty() && now - window.events.front().first > limits_.peer_ingest_window) {
+        window.bytes -= window.events.front().second;
+        window.events.pop_front();
+    }
+    window.bytes += bytes;
+    window.events.push_back({now, bytes});
 }
 
 bool CasStore::IsValidHash(std::string_view hash) {
@@ -222,7 +412,7 @@ Digest CasStore::PutBlob(std::string_view data) {
     Digest digest = ComputeDigest(data);
 
     {
-        std::lock_guard<std::mutex> lock(mem_cache_mutex_);
+        std::lock_guard lock(mem_cache_mutex_);
         if (data.size() < 1024 * 1024 && cur_mem_bytes_ + data.size() <= max_mem_bytes_) {
             mem_cache_[digest.hash] = std::string(data);
             cur_mem_bytes_ += data.size();
@@ -231,7 +421,15 @@ Digest CasStore::PutBlob(std::string_view data) {
 
     auto target = blobs_dir_ / digest.hash;
     if (std::filesystem::exists(target)) {
+        NoteBlobCommitted(digest.hash, static_cast<uint64_t>(data.size()));
         return digest;
+    }
+
+    {
+        std::lock_guard lock(store_mutex_);
+        if (blob_bytes_ + reserved_incoming_ + data.size() > limits_.max_blob_bytes) {
+            throw std::runtime_error("CAS disk quota exceeded");
+        }
     }
 
     auto tmp_target = MakeUniqueTempIn(blobs_dir_, "upload-");
@@ -258,6 +456,7 @@ Digest CasStore::PutBlob(std::string_view data) {
         RemovePath(tmp_target);
         throw;
     }
+    NoteBlobCommitted(digest.hash, static_cast<uint64_t>(data.size()));
     return digest;
 }
 
@@ -299,21 +498,32 @@ Digest CasStore::PutBlobFile(const std::filesystem::path& src_file) {
     auto target = blobs_dir_ / digest.hash;
     if (std::filesystem::exists(target)) {
         RemovePath(tmp_target);
+        NoteBlobCommitted(digest.hash, static_cast<uint64_t>(total_size));
         return digest;
     }
+
+    {
+        std::lock_guard lock(store_mutex_);
+        if (blob_bytes_ + reserved_incoming_ + static_cast<uint64_t>(total_size) > limits_.max_blob_bytes) {
+            RemovePath(tmp_target);
+            throw std::runtime_error("CAS disk quota exceeded");
+        }
+    }
+
     try {
         CommitTempFile(tmp_target, target);
     } catch (...) {
         RemovePath(tmp_target);
         throw;
     }
+    NoteBlobCommitted(digest.hash, static_cast<uint64_t>(total_size));
     return digest;
 }
 
 std::optional<std::string> CasStore::GetBlob(const std::string& hash) const {
     if (!IsValidHash(hash)) return std::nullopt;
     {
-        std::lock_guard<std::mutex> lock(mem_cache_mutex_);
+        std::lock_guard lock(mem_cache_mutex_);
         auto it = mem_cache_.find(hash);
         if (it != mem_cache_.end()) {
             return it->second;
@@ -325,6 +535,18 @@ std::optional<std::string> CasStore::GetBlob(const std::string& hash) const {
         return std::nullopt;
     }
 
+    {
+        std::lock_guard lock(store_mutex_);
+        if (!blobs_.contains(hash)) {
+            std::error_code ec;
+            const auto sz = static_cast<uint64_t>(std::filesystem::file_size(target, ec));
+            if (!ec) {
+                RegisterBlobLocked(hash, sz, std::chrono::steady_clock::now());
+            }
+        }
+        TouchBlobLocked(hash);
+    }
+
     std::ifstream in(target, std::ios::binary);
     std::ostringstream ss;
     ss << in.rdbuf();
@@ -334,10 +556,23 @@ std::optional<std::string> CasStore::GetBlob(const std::string& hash) const {
 bool CasStore::HasBlob(const std::string& hash) const {
     if (!IsValidHash(hash)) return false;
     {
-        std::lock_guard<std::mutex> lock(mem_cache_mutex_);
+        std::lock_guard lock(mem_cache_mutex_);
         if (mem_cache_.contains(hash)) return true;
     }
-    return std::filesystem::exists(blobs_dir_ / hash);
+    auto target = blobs_dir_ / hash;
+    if (!std::filesystem::exists(target)) return false;
+    {
+        std::lock_guard lock(store_mutex_);
+        if (!blobs_.contains(hash)) {
+            std::error_code ec;
+            const auto sz = static_cast<uint64_t>(std::filesystem::file_size(target, ec));
+            if (!ec) {
+                RegisterBlobLocked(hash, sz, std::chrono::steady_clock::now());
+            }
+        }
+        TouchBlobLocked(hash);
+    }
+    return true;
 }
 
 std::filesystem::path CasStore::GetBlobPath(const std::string& hash) const {
@@ -386,6 +621,12 @@ std::optional<std::string> CasStore::GetActionResult(const std::string& action_h
     std::ostringstream ss;
     ss << in.rdbuf();
     return ss.str();
+}
+
+bool CasStore::RemoveActionResult(const std::string& action_hash) {
+    if (!IsValidHash(action_hash)) return false;
+    std::error_code ec;
+    return std::filesystem::remove(ac_dir_ / action_hash, ec);
 }
 
 } // namespace zeromesh::store

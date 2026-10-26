@@ -24,7 +24,7 @@ inline constexpr size_t kBlobChunkBytes = 1024 * 1024;
 // Receives a stream of chunks into a CasStore. Not thread-safe.
 class BlobReceiver {
 public:
-    explicit BlobReceiver(store::CasStore& cas);
+    explicit BlobReceiver(store::CasStore& cas, std::string peer_id = {});
     ~BlobReceiver();
 
     BlobReceiver(const BlobReceiver&) = delete;
@@ -46,6 +46,7 @@ private:
     void Abort();
 
     store::CasStore& cas_;
+    std::string peer_id_;
     std::unique_ptr<Object> current_;
     std::vector<store::Digest> received_;
 };
