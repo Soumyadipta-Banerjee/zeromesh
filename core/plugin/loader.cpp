@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 
 #include <cstdlib>
+#include <iostream>
 #include <sstream>
 
 #ifndef ZM_INSTALL_PREFIX
@@ -13,6 +14,7 @@ namespace zeromesh::plugin {
 
 Registry::~Registry() {
     // Plugin objects must die before their code is unmapped.
+    StopFrontends();
     envs_.clear();
     frontends_.clear();
     for (void* h : handles_) dlclose(h);
@@ -21,6 +23,42 @@ Registry::~Registry() {
 void Registry::RegisterEnv(std::unique_ptr<IEnvProvider> env) {
     if (!env || Env(env->Name()) != nullptr) return;
     envs_.push_back(std::move(env));
+}
+
+void Registry::RegisterFrontend(std::unique_ptr<IFrontend> frontend) {
+    if (!frontend) return;
+    for (const auto& f : frontends_) {
+        if (f && f->Name() == frontend->Name()) return;
+    }
+    frontends_.push_back(std::move(frontend));
+}
+
+std::vector<IFrontend*> Registry::Frontends() const {
+    std::vector<IFrontend*> out;
+    out.reserve(frontends_.size());
+    for (const auto& f : frontends_) {
+        if (f) out.push_back(f.get());
+    }
+    return out;
+}
+
+void Registry::StartFrontends(ClientApiHandle& handle, const PluginConfig& config) {
+    StopFrontends();
+    for (auto& f : frontends_) {
+        if (!f) continue;
+        if (f->Start(handle, config)) {
+            started_frontends_.push_back(f.get());
+        } else {
+            std::cerr << "zeromesh: frontend '" << f->Name() << "' failed to start\n";
+        }
+    }
+}
+
+void Registry::StopFrontends() {
+    for (auto it = started_frontends_.rbegin(); it != started_frontends_.rend(); ++it) {
+        if (*it) (*it)->Stop();
+    }
+    started_frontends_.clear();
 }
 
 bool Registry::LoadFile(const std::filesystem::path& so, std::string* error) {

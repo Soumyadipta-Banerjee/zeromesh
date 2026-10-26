@@ -121,6 +121,7 @@ struct Job {
     std::vector<v1::JobEvent> history;
     std::vector<std::shared_ptr<EventStream>> watchers;
     size_t terminal{0};
+    size_t retained_log_bytes{0};
     bool done{false};
     bool cancelled{false};
     std::optional<std::chrono::steady_clock::time_point> finished_at;
@@ -209,6 +210,8 @@ private:
     static constexpr size_t kFinishedJobsListed = 256;
     static constexpr size_t kMaxRetainedFinishedJobs = 256;
     static constexpr size_t kMaxRetainedLogBytesPerTask = 1024 * 1024;
+    // A 240-chunk job at 1 MiB/task would otherwise retain ~240 MiB of log history.
+    static constexpr size_t kMaxRetainedLogBytesPerJob = 8 * 1024 * 1024;
 
     void EvictFinishedJobs();
 
@@ -449,14 +452,21 @@ void JobManager::Impl::Emit(Job& job, v1::JobEvent ev) {
     ev.set_job_id(job.id);
     bool retain = true;
     if (!ev.log_chunk().empty()) {
-        auto it = job.index.find(ev.task_name());
-        if (it != job.index.end()) {
-            TaskRun& t = job.tasks[it->second];
-            const size_t chunk = ev.log_chunk().size();
-            if (t.retained_log_bytes + chunk > kMaxRetainedLogBytesPerTask) {
-                retain = false;
+        const size_t chunk = ev.log_chunk().size();
+        if (job.retained_log_bytes + chunk > kMaxRetainedLogBytesPerJob) {
+            retain = false;
+        } else {
+            auto it = job.index.find(ev.task_name());
+            if (it != job.index.end()) {
+                TaskRun& t = job.tasks[it->second];
+                if (t.retained_log_bytes + chunk > kMaxRetainedLogBytesPerTask) {
+                    retain = false;
+                } else {
+                    t.retained_log_bytes += chunk;
+                    job.retained_log_bytes += chunk;
+                }
             } else {
-                t.retained_log_bytes += chunk;
+                job.retained_log_bytes += chunk;
             }
         }
     }

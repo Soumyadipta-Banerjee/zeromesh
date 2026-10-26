@@ -279,6 +279,23 @@ TEST(JobLogHistoryCapped) {
     ASSERT_TRUE(log_bytes <= static_cast<size_t>(1024 * 1024));
 }
 
+TEST(JobLogHistoryCappedPerJob) {
+    Fixture f;
+    f.fake = std::make_shared<VerboseExecutor>(f.cas);
+    JobManager jm{f.cas, f.merkle, f.cache, f.fake};
+    // 10 verbose tasks × 1 MiB/task would be ~10 MiB without a job-wide cap (8 MiB).
+    std::vector<v1::TaskSpec> tasks;
+    for (int i = 0; i < 10; ++i) tasks.push_back(Task("t" + std::to_string(i), "x"));
+    auto id = jm.Submit(Job(tasks));
+    Drain(jm, id);
+    auto replay = jm.Watch(id);
+    size_t log_bytes = 0;
+    while (auto ev = replay->Next(std::chrono::seconds(5))) {
+        if (!ev->log_chunk().empty()) log_bytes += ev->log_chunk().size();
+    }
+    ASSERT_TRUE(log_bytes <= static_cast<size_t>(8 * 1024 * 1024));
+}
+
 TEST(JobEvictsOldFinishedJobs) {
     Fixture f;
     std::string first;

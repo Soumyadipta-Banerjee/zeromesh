@@ -209,6 +209,7 @@ int Daemon::Run() {
     std::shared_ptr<net::Discovery> discovery;
     std::shared_ptr<TeamState> team;
     std::shared_ptr<net::PinStore> pins;
+    std::shared_ptr<plugin::Registry> registry;
     net::Identity identity;
     std::string node_id;
 
@@ -244,7 +245,7 @@ int Daemon::Run() {
         cas = std::make_shared<store::CasStore>(config_.state_dir / "cas", cas_limits);
         auto merkle = std::make_shared<store::MerkleBuilder>(cas);
         auto runner = std::make_shared<exec::SandboxRunner>(cas, merkle, config_.state_dir / "scratch");
-        auto registry = std::make_shared<plugin::Registry>();
+        registry = std::make_shared<plugin::Registry>();
         registry->RegisterEnv(envhost::Make());
         registry->RegisterEnv(mirror::MakeMirrorEnv());
         registry->LoadSearchPath();
@@ -323,6 +324,10 @@ int Daemon::Run() {
         if (chmod(sock.c_str(), 0600) != 0) {
             throw std::runtime_error("cannot chmod " + sock.string() + ": " + std::strerror(errno));
         }
+
+        plugin::ClientApiHandle frontend_handle;
+        frontend_handle.unix_socket = sock;
+        registry->StartFrontends(frontend_handle, plugin::PluginConfig{});
 
         grpc::ServerBuilder node_builder;
         node::ApplyNodeApiMessageLimits(node_builder);
@@ -477,6 +482,7 @@ int Daemon::Run() {
         if (admit_thread.joinable()) admit_thread.join();
         if (drain_thread.joinable()) drain_thread.join();
         if (gc_thread.joinable()) gc_thread.join();
+        if (registry) registry->StopFrontends();
         if (discovery) discovery->Stop();
         if (node_server) node_server->Shutdown();
         if (client_server) client_server->Shutdown();
@@ -524,6 +530,8 @@ int Daemon::Run() {
             }
         }
     }
+
+    if (registry) registry->StopFrontends();
 
     auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
     if (node_server) node_server->Shutdown(deadline);

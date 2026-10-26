@@ -8,7 +8,10 @@ namespace zeromesh::exec {
 
 /**
  * @brief Direct Linux Landlock LSM interface for unprivileged kernel filesystem confinement.
- * Restricts subprocess filesystem privileges even if bwrap or chroot boundaries fail.
+ *
+ * Apply this inside the final sandboxed process (or a helper that becomes that process).
+ * Do not wrap `bwrap` with Landlock: `PR_SET_NO_NEW_PRIVS` blocks user-namespace setup
+ * (`bwrap: setting up uid map: Permission denied`).
  */
 class LandlockSandbox {
 public:

@@ -32,9 +32,16 @@ public:
     [[nodiscard]] IEnvProvider* Env(std::string_view name) const;
     [[nodiscard]] std::vector<std::string> EnvNames() const;
 
+    void RegisterFrontend(std::unique_ptr<IFrontend> frontend);
+    [[nodiscard]] std::vector<IFrontend*> Frontends() const;
+    // Starts every loaded front-end. Failures are logged by the caller; Start false skips Stop.
+    void StartFrontends(ClientApiHandle& handle, const PluginConfig& config);
+    void StopFrontends();
+
 private:
     std::vector<std::unique_ptr<IEnvProvider>> envs_;
     std::vector<std::unique_ptr<IFrontend>> frontends_;
+    std::vector<IFrontend*> started_frontends_;
     std::vector<void*> handles_;
 };
 
