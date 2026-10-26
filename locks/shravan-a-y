@@ -1,1 +1,2 @@
-I will work on file system bt before that i wll work on hash distributed system
+Superseded (2026-10-26). The DHT is frozen and the FUSE filesystem is now the env-mirror
+plugin. Shravan is the suggested owner of stream M5c in docs/team/TASKS.md.
