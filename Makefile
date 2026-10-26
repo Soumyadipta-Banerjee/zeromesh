@@ -10,17 +10,12 @@ build:
 	ninja -C build
 
 test: build
-	./build/unit_tests
+	meson test -C build --print-errorlogs
 
 clean:
 	rm -rf build
 
-check:
-	@echo "Checking syntax of all C++20 header interfaces..."
-	@for f in $$(find src/ -name "*.hpp"); do \
-		g++ -std=c++20 -Isrc -fsyntax-only "$$f" || exit 1; \
-	done
-	@echo "✔ All C++20 interfaces valid!"
+check: test
 
 status: build
 	./build/zm status

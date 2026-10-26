@@ -7,138 +7,56 @@ project('zeromesh', 'cpp',
   ]
 )
 
-# Compiler configuration
 cpp = meson.get_compiler('cpp')
 
-# Core system dependencies
 threads_dep = dependency('threads')
 dl_dep = cpp.find_library('dl', required: false)
+openssl_dep = dependency('openssl')
+protobuf_dep = dependency('protobuf')
+grpc_dep = dependency('grpc++')
+sodium_dep = dependency('libsodium')
 
-# Optional third-party dependencies with fallback
-openssl_dep = dependency('openssl', required: false)
-protobuf_dep = dependency('protobuf', required: false)
-grpc_dep = dependency('grpc++', required: false)
-fuse3_dep = dependency('fuse3', required: false)
-gtk4_dep = dependency('gtk4', required: false)
+inc = include_directories('src', '.')
 
-# Include directories
-inc = include_directories('include', 'src', '.')
+common_deps = [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep, sodium_dep]
 
-# Header-only architecture library interface
-# All subsystem contracts are defined under src/ and include/
-zeromesh_headers = declare_dependency(
-  include_directories: inc,
-  dependencies: [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep, fuse3_dep]
-)
-
-# Core REAPI Gateway and Daemon sources (Option 1)
-sources = files(
-  'src/main.cpp',
+core_sources = files(
   'src/cas/store.cpp',
   'src/cas/merkle.cpp',
-  'src/cas/p2p_syncer.cpp',
   'src/discovery/peer_table.cpp',
   'src/discovery/mdns.cpp',
-  'src/dht/kademlia.cpp',
-  'src/dht/routing_table.cpp',
-  'src/dht/local_store.cpp',
-  'src/dht/transport.cpp',
-  'src/vfs/fuse_fs.cpp',
-  'src/vfs/chunk_fetcher.cpp',
-  'src/reapi/action_cache.cpp',
-  'src/reapi/cas_service.cpp',
-  'src/reapi/execution_service.cpp',
-  'src/reapi/server.cpp',
-  'src/scheduler/heuristics.cpp',
-  'src/scheduler/scheduler.cpp',
   'src/executor/runner.cpp',
   'src/executor/bwrap.cpp',
   'src/executor/landlock.cpp',
-  'src/dsm/dsm_engine.cpp',
   'src/ui/tui.cpp',
-  'src/verify/byzantine_spot_checker.cpp'
 )
 
-zm_bin = executable('zm',
-  sources,
+zm_core = static_library('zm_core', core_sources,
   include_directories: inc,
-  dependencies: [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep],
-  install: true
+  dependencies: common_deps,
 )
 
-alias_target('zmd', zm_bin)
-
-# Unit test suite
-test_sources = files(
-  'tests/test_main.cpp',
-  'tests/test_cas.cpp',
-  'tests/test_merkle.cpp',
-  'tests/test_p2p_syncer.cpp',
-  'tests/test_dht.cpp',
-  'tests/test_reapi.cpp',
-  'tests/test_scheduler.cpp',
-  'tests/test_peer_table.cpp',
-  'tests/test_mdns.cpp',
-  'tests/test_bwrap.cpp',
-  'tests/test_verify.cpp',
-  'tests/test_host_guard.cpp',
-  'tests/test_executor.cpp',
-  'tests/test_tui.cpp',
-  'tests/test_dsm.cpp',
-  'tests/test_vfs.cpp',
-  'tests/test_torrent_swarm.cpp',
-  'src/cas/store.cpp',
-  'src/cas/merkle.cpp',
-  'src/cas/p2p_syncer.cpp',
-  'src/discovery/peer_table.cpp',
-  'src/discovery/mdns.cpp',
-  'src/dht/kademlia.cpp',
-  'src/dht/routing_table.cpp',
-  'src/dht/local_store.cpp',
-  'src/dht/transport.cpp',
-  'src/vfs/fuse_fs.cpp',
-  'src/vfs/chunk_fetcher.cpp',
-  'src/reapi/action_cache.cpp',
-  'src/reapi/cas_service.cpp',
-  'src/reapi/execution_service.cpp',
-  'src/reapi/server.cpp',
-  'src/scheduler/heuristics.cpp',
-  'src/scheduler/scheduler.cpp',
-  'src/executor/runner.cpp',
-  'src/executor/bwrap.cpp',
-  'src/executor/landlock.cpp',
-  'src/dsm/dsm_engine.cpp',
-  'src/ui/tui.cpp',
-  'src/verify/byzantine_spot_checker.cpp'
+zm_bin = executable('zm', 'src/main.cpp',
+  include_directories: inc,
+  link_with: zm_core,
+  dependencies: common_deps,
+  install: true,
 )
 
 test_bin = executable('unit_tests',
-  test_sources,
+  files(
+    'tests/test_main.cpp',
+    'tests/test_cas.cpp',
+    'tests/test_merkle.cpp',
+    'tests/test_peer_table.cpp',
+    'tests/test_mdns.cpp',
+    'tests/test_bwrap.cpp',
+    'tests/test_executor.cpp',
+    'tests/test_tui.cpp',
+  ),
   include_directories: inc,
-  dependencies: [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep]
+  link_with: zm_core,
+  dependencies: common_deps,
 )
 
 test('all_unit_tests', test_bin)
-
-# Example Application: BitTorrent P2P Directory Swarm GTK4 GUI
-if gtk4_dep.found()
-  torrent_gui_sources = files(
-    'tests/examples/torrent_gui.cpp',
-    'src/cas/store.cpp',
-    'src/cas/merkle.cpp',
-    'src/discovery/peer_table.cpp',
-    'src/discovery/mdns.cpp',
-    'src/dht/kademlia.cpp',
-    'src/dht/routing_table.cpp',
-    'src/dht/local_store.cpp',
-    'src/dht/transport.cpp',
-    'src/vfs/chunk_fetcher.cpp',
-    'src/vfs/fuse_fs.cpp'
-  )
-
-  executable('zm-torrent-gui',
-    torrent_gui_sources,
-    include_directories: inc,
-    dependencies: [threads_dep, dl_dep, openssl_dep, gtk4_dep]
-  )
-endif

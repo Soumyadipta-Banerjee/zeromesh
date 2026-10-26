@@ -11,10 +11,8 @@
 
 namespace zeromesh::ui {
 
-TerminalUI::TerminalUI(
-    std::shared_ptr<discovery::PeerTable> peer_table,
-    std::shared_ptr<scheduler::Scheduler> scheduler
-) : peer_table_(std::move(peer_table)), scheduler_(std::move(scheduler)) {}
+TerminalUI::TerminalUI(std::shared_ptr<discovery::PeerTable> peer_table)
+    : peer_table_(std::move(peer_table)) {}
 
 static std::string RenderProgressBar(double pct, int width = 20) {
     if (pct < 0.0) pct = 0.0;
@@ -46,24 +44,15 @@ void TerminalUI::PrintStatusSnapshot() const {
     std::cout << "\033[1;33m[ Local Host Status ]\033[0m\n"
               << "  CPU Load:  " << RenderProgressBar(local_load, 24) << "\n"
               << "  Power:     " << (ac ? "\033[32m⚡ AC Connected\033[0m" : "\033[33m🔋 On Battery\033[0m")
-              << " (" << battery << "%)\n"
-              << "  Protocol:  Google Remote Execution API (REAPI v2 over gRPC)\n"
-              << "  Endpoint:  127.0.0.1:8980\n\n";
+              << " (" << battery << "%)\n\n";
 
-    // 2. Scheduler Telemetry
-    if (scheduler_) {
-        std::cout << "\033[1;33m[ DAG Scheduler & Cache Metrics ]\033[0m\n"
-                  << "  Total Actions:  " << scheduler_->GetTotalScheduled() << "\n"
-                  << "  Pinned Local:   " << scheduler_->GetTotalLocal() << " (Linkers, archivers, & hot critical paths)\n"
-                  << "  Offloaded:      " << scheduler_->GetTotalOffloaded() << " (Distributed parallel compile tasks)\n\n";
-    }
 
     // 3. Cluster Peer Nodes Table
-    std::cout << "\033[1;33m[ Discovered Mesh Workers (mDNS / DHT) ]\033[0m\n";
+    std::cout << "\033[1;33m[ Discovered Mesh Workers (LAN multicast) ]\033[0m\n";
     auto active_peers = peer_table_ ? peer_table_->ListActive() : std::vector<discovery::Peer>{};
 
     if (active_peers.empty()) {
-        std::cout << "  \033[90m(No remote peer nodes discovered yet. Listening on LAN UDP multicast 239.255.42.99:8982...)\033[0m\n\n";
+        std::cout << "  \033[90m(No remote peer nodes discovered yet. Listening on LAN UDP multicast 239.255.42.99:8988...)\033[0m\n\n";
     } else {
         std::cout << "  ┌──────────────────────┬──────────────────────┬─────────┬─────────┬──────────────┬──────────┐\n"
                   << "  │ Node ID              │ Hostname & Endpoint  │ Cores   │ RAM     │ CPU Load     │ Status   │\n"
