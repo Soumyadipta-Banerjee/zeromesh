@@ -10,6 +10,7 @@
 #include <grpcpp/channel.h>
 #include <grpcpp/security/credentials.h>
 #include <grpcpp/security/server_credentials.h>
+#include <grpcpp/server_builder.h>
 #include <grpcpp/server_context.h>
 
 #include <functional>
@@ -29,10 +30,22 @@ std::shared_ptr<grpc::ServerCredentials> ServerCreds(const Identity& self);
 std::shared_ptr<grpc::ChannelCredentials> ClientCreds(const Identity& self,
                                                       std::function<bool(std::string_view server_fp)> accept);
 
+// Transport keepalive for NodeApi: the client pings every 5 s and declares the
+// connection dead when a ping goes unanswered for 10 s, so a vanished peer breaks
+// long-running streams (RunTask) instead of hanging them.
+inline constexpr int kKeepaliveTimeMs = 5000;
+inline constexpr int kKeepaliveTimeoutMs = 10000;
+
 // A channel to "ip:port" with its own subchannel pool, so connections made under
-// different credentials (admission vs pinned) are never shared.
+// different credentials (admission vs pinned) are never shared. With `keepalive`,
+// the channel sends the pings above, also while no call is active.
 std::shared_ptr<grpc::Channel> PeerChannel(const std::string& address,
-                                           std::shared_ptr<grpc::ChannelCredentials> creds);
+                                           std::shared_ptr<grpc::ChannelCredentials> creds,
+                                           bool keepalive = false);
+
+// Server arguments that accept the client keepalive pings above (by default a gRPC
+// server sends GOAWAY to clients pinging this often). Every NodeApi server uses this.
+void AllowKeepalivePings(grpc::ServerBuilder& builder);
 
 // Fingerprint of the caller's TLS client certificate, or "" if there is none.
 std::string PeerFingerprint(const grpc::ServerContext& ctx);
