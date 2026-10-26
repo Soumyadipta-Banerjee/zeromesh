@@ -233,11 +233,31 @@ uint64_t UploadLimitFromEnv() {
     return n;
 }
 
+std::optional<net::TeamKey> TeamState::Get() {
+    std::lock_guard lock(mu);
+    return key;
+}
+
+void TeamState::Apply(std::optional<net::TeamKey> next) {
+    {
+        std::lock_guard lock(mu);
+        key = next;
+    }
+    if (pins) pins->Clear();
+    if (next) {
+        net::TeamFile::Save(state_dir, *next);
+    } else {
+        net::TeamFile::Remove(state_dir);
+    }
+    if (discovery) discovery->SetTeam(next);
+    if (on_changed) on_changed();
+}
+
 ClientService::ClientService(std::shared_ptr<store::CasStore> cas, std::shared_ptr<store::MerkleBuilder> merkle,
                              std::shared_ptr<JobManager> jobs, std::shared_ptr<net::PeerTable> peers,
-                             ClientServiceOptions options)
+                             ClientServiceOptions options, std::shared_ptr<TeamState> team)
     : cas_(std::move(cas)), merkle_(std::move(merkle)), jobs_(std::move(jobs)), peers_(std::move(peers)),
-      options_(std::move(options)) {
+      options_(std::move(options)), team_(std::move(team)) {
     if (sodium_init() < 0) throw std::runtime_error("libsodium initialisation failed");
     telemetry_.Sample();  // prime the CPU-load delta
 }
@@ -508,26 +528,67 @@ grpc::Status ClientService::ListPeers(grpc::ServerContext*, const v1::Empty*, v1
     if (peers_) {
         for (const auto& p : peers_->ListActive()) {
             if (p.id == options_.node_id) continue;
-            *reply->add_peers() = FromPeer(p);
+            v1::PeerInfo info = FromPeer(p);
+            if (team_ && team_->pins) {
+                info.set_admitted(team_->pins->FingerprintFor(p.id).has_value());
+            }
+            *reply->add_peers() = std::move(info);
         }
     }
     return grpc::Status::OK;
 }
 
-grpc::Status ClientService::TeamCreate(grpc::ServerContext*, const v1::Empty*, v1::TeamSecretReply*) {
-    return {grpc::StatusCode::UNIMPLEMENTED, "team commands are not available yet"};
+grpc::Status ClientService::TeamCreate(grpc::ServerContext*, const v1::Empty*, v1::TeamSecretReply* reply) {
+    if (!team_ || !team_->discovery || !team_->pins) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "team commands are not available"};
+    }
+    try {
+        net::TeamKey key = net::GenerateTeamKey();
+        team_->Apply(key);
+        reply->set_phrase(net::FormatPhrase(key));
+        return grpc::Status::OK;
+    } catch (const std::exception& e) {
+        return {grpc::StatusCode::INTERNAL, e.what()};
+    }
 }
 
-grpc::Status ClientService::TeamJoin(grpc::ServerContext*, const v1::TeamJoinRequest*, v1::Empty*) {
-    return {grpc::StatusCode::UNIMPLEMENTED, "team commands are not available yet"};
+grpc::Status ClientService::TeamJoin(grpc::ServerContext*, const v1::TeamJoinRequest* req, v1::Empty*) {
+    if (!team_ || !team_->discovery || !team_->pins) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "team commands are not available"};
+    }
+    auto key = net::ParsePhrase(req->phrase());
+    if (!key) return {grpc::StatusCode::INVALID_ARGUMENT, "invalid team phrase"};
+    try {
+        team_->Apply(*key);
+        return grpc::Status::OK;
+    } catch (const std::exception& e) {
+        return {grpc::StatusCode::INTERNAL, e.what()};
+    }
 }
 
 grpc::Status ClientService::TeamLeave(grpc::ServerContext*, const v1::Empty*, v1::Empty*) {
-    return {grpc::StatusCode::UNIMPLEMENTED, "team commands are not available yet"};
+    if (!team_ || !team_->discovery || !team_->pins) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "team commands are not available"};
+    }
+    try {
+        team_->Apply(std::nullopt);
+        return grpc::Status::OK;
+    } catch (const std::exception& e) {
+        return {grpc::StatusCode::INTERNAL, e.what()};
+    }
 }
 
-grpc::Status ClientService::TeamInfo(grpc::ServerContext*, const v1::Empty*, v1::TeamInfoReply*) {
-    return {grpc::StatusCode::UNIMPLEMENTED, "team commands are not available yet"};
+grpc::Status ClientService::TeamInfo(grpc::ServerContext*, const v1::Empty*, v1::TeamInfoReply* reply) {
+    if (!team_) {
+        reply->set_in_team(false);
+        reply->set_peers_pinned(0);
+        return grpc::Status::OK;
+    }
+    auto key = team_->Get();
+    reply->set_in_team(key.has_value());
+    if (key) reply->set_team_id(net::TeamId(*key));
+    reply->set_peers_pinned(team_->pins ? static_cast<int32_t>(team_->pins->Count()) : 0);
+    return grpc::Status::OK;
 }
 
 } // namespace zeromesh::node

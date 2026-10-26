@@ -37,10 +37,10 @@ small core, with features attached through narrow plugin interfaces.
 |---|---|
 | CAS store + Merkle | Real (`core/store`) |
 | Sandbox executor (bwrap, SCHED_IDLE) | Real (`core/exec`) |
-| LAN discovery + peer table | Real but unauthenticated (`core/net`); not started by `zmd` until M3 |
-| `zm` CLI + TUI (`cli/`) | Real; a ClientApi client (`run`, `status`, `monitor`, `version`) |
+| LAN discovery + peer table | Real, team-scoped + HMAC (`core/net`); started by `zmd` when in a team |
+| `zm` CLI + TUI (`cli/`) | Real; a ClientApi client (`run`, `status`, `monitor`, `team`, `version`) |
 | `zmd` daemon, ClientApi, job manager, local execution | Real (`core/node`, `zmd/`); tests in `tests/integration/test_local_daemon.py` |
-| NodeApi, placement, team security | **Not built yet** (M3) |
+| NodeApi, placement, team security | Real (`core/node`, `core/sched`); wired in `zmd` (Task 17); see M3 below |
 | FUSE filesystem | Frozen until M5 (`env-mirror` plugin) |
 | REAPI front-end | Frozen until M6 (it was a print-only stub) |
 | DHT, DSM, GPU, Byzantine/TPM, torrent GUI | Frozen; see [`frozen/README.md`](frozen/README.md) |
@@ -55,7 +55,7 @@ Each milestone is done **only** when its acceptance test passes.
   *Acceptance:* a Python script submits a 3-task job and receives results and events.
 - [x] **M2: Core relocation.** Keep modules moved into `core/`. Real telemetry. Persistent node IDs. `zmd` runs as a long-lived daemon with a real `ClientApi` and local execution.
   *Acceptance:* `zm run -- echo hi` prints `hi` with exit 0. Two runs with different commands give two real results, with no false cache hits. Killing `zmd` and restarting it keeps the node ID.
-- [ ] **M3: Remote execution + security.** *(Building blocks done and unit-tested: plan Tasks 12–16. Daemon wiring, Task 17, still to do; see [docs/HANDOFF.md](docs/HANDOFF.md).)* Team create/join, admission, mTLS, `NodeApi`, blob transfer, `env-host` plugin, placement.
+- [ ] **M3: Remote execution + security.** Automated tests pass (`integration_remote`); **two-machine acceptance pending** — see [`tests/acceptance/m3_two_machines.md`](tests/acceptance/m3_two_machines.md). Team create/join, admission, mTLS, `NodeApi`, blob transfer, `env-host` plugin, placement.
   *Acceptance:* **Two machines:** on A, `zm run --remote-only -- sh -c 'hostname > out.txt'` with output `out.txt` produces a file containing **B's** hostname. A third machine not in the team never appears in `zm status` and can't call `NodeApi`.
 - [ ] **M4: Fan-out + resilience.** `zm run --each`, job DAGs, retries, drain/loss re-dispatch, donor policy file.
   *Acceptance:* `zm run --each 'cases/*' -- ./sim {}` with 20 CPU-bound cases (each ~30 s single-threaded, inputs under 10 MB) on 3 machines completes in under 45% of the single-machine time. Killing one donor's `zmd` mid-job still completes all 20 correctly.

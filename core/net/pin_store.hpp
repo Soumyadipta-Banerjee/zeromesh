@@ -22,6 +22,9 @@ public:
     std::optional<std::string> NodeFor(std::string_view fp) const;
     std::optional<std::string> FingerprintFor(std::string_view node_id) const;
 
+    // Number of pinned peers.
+    [[nodiscard]] size_t Count() const;
+
     // Pins (node_id, fp), replacing any older pin for node_id and any other node
     // pinned to fp. Throws std::invalid_argument on a malformed node id or
     // fingerprint and std::system_error if the file cannot be written.

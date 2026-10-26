@@ -18,17 +18,15 @@ namespace zeromesh::net {
 namespace {
 
 using grpc::experimental::ExternalCertificateVerifier;
-using grpc::experimental::InMemoryCertificateProvider;
+using grpc::experimental::IdentityKeyCertPair;
+using grpc::experimental::StaticDataCertificateProvider;
 using grpc::experimental::TlsCustomVerificationCheckRequest;
 
-std::shared_ptr<InMemoryCertificateProvider> IdentityProvider(const Identity& self) {
-    auto provider = std::make_shared<InMemoryCertificateProvider>();
-    std::vector<grpc::experimental::IdentityKeyOrSignerCertPair> pairs(1);
+std::shared_ptr<StaticDataCertificateProvider> IdentityProvider(const Identity& self) {
+    std::vector<IdentityKeyCertPair> pairs(1);
     pairs[0].private_key = self.key_pem;
     pairs[0].certificate_chain = self.cert_pem;
-    absl::Status st = provider->UpdateIdentityKeyCertPair(std::move(pairs));
-    if (!st.ok()) throw std::runtime_error("tls: bad node identity: " + std::string(st.message()));
-    return provider;
+    return std::make_shared<StaticDataCertificateProvider>(pairs);
 }
 
 // Accepts the server iff accept(fingerprint of its leaf certificate).
@@ -59,23 +57,23 @@ private:
 } // namespace
 
 std::shared_ptr<grpc::ServerCredentials> ServerCreds(const Identity& self) {
-    auto options = grpc::experimental::TlsServerCredentialsOptions::Create(IdentityProvider(self));
-    if (!options.ok()) throw std::runtime_error("tls: " + std::string(options.status().message()));
-    options->set_cert_request_type(GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_BUT_DONT_VERIFY);
+    auto provider = IdentityProvider(self);
+    grpc::experimental::TlsServerCredentialsOptions options(provider);
+    options.watch_identity_key_cert_pairs();
+    options.set_cert_request_type(GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_BUT_DONT_VERIFY);
     // Authorisation is the pin check in NodeService, which needs Admit from unpinned peers.
-    options->set_certificate_verifier(std::make_shared<grpc::experimental::NoOpCertificateVerifier>());
-    options->set_min_tls_version(grpc_tls_version::TLS1_3);
-    return grpc::experimental::TlsServerCredentials(*options);
+    options.set_certificate_verifier(std::make_shared<grpc::experimental::NoOpCertificateVerifier>());
+    return grpc::experimental::TlsServerCredentials(options);
 }
 
 std::shared_ptr<grpc::ChannelCredentials> ClientCreds(const Identity& self,
                                                       std::function<bool(std::string_view server_fp)> accept) {
     grpc::experimental::TlsChannelCredentialsOptions options;
-    options.set_identity_certificate_provider(IdentityProvider(self));
+    options.set_certificate_provider(IdentityProvider(self));
+    options.watch_identity_key_cert_pairs();
     options.set_verify_server_certs(false);
     options.set_check_call_host(false);
     options.set_certificate_verifier(ExternalCertificateVerifier::Create<FingerprintVerifier>(std::move(accept)));
-    options.set_min_tls_version(grpc_tls_version::TLS1_3);
     return grpc::experimental::TlsCredentials(options);
 }
 
