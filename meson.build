@@ -22,7 +22,7 @@ python3 = find_program('python3')
 
 subdir('proto/zeromesh/v1')
 
-inc = include_directories('src', '.', 'proto')
+inc = include_directories('src', 'core', '.', 'proto')
 
 zm_proto = static_library('zm_proto', zm_proto_cpp,
   include_directories: inc,
@@ -46,6 +46,7 @@ core_sources = files(
   'src/executor/bwrap.cpp',
   'src/executor/landlock.cpp',
   'src/ui/tui.cpp',
+  'core/plugin/loader.cpp',
 )
 
 zm_core = static_library('zm_core', core_sources,
@@ -71,10 +72,19 @@ test_bin = executable('unit_tests',
     'tests/unit/test_executor.cpp',
     'tests/unit/test_tui.cpp',
     'tests/unit/test_proto.cpp',
+    'tests/unit/test_plugin.cpp',
   ),
   include_directories: inc,
   link_with: zm_core,
   dependencies: common_deps,
 )
 
-test('all_unit_tests', test_bin)
+fake_env = shared_module('zm_fake_env', 'tests/plugins/fake_env.cpp',
+  include_directories: inc, name_prefix: 'lib')
+fake_env_badabi = shared_module('zm_fake_env_badabi', 'tests/plugins/fake_env.cpp',
+  include_directories: inc, name_prefix: 'lib', cpp_args: ['-DFAKE_ABI=99'])
+
+test('all_unit_tests', test_bin,
+  depends: [fake_env, fake_env_badabi],
+  env: {'ZM_TEST_PLUGIN_DIR': meson.current_build_dir()},
+)
