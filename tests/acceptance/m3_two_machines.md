@@ -52,3 +52,16 @@ M3 in `PLAN.md`.
 - Step 5 produces B's hostname.
 - A non-team machine never shows up in `zm status` on A or B.
 - Only then mark **M3** `[x]` in `PLAN.md`.
+
+## Results (Recorded by Ops)
+
+- **Date:** _Pending execution on two physical/virtual nodes_
+- **Machine A (Requester):** `<hostname-a>` (`<os/kernel>`)
+- **Machine B (Donor):** `<hostname-b>` (`<os/kernel>`)
+- **`out.txt` content:**
+  ```
+  <B-hostname>
+  ```
+- **Third-machine negative check:** _Pending_
+- **Status:** PENDING_RUN
+

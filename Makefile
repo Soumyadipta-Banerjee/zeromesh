@@ -1,4 +1,4 @@
-.PHONY: all setup build clean check run status test
+.PHONY: all setup build clean check run status test install
 
 all: build
 
@@ -12,6 +12,9 @@ build:
 test: build
 	meson test -C build --print-errorlogs
 
+install: build
+	ninja -C build install
+
 clean:
 	rm -rf build
 
@@ -22,3 +25,4 @@ status: build
 
 run: build
 	./build/zm $(ARGS)
+

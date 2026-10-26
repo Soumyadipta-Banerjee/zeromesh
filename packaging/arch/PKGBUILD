@@ -1,0 +1,49 @@
+# Maintainer: ZeroMesh Maintainers <maintainers@zeromesh.net>
+pkgname=zeromesh
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Zero-setup peer-to-peer compute and storage mesh daemon and CLI"
+arch=('x86_64')
+url="https://github.com/Soumyadipta-Banerjee/zeromesh"
+license=('Apache-2.0')
+depends=(
+    'protobuf'
+    'grpc'
+    'libsodium'
+    'openssl'
+    'bubblewrap'
+    'python'
+    'python-protobuf'
+    'python-grpcio'
+)
+makedepends=(
+    'meson'
+    'ninja'
+    'pkgconf'
+    'gcc'
+    'python-grpcio-tools'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/Soumyadipta-Banerjee/zeromesh/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    meson setup \
+        --prefix=/usr \
+        --buildtype=release \
+        -Db_ndebug=true \
+        build
+    ninja -C build
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    meson test -C build --print-errorlogs all_unit_tests
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    DESTDIR="$pkgdir" ninja -C build install
+    install -Dm644 packaging/systemd/zmd.service "$pkgdir/usr/lib/systemd/user/zmd.service"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
