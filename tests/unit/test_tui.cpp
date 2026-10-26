@@ -78,7 +78,8 @@ TEST(Tui_ActivityKeepsWorkingAndDone) {
     zeromesh::cli::RenderActivity(snap, out, false);
     const std::string s = out.str();
 
-    ASSERT_TRUE(s.find("1 working · 1 done · 1 failed/cancel") != std::string::npos);
+    ASSERT_TRUE(s.find("1 working · 1 done · 1 failed") != std::string::npos);
+    ASSERT_TRUE(s.find("WHERE") != std::string::npos);
     ASSERT_TRUE(s.find("WORKING") != std::string::npos);
     ASSERT_TRUE(s.find("DONE") != std::string::npos);
     ASSERT_TRUE(s.find("FAILED") != std::string::npos);
@@ -87,4 +88,30 @@ TEST(Tui_ActivityKeepsWorkingAndDone) {
     ASSERT_TRUE(s.find("submitted") != std::string::npos);
     ASSERT_TRUE(s.find("executing") != std::string::npos);
     ASSERT_TRUE(s.find('\033') == std::string::npos);
+}
+
+TEST(Tui_WhereNamesThePeer) {
+    zeromesh::v1::PeerList peers;
+    auto* self = peers.add_peers();
+    self->set_node_id("cccccccccccccccccccccccccccccccc");
+    self->set_hostname("yash");
+    self->set_is_self(true);
+    auto* bb = peers.add_peers();
+    bb->set_node_id("5768fd74cbf090b439705f55d8552f9d");
+    bb->set_hostname("bb");
+
+    zeromesh::v1::ActivitySnapshot snap;
+    auto* local = snap.add_tasks();
+    *local = Act("submitted", "frames_1_8", zeromesh::v1::RUNNING);
+    local->set_detail("cccccccccccccccccccccccccccccccc");
+    auto* remote = snap.add_tasks();
+    *remote = Act("submitted", "frames_9_16", zeromesh::v1::RUNNING);
+    remote->set_detail("5768fd74cbf090b439705f55d8552f9d");
+    *snap.add_tasks() = Act("executing", "frames_17_24", zeromesh::v1::RUNNING);
+
+    std::ostringstream out;
+    zeromesh::cli::RenderActivity(snap, out, false, &peers);
+    const std::string s = out.str();
+    ASSERT_TRUE(s.find("here") != std::string::npos);
+    ASSERT_TRUE(s.find("bb") != std::string::npos);
 }
