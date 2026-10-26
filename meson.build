@@ -18,15 +18,16 @@ dl_dep = cpp.find_library('dl', required: false)
 openssl_dep = dependency('openssl', required: false)
 protobuf_dep = dependency('protobuf', required: false)
 grpc_dep = dependency('grpc++', required: false)
+fuse3_dep = dependency('fuse3', required: false)
 
 # Include directories
-inc = include_directories('src', '.')
+inc = include_directories('include', 'src', '.')
 
 # Header-only architecture library interface
-# All subsystem contracts are defined under src/
+# All subsystem contracts are defined under src/ and include/
 zeromesh_headers = declare_dependency(
   include_directories: inc,
-  dependencies: [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep]
+  dependencies: [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep, fuse3_dep]
 )
 
 # Note for team developers:
