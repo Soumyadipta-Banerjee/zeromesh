@@ -732,12 +732,14 @@ std::vector<DhtNode> KademliaDht::FindClosestNodes(const Key& target, size_t cou
     return impl_->routing_table.FindClosest(target, count);
 }
 
-void KademliaDht::AnnounceChunk(const Key& chunk_hash) {
+void KademliaDht::AnnounceChunk(const Key& chunk_hash, uint16_t data_port) {
+    uint16_t port_to_use = (data_port > 0) ? data_port : impl_->listen_port;
+
     // Register ourselves as a provider locally.
     PeerContact self_contact;
     self_contact.id = impl_->self_id;
-    self_contact.ip_address = "0.0.0.0"; // Will be resolved by receiver.
-    self_contact.port = impl_->listen_port;
+    self_contact.ip_address = "127.0.0.1";
+    self_contact.port = port_to_use;
     impl_->local_store.AddProvider(chunk_hash, self_contact);
 
     // Find the k closest nodes to the chunk hash and send ANNOUNCE_CHUNK.
@@ -748,7 +750,7 @@ void KademliaDht::AnnounceChunk(const Key& chunk_hash) {
         AnnounceChunkRequest req;
         req.header = impl_->MakeHeader(RpcType::AnnounceChunk);
         req.chunk_hash = chunk_hash;
-        req.data_port = impl_->listen_port;
+        req.data_port = port_to_use;
 
         std::string dest = node.ip_address + ":" + std::to_string(node.port);
         impl_->transport.SendMessage(dest, req);

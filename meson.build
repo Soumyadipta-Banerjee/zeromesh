@@ -19,6 +19,7 @@ openssl_dep = dependency('openssl', required: false)
 protobuf_dep = dependency('protobuf', required: false)
 grpc_dep = dependency('grpc++', required: false)
 fuse3_dep = dependency('fuse3', required: false)
+gtk4_dep = dependency('gtk4', required: false)
 
 # Include directories
 inc = include_directories('include', 'src', '.')
@@ -85,6 +86,7 @@ test_sources = files(
   'tests/test_tui.cpp',
   'tests/test_dsm.cpp',
   'tests/test_vfs.cpp',
+  'tests/test_torrent_swarm.cpp',
   'src/cas/store.cpp',
   'src/cas/merkle.cpp',
   'src/cas/p2p_syncer.cpp',
@@ -117,3 +119,26 @@ test_bin = executable('unit_tests',
 )
 
 test('all_unit_tests', test_bin)
+
+# Example Application: BitTorrent P2P Directory Swarm GTK4 GUI
+if gtk4_dep.found()
+  torrent_gui_sources = files(
+    'tests/examples/torrent_gui.cpp',
+    'src/cas/store.cpp',
+    'src/cas/merkle.cpp',
+    'src/discovery/peer_table.cpp',
+    'src/discovery/mdns.cpp',
+    'src/dht/kademlia.cpp',
+    'src/dht/routing_table.cpp',
+    'src/dht/local_store.cpp',
+    'src/dht/transport.cpp',
+    'src/vfs/chunk_fetcher.cpp',
+    'src/vfs/fuse_fs.cpp'
+  )
+
+  executable('zm-torrent-gui',
+    torrent_gui_sources,
+    include_directories: inc,
+    dependencies: [threads_dep, dl_dep, openssl_dep, gtk4_dep]
+  )
+endif

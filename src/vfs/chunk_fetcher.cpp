@@ -607,8 +607,9 @@ struct ChunkFetcher::Impl {
 
         for (size_t attempt = 0; attempt < config.max_retries; ++attempt) {
             for (const auto& provider : providers) {
+                uint16_t target_port = provider.port > 0 ? provider.port : config.remote_chunk_port;
                 auto fetched = FetchFromPeer(provider.ip_address,
-                                              config.remote_chunk_port,
+                                              target_port,
                                               chunk_hash);
                 if (!fetched) continue;
 
@@ -708,7 +709,7 @@ void ChunkFetcher::PrefetchChunks(const std::vector<std::string>& chunk_hashes) 
 
 void ChunkFetcher::AnnounceLocalChunk(const std::string& chunk_hash) {
     dht::Key key = HexToKey(chunk_hash);
-    impl_->dht->AnnounceChunk(key);
+    impl_->dht->AnnounceChunk(key, impl_->config.local_serve_port);
 }
 
 } // namespace zeromesh::vfs
