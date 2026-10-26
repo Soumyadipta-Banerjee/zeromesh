@@ -1,0 +1,22 @@
+# Build output
+build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+
+# Editor and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Meson
+subprojects/packagecache/
+.ninja_log
+.ninja_deps
+
+# ZeroMesh local runtime cache
+.zeromesh/
