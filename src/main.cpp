@@ -10,6 +10,7 @@
 #include "reapi/server.hpp"
 #include "scheduler/heuristics.hpp"
 #include "scheduler/scheduler.hpp"
+#include "ui/tui.hpp"
 
 #include <iostream>
 #include <memory>
@@ -100,17 +101,16 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    zeromesh::ui::TerminalUI tui(peer_table, scheduler);
+
     if (command == "status") {
         PrintBanner();
-        std::cout << "--- Local ZeroMesh Cluster Status ---\n"
-                  << "Daemon Endpoint: 127.0.0.1:8980\n"
-                  << "Protocol: Google REAPI v2 over gRPC\n"
-                  << "CAS Storage: " << cas_store->GetBasePath() << "\n"
-                  << "Active Peers: " << peer_table->Count() << "\n"
-                  << "Scheduler Total Scheduled: " << scheduler->GetTotalScheduled() << "\n"
-                  << "Scheduler Total Local:     " << scheduler->GetTotalLocal() << "\n"
-                  << "Scheduler Total Offloaded: " << scheduler->GetTotalOffloaded() << "\n"
-                  << std::endl;
+        tui.PrintStatusSnapshot();
+        return 0;
+    }
+
+    if (command == "monitor") {
+        tui.RunLiveDashboard();
         return 0;
     }
 

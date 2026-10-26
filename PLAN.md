@@ -116,8 +116,8 @@ ZeroMesh operates as a single binary daemon (`zmd` / `zm`) installed on each mac
 
 ### Phase 5: Ergonomics & Observability
 - [x] Provide one-touch daemon management (`zm up`, `zm down`, `zm status`)
-- [ ] Provide terminal TUI monitor (`zm monitor`) showing cluster nodes, live core loads, and transfer speeds
-- [ ] Provide compiler integration script (`scripts/install_recc.sh`) for CMake, Make, and Meson builds
+- [x] Provide terminal TUI monitor (`zm monitor`) showing cluster nodes, live core loads, and transfer speeds
+- [x] Provide compiler integration script (`scripts/install_recc.sh`) for CMake, Make, and Meson builds
 
 ### Phase 6: BitTorrent-Style Kademlia DHT Engine
 - [ ] 256-bit BLAKE3 key space and $k$-bucket routing table ($k=8$).
@@ -132,10 +132,10 @@ ZeroMesh operates as a single binary daemon (`zmd` / `zm`) installed on each mac
 - [ ] Local NVMe/SSD LRU chunk cache for offline read resilience.
 
 ### Phase 8: Network Distributed Shared Memory (DSM) C Library (`libzmdsm`)
-- [ ] Implement public C library interface (`include/zmdsm.h`).
-- [ ] Virtual memory page trap engine using Linux `userfaultfd` and `mprotect`.
-- [ ] Twin-page dirty detection and bitwise XOR diff propagation over TCP/QUIC.
-- [ ] Distributed barrier synchronization (`zmdsm_barrier`) and distributed mutex (`zmdsm_lock`).
+- [x] Implement public C library interface (`include/zmdsm.h`).
+- [x] Virtual memory page trap engine using Linux `userfaultfd` and `mprotect`.
+- [x] Twin-page dirty detection and bitwise XOR diff propagation over TCP/QUIC.
+- [x] Distributed barrier synchronization (`zmdsm_barrier`) and distributed mutex (`zmdsm_lock`).
 
 ### Phase 9: Heterogeneous Accelerator & GPU Engine (`wgpu` / CUDA)
 - [ ] Implement `wgpu` compute shader dispatch (Vulkan on Linux, Metal on macOS, DX12 on Windows).
