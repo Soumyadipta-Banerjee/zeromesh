@@ -1,6 +1,7 @@
 #include "node/daemon.hpp"
 
 #include "plugins/env-host/env_host.hpp"
+#include "plugins/env-mirror/env_mirror.hpp"
 #include "exec/sandbox_runner.hpp"
 #include "net/discovery.hpp"
 #include "net/identity.hpp"
@@ -233,6 +234,7 @@ int Daemon::Run() {
         auto runner = std::make_shared<exec::SandboxRunner>(cas, merkle, config_.state_dir / "scratch");
         auto registry = std::make_shared<plugin::Registry>();
         registry->RegisterEnv(envhost::Make());
+        registry->RegisterEnv(mirror::MakeMirrorEnv());
         registry->LoadSearchPath();
         int hw = static_cast<int>(std::thread::hardware_concurrency());
         int slots = std::max(1, hw - 1);
