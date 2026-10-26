@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace zeromesh::discovery {
+namespace zeromesh::net {
 
 enum class PeerState {
     Active,
@@ -23,10 +23,14 @@ enum class PeerState {
 struct Peer {
     std::string id;
     std::string hostname;
+    std::string arch{};            // uname machine, e.g. "x86_64"
     std::string ip_address;
     int grpc_port{8980};
+    int node_port{8981};           // NodeApi TCP port
     int cores{1};
+    int cores_free{0};
     uint64_t memory_bytes{0};
+    uint64_t mem_available{0};
     double cpu_load_pct{0.0};     // 0.0 to 100.0%
     int battery_pct{-1};           // -1 for AC/Desktop, 0-100 for battery
     bool is_charging{true};
@@ -90,12 +94,6 @@ public:
     [[nodiscard]] std::vector<Peer> ListActive(std::chrono::milliseconds max_age = std::chrono::seconds(15)) const;
 
     /**
-     * @brief Selects the most capable, least-loaded peer available to accept remote tasks.
-     * Evaluates CPU capacity, load, battery, and network latency.
-     */
-    [[nodiscard]] std::optional<Peer> SelectBestWorker() const;
-
-    /**
      * @brief Removes peers whose last heartbeat exceeded the timeout window.
      */
     size_t PruneStale(std::chrono::milliseconds max_age = std::chrono::seconds(30));
@@ -111,4 +109,4 @@ private:
     std::vector<PreemptCallback> preempt_callbacks_;
 };
 
-} // namespace zeromesh::discovery
+} // namespace zeromesh::net

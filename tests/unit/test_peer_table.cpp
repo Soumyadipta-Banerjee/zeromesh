@@ -1,12 +1,12 @@
 #include "tests/unit/test_framework.hpp"
-#include "discovery/peer_table.hpp"
+#include "net/peer_table.hpp"
 
 #include <chrono>
 
 TEST(PeerTable_UpsertAndRetrieve) {
-    zeromesh::discovery::PeerTable table;
+    zeromesh::net::PeerTable table;
 
-    zeromesh::discovery::Peer p1{
+    zeromesh::net::Peer p1{
         .id = "node-alpha",
         .hostname = "laptop-1",
         .ip_address = "192.168.1.50",
@@ -32,55 +32,10 @@ TEST(PeerTable_UpsertAndRetrieve) {
     ASSERT_FALSE(table.Get("node-alpha").has_value());
 }
 
-TEST(PeerTable_SelectBestWorker) {
-    zeromesh::discovery::PeerTable table;
-
-    // Node 1: 4 cores, 80% load
-    table.Upsert(zeromesh::discovery::Peer{
-        .id = "node-busy",
-        .hostname = "busy-pc",
-        .ip_address = "192.168.1.10",
-        .grpc_port = 8980,
-        .cores = 4,
-        .cpu_load_pct = 80.0,
-        .battery_pct = 100,
-        .is_charging = true
-    });
-
-    // Node 2: 8 cores, 10% load (highest compute capacity)
-    table.Upsert(zeromesh::discovery::Peer{
-        .id = "node-fast",
-        .hostname = "fast-workstation",
-        .ip_address = "192.168.1.20",
-        .grpc_port = 8980,
-        .cores = 8,
-        .cpu_load_pct = 10.0,
-        .battery_pct = 100,
-        .is_charging = true
-    });
-
-    // Node 3: 16 cores, but battery < 20% and not charging (should be protected and not chosen)
-    table.Upsert(zeromesh::discovery::Peer{
-        .id = "node-low-battery",
-        .hostname = "dying-laptop",
-        .ip_address = "192.168.1.30",
-        .grpc_port = 8980,
-        .cores = 16,
-        .cpu_load_pct = 5.0,
-        .battery_pct = 12,
-        .is_charging = false
-    });
-
-    auto best = table.SelectBestWorker();
-    ASSERT_TRUE(best.has_value());
-    // Must select node-fast, skipping dying-laptop due to battery guard
-    ASSERT_EQ(best->id, "node-fast");
-}
-
 TEST(PeerTable_FastPreemptionSignal) {
-    zeromesh::discovery::PeerTable table;
+    zeromesh::net::PeerTable table;
 
-    table.Upsert(zeromesh::discovery::Peer{
+    table.Upsert(zeromesh::net::Peer{
         .id = "node-donor",
         .hostname = "donor-laptop",
         .ip_address = "192.168.1.100",
@@ -111,5 +66,4 @@ TEST(PeerTable_FastPreemptionSignal) {
     // Draining node must no longer be returned as an available active worker
     auto active_nodes = table.ListActive();
     ASSERT_EQ(active_nodes.size(), 0);
-    ASSERT_FALSE(table.SelectBestWorker().has_value());
 }
