@@ -1,6 +1,6 @@
 #pragma once
 
-#include "discovery/peer_table.hpp"
+#include "net/peer_table.hpp"
 
 #include <atomic>
 #include <memory>
@@ -13,7 +13,7 @@ namespace zeromesh::ui {
  */
 class TerminalUI {
 public:
-    explicit TerminalUI(std::shared_ptr<discovery::PeerTable> peer_table);
+    explicit TerminalUI(std::shared_ptr<net::PeerTable> peer_table);
     ~TerminalUI() = default;
 
     /**
@@ -27,7 +27,7 @@ public:
     void PrintStatusSnapshot() const;
 
 private:
-    std::shared_ptr<discovery::PeerTable> peer_table_;
+    std::shared_ptr<net::PeerTable> peer_table_;
     std::atomic<bool> keep_running_{true};
 };
 

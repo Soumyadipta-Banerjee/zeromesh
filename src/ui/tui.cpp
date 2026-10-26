@@ -10,7 +10,7 @@
 
 namespace zeromesh::ui {
 
-TerminalUI::TerminalUI(std::shared_ptr<discovery::PeerTable> peer_table)
+TerminalUI::TerminalUI(std::shared_ptr<net::PeerTable> peer_table)
     : peer_table_(std::move(peer_table)) {}
 
 void TerminalUI::PrintStatusSnapshot() const {
@@ -24,7 +24,7 @@ void TerminalUI::PrintStatusSnapshot() const {
 
     // 3. Cluster Peer Nodes Table
     std::cout << "\033[1;33m[ Discovered Mesh Workers (LAN multicast) ]\033[0m\n";
-    auto active_peers = peer_table_ ? peer_table_->ListActive() : std::vector<discovery::Peer>{};
+    auto active_peers = peer_table_ ? peer_table_->ListActive() : std::vector<net::Peer>{};
 
     if (active_peers.empty()) {
         std::cout << "  \033[90m(No remote peer nodes discovered yet. Listening on LAN UDP multicast 239.255.42.99:8988...)\033[0m\n\n";
@@ -45,7 +45,7 @@ void TerminalUI::PrintStatusSnapshot() const {
             std::ostringstream load_ss;
             load_ss << std::fixed << std::setprecision(1) << peer.cpu_load_pct << "%";
 
-            std::string status_str = (peer.state == discovery::PeerState::Active) ? "\033[32mActive\033[0m" : "\033[31mDraining\033[0m";
+            std::string status_str = (peer.state == net::PeerState::Active) ? "\033[32mActive\033[0m" : "\033[31mDraining\033[0m";
 
             std::cout << "  │ " << std::left << std::setw(20) << id_sub
                       << " │ " << std::left << std::setw(20) << host_ep
