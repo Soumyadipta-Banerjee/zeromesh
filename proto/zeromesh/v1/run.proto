@@ -1,0 +1,263 @@
+syntax = "proto3";
+
+package zeromesh.v1;
+
+import "zeromesh/v1/common.proto";
+
+// ---- What an adapter describes ----------------------------------------------------------------
+
+// A program the items need from a host environment.
+message Program {
+  string name = 1;           // looked up on PATH, or an absolute path
+  // "" = the exact build the requester has (same binary and libraries); otherwise a constraint
+  // on the version the probe prints: ">=4.0", ">=4.0,<5", "==4.2.1".
+  string version = 2;
+  repeated string probe = 3; // prints the version; default [name, "--version"]
+  string digest = 4;         // filled by the requester's daemon for exact programs
+}
+
+// Where the items' software comes from.
+message Env {
+  repeated Program programs = 1;     // host: what every donor must have
+  Digest tree = 2;                   // set: a captured tree, mounted read-only over the donor's /
+  repeated string shared_paths = 3;  // absolute paths every node already has (NFS); never uploaded
+  map<string, string> vars = 4;      // environment variables for every item
+}
+
+message Resources {
+  int32 cores = 1;      // per item process; 0 = 1
+  int64 mem_bytes = 2;  // per item process: a hard limit; 0 = none (a reservation is learned instead)
+  int32 gpus = 3;
+  string arch = 4;      // "" = the requester's
+}
+
+enum Where {
+  ANYWHERE = 0;
+  LOCAL_ONLY = 1;
+  REMOTE_ONLY = 2;
+}
+
+// Run once for consecutive items: "{first}" and "{last}" become the first and last item's seq.
+message Combine {
+  repeated string argv = 1;
+}
+
+// Items that share software, resources and placement.
+message Stage {
+  string name = 1;
+  Env env = 2;
+  Resources resources = 3;
+  string kind = 4;     // opaque label: costs and memory are learned per kind; warm dirs key on it
+  Combine combine = 5;
+  bool warm = 6;       // mount /warm, kept per (environment, kind) on each donor
+  bool network = 7;
+  Where where = 8;
+}
+
+message Output {
+  string path = 1;     // relative to the item's cwd; a file or a directory
+  string dest = 2;     // absolute path on the requester to write it to; "" = keep it in the store
+  bool optional = 3;   // absent is not a failure
+}
+
+message Item {
+  string id = 1;                    // stable across runs; printable, no spaces, at most 200 bytes
+  repeated string argv = 2;
+  map<string, string> env = 3;
+  string cwd = 4;                   // relative to the workspace root; "" = the root
+  repeated Output outputs = 5;
+  string changed_dest = 6;          // set: every file the item creates or modifies under cwd goes here
+  repeated string inputs = 7;       // workspace paths it reads (relative to the root); empty = all
+  string depfile = 8;               // Make-style file the item writes listing what it read (relative to cwd)
+  repeated string search_dirs = 9;  // with depfile: directories (relative to cwd) whose names also key the cache
+  string stage = 10;
+  int64 seq = 11;                   // position for Combine
+  double cost = 12;                 // relative size hint (e.g. input bytes) for the first run
+  repeated string after = 13;       // items that must succeed first; their outputs appear in /work
+  int32 priority = 14;              // higher first
+}
+
+message Policy {
+  optional int32 infra_retries = 1;   // donor lost, sandbox failure: default 3
+  optional int32 exit_retries = 2;    // non-zero exit: default 0
+  optional int32 timeout_s = 3;       // per item: default 3600
+  optional int32 hung_after_s = 4;    // no CPU progress and no output: default 600; 0 = never
+  optional bool keep_going = 5;       // default false: the first failed item cancels the run
+  optional bool local_fallback = 6;   // default true: an item no donor could run gets a local try
+  optional bool cache = 7;            // default true
+  optional int32 batch = 8;           // items per batch; default 0 = sized from cost and free slots
+  optional int64 deadline_unix_ms = 9; // cancel what is left at this time
+  optional double budget_core_s = 10;  // cancel what is left after this many core-seconds
+}
+
+message RunSpec {
+  string name = 1;               // the adapter, e.g. "zm-render"
+  Digest workspace = 2;          // from Snapshot
+  string workspace_path = 3;     // where it was taken from
+  repeated Stage stages = 4;     // an item names its stage; "" is a valid name
+  repeated Item items = 5;
+  Policy policy = 6;
+  bool open = 7;                 // a session: AddItems until CloseRun. Its client watches it (WatchRun)
+                                 // meanwhile: unwatched for a minute, it is cancelled ("disconnect")
+  string report_path = 8;        // absolute; written when the run ends
+  bool stream_logs = 9;          // RunEvents carry item stdout and stderr
+}
+
+// ---- What a run reports -----------------------------------------------------------------------
+
+enum ItemState {
+  ITEM_UNSPECIFIED = 0;
+  ITEM_WAITING = 1;    // for the items it comes after
+  ITEM_QUEUED = 2;
+  ITEM_RUNNING = 3;
+  ITEM_SUCCEEDED = 4;
+  ITEM_FAILED = 5;
+  ITEM_CANCELLED = 6;
+}
+
+enum FailureKind {
+  FAILURE_NONE = 0;
+  FAILURE_EXIT = 1;               // the command exited non-zero
+  FAILURE_MISSING_OUTPUT = 2;     // it exited 0 without a declared output
+  FAILURE_OOM = 3;
+  FAILURE_TIMEOUT = 4;
+  FAILURE_HUNG = 5;               // no CPU progress and no output for hung_after_s
+  FAILURE_ENV_UNAVAILABLE = 6;    // no node has the software
+  FAILURE_TOOLCHAIN_MISMATCH = 7; // nodes have it, but not the exact build the requester has
+  FAILURE_SANDBOX = 8;            // the sandbox itself failed
+  FAILURE_DONOR_LEFT = 9;         // retries ran out while donors kept leaving
+  FAILURE_CANCELLED = 10;
+  FAILURE_DEPENDENCY = 11;        // an item it comes after failed
+  FAILURE_NO_CAPACITY = 12;       // no node has, or lets work use, the memory, cores, GPUs or arch it needs
+}
+
+message Failure {
+  FailureKind kind = 1;
+  string message = 2;
+  int32 exit_code = 3;
+  bytes stdout_tail = 4;
+  bytes stderr_tail = 5;
+}
+
+message OutputFile {
+  string path = 1;     // relative to the item's cwd
+  Digest digest = 2;   // blob for files, tree for directories
+  bool is_dir = 3;
+  bool executable = 4;
+  bool symlink = 5;
+  string target = 6;
+  string placed = 7;   // where it was written on the requester
+}
+
+message Attempt {
+  string node = 1;
+  string hostname = 2;
+  int64 started_ms = 3;   // unix ms
+  int64 wall_ms = 4;
+  int64 cpu_ms = 5;
+  int64 peak_mem = 6;
+  int64 bytes_in = 7;     // inputs moved to the node for this item
+  int64 bytes_out = 8;    // outputs moved back
+  Failure failure = 9;    // FAILURE_NONE when it succeeded
+  string batch = 10;
+}
+
+message CacheInfo {
+  bool hit = 1;
+  string reason = 2;            // why it hit or missed, in words
+  repeated string changed = 3;  // paths that changed since the last run of this command
+  string source = 4;            // node the hit came from
+  string key = 5;
+}
+
+message ItemResult {
+  string id = 1;
+  ItemState state = 2;
+  repeated OutputFile outputs = 3;
+  repeated Attempt attempts = 4;
+  CacheInfo cache = 5;
+  Failure failure = 6;           // set when it failed or was cancelled
+  Digest stdout = 7;             // the last attempt's full logs
+  Digest stderr = 8;
+  repeated string footprint = 9; // workspace files it read, from its depfile
+}
+
+message ItemUpdate {
+  string id = 1;
+  ItemState state = 2;
+  string node = 3;
+  string hostname = 4;
+  int32 attempt = 5;
+  string detail = 6;
+}
+
+message ItemLog {
+  string id = 1;
+  int32 fd = 2;   // 1 = stdout, 2 = stderr
+  bytes chunk = 3;
+}
+
+// Something the user should know that is not one item's state: a donor excluded, a retry, ...
+message Notice {
+  string text = 1;
+  string node = 2;
+}
+
+message NodeShare {
+  string node = 1;
+  string hostname = 2;
+  int32 items = 3;        // items it finished
+  double core_s = 4;
+  string excluded = 5;    // why it took no work, if it took none
+}
+
+message RunStatus {
+  string run_id = 1;
+  string name = 2;
+  bool done = 3;
+  bool open = 4;
+  int32 total = 5;
+  int32 succeeded = 6;
+  int32 failed = 7;
+  int32 cancelled = 8;
+  int32 cached = 9;
+  int32 running = 10;
+  int32 queued = 11;
+  int64 started_ms = 12;
+  int64 finished_ms = 13;
+  int64 bytes_pushed = 14;
+  int64 bytes_pulled = 15;
+  int64 bytes_seeded = 16;
+  double core_s = 17;
+  repeated NodeShare nodes = 18;
+  string report_path = 19;
+  string workspace_path = 20;
+  string ended_by = 21;   // "" | "failure" | "cancel" | "deadline" | "budget" | "disconnect"
+}
+
+message RunEvent {
+  string run_id = 1;
+  oneof event {
+    ItemUpdate update = 2;
+    ItemResult result = 3;   // an item reached SUCCEEDED, FAILED or CANCELLED
+    ItemLog log = 4;
+    Notice notice = 5;
+    RunStatus finished = 6;  // the last event of a run
+  }
+}
+
+// Chrome trace event (loads in Perfetto): one complete span per attempt.
+message TraceEvent {
+  string name = 1;
+  string ph = 2;
+  int64 ts = 3;   // microseconds
+  int64 dur = 4;
+  string pid = 5; // node
+  int32 tid = 6;  // slot
+}
+
+message Report {
+  RunStatus run = 1;
+  repeated ItemResult items = 2;
+  repeated TraceEvent timeline = 3;
+}

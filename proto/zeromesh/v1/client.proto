@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package zeromesh.v1;
+
+import "zeromesh/v1/common.proto";
+import "zeromesh/v1/run.proto";
+
+message PutObjectsReply { repeated Digest stored = 1; }
+
+message SnapshotRequest {
+  string path = 1;          // absolute directory on this machine
+  bool force_large = 2;     // allow more than the upload limit
+  bool list = 3;            // fill `largest`
+  repeated string exclude = 4;  // .zmignore-style patterns to leave out too (before the root's .zmignore)
+}
+message FileSize {
+  string path = 1;
+  int64 bytes = 2;
+}
+message SnapshotReply {
+  Digest root = 1;
+  int64 total_bytes = 2;
+  int64 files = 3;
+  int64 rehashed = 4;              // files read this time (the rest came from the stat cache)
+  repeated string denied = 5;      // kept out by the secrets deny list
+  repeated FileSize largest = 6;   // with list: the biggest files
+  string warning = 7;
+}
+
+message Probe {
+  repeated string argv = 1;
+}
+message CaptureRequest {
+  repeated Probe probes = 1;   // commands that exercise the software; what they open is captured
+  repeated string paths = 2;   // absolute files or directories to include whole
+  string cwd = 3;              // where probes run (absolute); nothing under it is captured. "" = a scratch dir
+}
+message CaptureReply {
+  Digest tree = 1;
+  int64 files = 2;
+  int64 bytes = 3;
+  repeated string denied = 4;
+  string note = 5;             // e.g. what could not be traced
+  bool reused = 6;             // nothing changed since the last capture of the same probes
+}
+
+message RunRef { string run_id = 1; }
+message AddItemsRequest {
+  string run_id = 1;
+  repeated Item items = 2;
+}
+message WatchRequest {
+  string run_id = 1;
+  bool from_start = 2;  // replay the run's events so far before the live ones
+}
+message RunList { repeated RunStatus runs = 1; }
+
+message ForgetRequest {
+  string run_id = 1;   // forget the cache entries of this run's items
+  bool all = 2;        // or every entry
+  bool team = 3;       // also on every team peer
+}
+message ForgetReply { int64 forgotten = 1; }
+
+message PeerList { repeated PeerInfo peers = 1; }
+
+// A batch running on this node for some requester (this node as donor).
+message ActiveBatch {
+  string batch = 1;
+  string requester = 2;
+  string kind = 3;
+  int32 items = 4;
+  int32 done = 5;
+  string current = 6;   // item running now
+  int32 cores = 7;
+  bool running = 8;     // false = queued for a slot
+}
+message ActivitySnapshot {
+  repeated RunStatus runs = 1;        // submitted here
+  repeated ActiveBatch batches = 2;   // executing here
+}
+
+enum Severity {
+  SEVERITY_OK = 0;
+  SEVERITY_WARN = 1;
+  SEVERITY_ERROR = 2;
+}
+message Finding {
+  string check = 1;
+  Severity severity = 2;
+  string message = 3;
+  string fix = 4;
+}
+message DoctorReply { repeated Finding findings = 1; }
+
+message TeamSecretReply { string phrase = 1; }
+message TeamJoinRequest { string phrase = 1; }
+message TeamInfoReply {
+  bool in_team = 1;
+  string team_id = 2;
+  int32 peers_pinned = 3;
+}
+
+// Served by zmd on a unix socket under the runtime dir (zmd.sock, mode 0600).
+service ClientApi {
+  rpc PutObjects(stream Chunk) returns (PutObjectsReply);
+  rpc GetObjects(Digests) returns (stream Chunk);
+  rpc FindMissing(Digests) returns (Digests);
+
+  rpc Snapshot(SnapshotRequest) returns (SnapshotReply);
+  rpc CaptureEnv(CaptureRequest) returns (CaptureReply);
+
+  rpc SubmitRun(RunSpec) returns (RunRef);
+  rpc AddItems(AddItemsRequest) returns (Empty);
+  rpc CloseRun(RunRef) returns (Empty);
+  rpc WatchRun(WatchRequest) returns (stream RunEvent);
+  rpc GetRun(RunRef) returns (RunStatus);
+  rpc GetReport(RunRef) returns (Report);
+  rpc CancelRun(RunRef) returns (Empty);
+  rpc ResumeRun(RunRef) returns (RunRef);   // resubmit a past run; finished items come from the cache
+  rpc ListRuns(Empty) returns (RunList);
+
+  rpc ForgetCache(ForgetRequest) returns (ForgetReply);
+
+  rpc ListPeers(Empty) returns (PeerList);
+  rpc ListActivity(Empty) returns (ActivitySnapshot);
+  rpc Doctor(Empty) returns (DoctorReply);
+
+  rpc TeamCreate(Empty) returns (TeamSecretReply);
+  rpc TeamJoin(TeamJoinRequest) returns (Empty);
+  rpc TeamLeave(Empty) returns (Empty);
+  rpc TeamInfo(Empty) returns (TeamInfoReply);
+}

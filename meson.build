@@ -23,3 +23,18 @@ fuse3_dep = dependency('fuse3')
 protoc = find_program('protoc')
 grpc_cpp_plugin = find_program('grpc_cpp_plugin')
 python3 = find_program('python3')
+
+subdir('proto/zeromesh/v1')
+
+inc = include_directories('core', '.', 'proto')
+
+zm_proto = static_library('zm_proto', zm_proto_cpp,
+  include_directories: inc,
+  dependencies: [protobuf_dep, grpc_dep],
+)
+zm_proto_dep = declare_dependency(
+  sources: zm_proto_cpp,
+  include_directories: inc,
+  link_with: zm_proto,
+  dependencies: [protobuf_dep, grpc_dep],
+)
