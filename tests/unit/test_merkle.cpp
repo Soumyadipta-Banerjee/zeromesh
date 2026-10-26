@@ -1,12 +1,12 @@
 #include "tests/unit/test_framework.hpp"
-#include "cas/merkle.hpp"
-#include "cas/store.hpp"
+#include "store/merkle.hpp"
+#include "store/store.hpp"
 
 #include <filesystem>
 #include <fstream>
 
 TEST(DirectoryManifest_SerializationRoundtrip) {
-    using namespace zeromesh::cas;
+    using namespace zeromesh::store;
 
     DirectoryManifest orig;
     orig.files.push_back(FileNode{
@@ -57,7 +57,7 @@ TEST(DirectoryManifest_SerializationRoundtrip) {
 }
 
 TEST(MerkleBuilder_BuildAndMaterializeTree) {
-    using namespace zeromesh::cas;
+    using namespace zeromesh::store;
 
     auto test_root = std::filesystem::temp_directory_path() / "zm_test_merkle_src";
     auto test_dest = std::filesystem::temp_directory_path() / "zm_test_merkle_dst";

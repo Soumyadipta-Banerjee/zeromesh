@@ -8,7 +8,7 @@
 #include <string_view>
 #include <unordered_map>
 
-namespace zeromesh::cas {
+namespace zeromesh::store {
 
 /**
  * @brief Content addressable digest combining SHA-256 hex string and payload byte size.
@@ -96,4 +96,4 @@ private:
     const size_t max_mem_bytes_{64 * 1024 * 1024}; // 64 MB hot in-memory cache
 };
 
-} // namespace zeromesh::cas
+} // namespace zeromesh::store

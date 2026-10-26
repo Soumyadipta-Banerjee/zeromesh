@@ -38,8 +38,8 @@ zm_proto_dep = declare_dependency(
 common_deps = [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep, sodium_dep, zm_proto_dep]
 
 core_sources = files(
-  'src/cas/store.cpp',
-  'src/cas/merkle.cpp',
+  'core/store/store.cpp',
+  'core/store/merkle.cpp',
   'src/discovery/peer_table.cpp',
   'src/discovery/mdns.cpp',
   'src/executor/runner.cpp',
