@@ -11,6 +11,7 @@ runner are built on top as apps.
 ZeroMesh is moving to a **core + plugin architecture**. See the
 [design](docs/superpowers/specs/2026-10-26-core-plugin-architecture-design.md) and
 [PLAN.md](PLAN.md) for milestones and what is ticked.
+Teammates picking up work after M3: see the stream breakdown in [docs/team/TASKS.md](docs/team/TASKS.md).
 
 **What works today:**
 - A local content-addressed store (SHA-256) and directory tree hashing.
