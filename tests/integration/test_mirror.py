@@ -106,6 +106,43 @@ class MirrorIntegrationTest(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_mirror_local_on_requester(self):
+        """Requester runs mirror locally; tool exists only as a file on A."""
+        job_cwd = tempdir(self)
+        mirror_root = tempdir(self)
+        bin_dir = os.path.join(mirror_root, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        tool = os.path.join(bin_dir, "local_only")
+        with open(tool, "w") as f:
+            f.write("#!/bin/sh\n")
+            f.write('echo "mirror-local-ok" > out.txt\n')
+        os.chmod(tool, 0o755)
+
+        r = self.a.zm(
+            "run",
+            "--local-only",
+            "--env",
+            "mirror",
+            "--mirror",
+            mirror_root,
+            "-o",
+            "out.txt",
+            "--",
+            "/mirror/bin/local_only",
+            cwd=job_cwd,
+            timeout=120,
+        )
+        self.assertEqual(
+            r.returncode,
+            0,
+            r.stderr + "\nA log:\n" + self.a.log(),
+        )
+
+        out_file = os.path.join(job_cwd, "out.txt")
+        self.assertTrue(os.path.exists(out_file))
+        with open(out_file) as f:
+            self.assertEqual(f.read().strip(), "mirror-local-ok")
+
     def test_mirror_remote_only_tool_on_requester(self):
         """B runs a binary that exists only on A, exported via --mirror."""
         job_cwd = tempdir(self)

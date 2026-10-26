@@ -104,6 +104,7 @@ private:
         std::string exec_id;
         int cores{1};
         bool preemptible{true};
+        v1::TaskSpec spec;
         std::vector<store::Digest> needed;
     };
     void PurgeExpiredLocked();

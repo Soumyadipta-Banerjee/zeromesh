@@ -271,6 +271,54 @@ TEST(PlacerRetriesOnDonorDrain) {
     ASSERT_TRUE(saw_drain_retry);
 }
 
+TEST(PlacerMissingCommandNotRetried) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    a.peers->Upsert(b.AsPeer());
+    Requester req(a);
+
+    auto job = RemoteOnly("x");
+    job.mutable_tasks(0)->set_argv(0, "definitely-not-a-binary-xyz");
+    const std::string id = req.jm->Submit(job);
+    auto events = WaitDone(*req.jm, id);
+    auto st = req.jm->Get(id);
+    ASSERT_TRUE(st->done());
+    ASSERT_EQ(st->tasks().at("t"), v1::FAILED);
+    const std::string& err = st->results().at("t").error();
+    Expect(err.find("not found on this node") != std::string::npos, err);
+    Expect(err.find("no eligible nodes") == std::string::npos, err);
+    for (const auto& ev : events) {
+        ASSERT_FALSE(ev.state() == v1::QUEUED && ev.detail().find("retry ") == 0);
+    }
+}
+
+TEST(PlacerTimeoutNotRetried) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    a.peers->Upsert(b.AsPeer());
+    Requester req(a);
+
+    auto job = RemoteOnly("sleep 30");
+    job.mutable_tasks(0)->mutable_policy()->set_timeout_s(1);
+    const std::string id = req.jm->Submit(job);
+    auto events = WaitDone(*req.jm, id, std::chrono::seconds(20));
+    auto st = req.jm->Get(id);
+    ASSERT_TRUE(st->done());
+    ASSERT_EQ(st->tasks().at("t"), v1::FAILED);
+    const v1::TaskResult& r = st->results().at("t");
+    ASSERT_TRUE(r.timed_out());
+    Expect(r.error().find("no eligible nodes") == std::string::npos, r.error());
+    for (const auto& ev : events) {
+        ASSERT_FALSE(ev.state() == v1::QUEUED && ev.detail().find("retry ") == 0);
+    }
+}
+
 TEST(PlacerUserCancelNotRetried) {
     auto key = zeromesh::net::GenerateTeamKey();
     TestNodeFull a("node-a", key), b("node-b", key), c("node-c", key);

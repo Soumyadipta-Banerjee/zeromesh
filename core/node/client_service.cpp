@@ -19,6 +19,7 @@
 #include <optional>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 namespace zeromesh::node {
@@ -380,6 +381,7 @@ grpc::Status ClientService::UploadTree(grpc::ServerContext*, const v1::UploadTre
 grpc::Status ClientService::SubmitJob(grpc::ServerContext*, const v1::JobSpec* req, v1::SubmitReply* reply) {
     try {
         v1::JobSpec job = *req;
+        std::unordered_map<std::string, std::string> manifest_by_mirror_paths;
         for (int i = 0; i < job.tasks_size(); ++i) {
             v1::TaskSpec* t = job.mutable_tasks(i);
             if (t->env_spec().name() != "mirror") continue;
@@ -391,14 +393,16 @@ grpc::Status ClientService::SubmitJob(grpc::ServerContext*, const v1::JobSpec* r
             std::map<std::string, std::string> mirror_params(params->begin(), params->end());
             std::vector<fs::path> paths = ParseMirrorPaths(mirror_params);
             if (paths.empty()) {
-                const char* home = std::getenv("HOME");
-                if (!home || !home[0]) {
-                    return Invalid("mirror env requires mirror_paths or a HOME directory to export");
-                }
-                paths.push_back(fs::path(home));
+                return Invalid("mirror env requires at least one --mirror PATH");
             }
-            store::Digest root = BuildMirrorManifest(*merkle_, paths);
-            (*params)[kMirrorRootDigestParam] = root.hash;
+            const auto paths_it = params->find(kMirrorPathsParam);
+            const std::string paths_key = paths_it != params->end() ? paths_it->second : "";
+            auto cached = manifest_by_mirror_paths.find(paths_key);
+            if (cached == manifest_by_mirror_paths.end()) {
+                store::Digest root = BuildMirrorManifest(*merkle_, paths);
+                cached = manifest_by_mirror_paths.emplace(paths_key, root.hash).first;
+            }
+            (*params)[kMirrorRootDigestParam] = cached->second;
         }
         reply->set_job_id(jobs_->Submit(job));
     } catch (const std::invalid_argument& e) {

@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -57,8 +58,14 @@ public:
     [[nodiscard]] std::optional<v1::JobStatus> Get(const std::string& job_id) const;
     // Snapshot of submitted jobs for zm monitor (working + finished tasks stay listed).
     [[nodiscard]] std::vector<v1::ActiveTask> ListActive() const;
-    // Input and in-flight output digests of jobs that have not finished. GC must keep these.
+    // Input and in-flight output digests of jobs that have not finished, plus recent
+    // finished-job outputs for a short grace period. GC must keep these.
     [[nodiscard]] std::unordered_set<std::string> ProtectedBlobHashes() const;
+
+    // Test hooks for grace-period GC protection (no-op in production unless set).
+    static void SetFinishedJobBlobGracePeriodForTesting(std::chrono::seconds period);
+    static void SetClockForTesting(std::function<std::chrono::steady_clock::time_point()> now);
+    static void ResetProtectedBlobTestingHooks();
     // nullptr for an unknown job.
     std::shared_ptr<EventStream> Watch(const std::string& job_id);
 

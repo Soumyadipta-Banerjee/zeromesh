@@ -155,7 +155,8 @@ private:
     void RegisterBlobLocked(const std::string& hash, uint64_t size,
                             std::chrono::steady_clock::time_point when) const;
     bool DeleteBlobLocked(const std::string& hash);
-    void DropFromMemCacheLocked(const std::string& hash);
+    void DropFromMemCacheLocked(const std::string& hash) const;
+    void EvictBlobMetadataLocked(const std::string& hash) const;
 
     std::filesystem::path base_dir_;
     std::filesystem::path blobs_dir_;
@@ -172,7 +173,7 @@ private:
 
     mutable std::mutex mem_cache_mutex_;
     mutable std::unordered_map<std::string, std::string> mem_cache_;
-    size_t cur_mem_bytes_{0};
+    mutable size_t cur_mem_bytes_{0};
     const size_t max_mem_bytes_{64 * 1024 * 1024}; // 64 MB hot in-memory cache
 };
 
