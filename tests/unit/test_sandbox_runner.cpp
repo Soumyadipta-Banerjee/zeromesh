@@ -1,6 +1,7 @@
 #include "tests/unit/test_framework.hpp"
 #include "tests/unit/test_util.hpp"
 #include "exec/sandbox_runner.hpp"
+#include "plugins/env-host/env_host.hpp"
 
 #include <thread>
 
@@ -11,18 +12,6 @@ using zeromesh::exec::RunSpec;
 using zeromesh::exec::SandboxRunner;
 using zeromesh::testing::TempDir;
 
-// Mirrors the donor's /usr and its usr-merge layout, like the env-host plugin.
-zeromesh::plugin::SandboxEnv HostEnv() {
-    zeromesh::plugin::SandboxEnv env;
-    env.binds.push_back({"/usr", "/usr", true});
-    for (const char* p : {"/bin", "/sbin", "/lib", "/lib64"}) {
-        if (fs::is_symlink(p)) env.symlinks.push_back({fs::read_symlink(p).string(), p});
-        else if (fs::is_directory(p)) env.binds.push_back({p, p, true});
-    }
-    env.env.push_back({"PATH", "/usr/local/bin:/usr/bin:/bin"});
-    return env;
-}
-
 struct Fixture {
     TempDir dir;
     std::shared_ptr<zeromesh::store::CasStore> cas = std::make_shared<zeromesh::store::CasStore>(dir / "cas");
@@ -31,7 +20,7 @@ struct Fixture {
 
     zeromesh::exec::RunResult Sh(const std::string& script, RunSpec spec = {}) {
         spec.argv = {"sh", "-c", script};
-        spec.sandbox_env = HostEnv();
+        spec.sandbox_env = *zeromesh::envhost::Make()->Prepare({}).value;
         return runner.Run(spec, {}, std::stop_token{});
     }
 };
@@ -80,7 +69,7 @@ TEST(RunnerTimeoutAndCancel) {
     std::thread t([&] { std::this_thread::sleep_for(std::chrono::milliseconds(200)); src.request_stop(); });
     RunSpec s2;
     s2.argv = {"sleep", "30"};
-    s2.sandbox_env = HostEnv();
+    s2.sandbox_env = *zeromesh::envhost::Make()->Prepare({}).value;
     auto r2 = f.runner.Run(s2, {}, src.get_token());
     t.join();
     ASSERT_TRUE(r2.cancelled);
@@ -101,7 +90,7 @@ TEST(RunnerCommandNotFoundAndHugeOutput) {
     Fixture f;
     RunSpec spec;
     spec.argv = {"definitely-not-a-binary-xyz"};
-    spec.sandbox_env = HostEnv();
+    spec.sandbox_env = *zeromesh::envhost::Make()->Prepare({}).value;
     auto r = f.runner.Run(spec, {}, std::stop_token{});
     ASSERT_EQ(r.exit_code, 127);
     ASSERT_FALSE(r.stderr_head.empty());
