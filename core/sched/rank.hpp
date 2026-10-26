@@ -34,6 +34,9 @@ struct Candidate {
 //   - mem_available >= mem_bytes
 //   - policy.may_run_local / may_run_remote (unset = true)
 // Order: free slots descending, then missing_bytes, cpu_load_pct, AC, latency, node_id.
-std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates);
+// When candidate.missing_bytes is -1 (unknown), it is ranked as `unknown_missing_bytes`
+// (typically total input transfer size — worst case).
+std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates,
+                            int64_t unknown_missing_bytes = 0);
 
 } // namespace zeromesh::sched

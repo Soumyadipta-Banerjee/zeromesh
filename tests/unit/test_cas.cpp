@@ -1,9 +1,13 @@
 #include "tests/unit/test_framework.hpp"
+#include "node/action_cache.hpp"
 #include "store/store.hpp"
+#include "zeromesh/v1/common.pb.h"
 
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 TEST(CasComputeDigest_KnownVectors) {
@@ -95,4 +99,120 @@ TEST(CasRejectsNonDigestHash) {
     ASSERT_FALSE(cas.GetActionResult("../secret").has_value());
     ASSERT_FALSE(cas.PutActionResult("../x", "r"));
     ASSERT_FALSE(std::filesystem::exists(d / "x"));
+}
+
+namespace {
+
+std::string TaskKey() {
+    return "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+}
+
+zeromesh::v1::TaskResult CachedResult(const zeromesh::store::Digest& out_blob) {
+    zeromesh::v1::TaskResult r;
+    r.set_exit_code(0);
+    r.mutable_stdout()->set_hash("");
+    r.mutable_stderr()->set_hash("");
+    auto* o = r.add_outputs();
+    o->set_path("out.bin");
+    o->mutable_digest()->set_hash(out_blob.hash);
+    o->mutable_digest()->set_size_bytes(out_blob.size_bytes);
+    return r;
+}
+
+} // namespace
+
+TEST(CasCollectGarbage_EvictsLruUnprotected) {
+    zeromesh::testing::TempDir d;
+    zeromesh::store::CasLimits limits;
+    limits.max_blob_bytes = 1024;
+    zeromesh::store::CasStore store(d / "cas", limits);
+
+    const auto older = store.PutBlob(std::string(80, 'o'));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const auto newer = store.PutBlob(std::string(80, 'n'));
+
+    ASSERT_TRUE(store.GetBlob(older.hash).has_value());
+
+    std::unordered_set<std::string> protect{older.hash};
+    const auto stats = store.CollectGarbage(0, protect);
+    ASSERT_EQ(stats.blobs_removed, 1u);
+    ASSERT_TRUE(store.HasBlob(older.hash));
+    ASSERT_FALSE(store.HasBlob(newer.hash));
+}
+
+TEST(CasCollectGarbage_ProtectedSurvive) {
+    zeromesh::testing::TempDir d;
+    zeromesh::store::CasLimits limits;
+    limits.max_blob_bytes = 4096;
+    zeromesh::store::CasStore store(d / "cas", limits);
+
+    const auto keep = store.PutBlob("keep-me");
+    const auto drop = store.PutBlob("drop-me");
+
+    std::unordered_set<std::string> protect{keep.hash};
+    store.CollectGarbage(0, protect);
+
+    ASSERT_TRUE(store.HasBlob(keep.hash));
+    ASSERT_FALSE(store.HasBlob(drop.hash));
+}
+
+TEST(CasActionCache_MissWhenOutputBlobGone) {
+    zeromesh::testing::TempDir d;
+    auto cas_ptr = std::make_shared<zeromesh::store::CasStore>(d / "cas");
+    zeromesh::node::ActionCache cache(cas_ptr);
+    const auto blob = cas_ptr->PutBlob("cached-output");
+    cache.Put(TaskKey(), CachedResult(blob));
+
+    ASSERT_TRUE(cache.Get(TaskKey()).has_value());
+
+    cas_ptr->CollectGarbage(0, {});
+    ASSERT_FALSE(cache.Get(TaskKey()).has_value());
+    cache.PruneStale();
+    ASSERT_FALSE(cas_ptr->GetActionResult(TaskKey()).has_value());
+}
+
+TEST(CasQuota_ReserveIncomingRejectsWhenFull) {
+    zeromesh::testing::TempDir d;
+    zeromesh::store::CasLimits limits;
+    limits.max_blob_bytes = 200;
+    zeromesh::store::CasStore store(d / "cas", limits);
+
+    store.PutBlob(std::string(120, 'x'));
+    ASSERT_FALSE(store.ReserveIncoming(100));
+    ASSERT_TRUE(store.ReserveIncoming(50));
+    store.ReleaseIncoming(50);
+}
+
+TEST(CasConcurrentPutAndGc_Integrity) {
+    zeromesh::testing::TempDir d;
+    zeromesh::store::CasLimits limits;
+    limits.max_blob_bytes = 64 * 1024;
+    zeromesh::store::CasStore store(d / "cas", limits);
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> integrity_failures{0};
+
+    std::thread gc_thread([&] {
+        while (!stop.load()) {
+            store.CollectGarbage(store.BlobBytes() * 3 / 4, {});
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+
+    for (int i = 0; i < 40; ++i) {
+        const std::string payload = "payload-" + std::to_string(i) + "-" + std::string(64, 'p');
+        const auto digest = store.PutBlob(payload);
+        if (!store.HasBlob(digest.hash)) {
+            ++integrity_failures;
+            continue;
+        }
+        const auto got = store.GetBlob(digest.hash);
+        if (!got || *got != payload || zeromesh::store::CasStore::ComputeDigest(*got).hash != digest.hash) {
+            ++integrity_failures;
+        }
+    }
+
+    stop = true;
+    gc_thread.join();
+    ASSERT_EQ(integrity_failures.load(), 0);
 }

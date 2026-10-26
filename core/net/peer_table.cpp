@@ -20,6 +20,10 @@ void PeerTable::Upsert(Peer peer) {
             drained_reason = peer.draining_reason.empty() ? "draining" : peer.draining_reason;
             callbacks = preempt_callbacks_;
         }
+        if (it != peers_.end()) {
+            // Discovery always sends a placeholder latency; keep ping measurements.
+            peer.latency = it->second.latency;
+        }
         peers_[peer.id] = std::move(peer);
     }
     // Announcements with state=Draining must preempt the same way as ZM2D / NodeApi.Drain.
@@ -28,6 +32,23 @@ void PeerTable::Upsert(Peer peer) {
             if (cb) cb(drained_id, drained_reason);
         }
     }
+}
+
+void PeerTable::RecordMeasuredLatency(const std::string& id, std::chrono::milliseconds sample_rtt) {
+    if (sample_rtt <= std::chrono::milliseconds(0)) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = peers_.find(id);
+    if (it == peers_.end()) return;
+    const auto prev = it->second.latency;
+    if (prev <= std::chrono::milliseconds(0)) {
+        it->second.latency = sample_rtt;
+        return;
+    }
+    // EWMA with alpha = 0.25
+    const double alpha = 0.25;
+    const double ms = alpha * static_cast<double>(sample_rtt.count()) +
+                      (1.0 - alpha) * static_cast<double>(prev.count());
+    it->second.latency = std::chrono::milliseconds(static_cast<long long>(ms + 0.5));
 }
 
 void PeerTable::MarkDraining(const std::string& id, const std::string& reason) {

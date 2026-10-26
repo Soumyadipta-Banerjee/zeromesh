@@ -1,5 +1,7 @@
 #include "node/action_cache.hpp"
 
+#include <filesystem>
+
 namespace zeromesh::node {
 
 namespace {
@@ -32,6 +34,17 @@ void ActionCache::Put(const std::string& task_key, const v1::TaskResult& result)
     r.set_task_key(task_key);
     r.set_cache_hit(false);
     cas_->PutActionResult(task_key, r.SerializeAsString());
+}
+
+void ActionCache::PruneStale() {
+    const auto ac_dir = cas_->GetBasePath() / "ac";
+    std::error_code ec;
+    if (!std::filesystem::exists(ac_dir, ec)) return;
+    for (const auto& entry : std::filesystem::directory_iterator(ac_dir, ec)) {
+        if (ec || !entry.is_regular_file()) continue;
+        const std::string key = entry.path().filename().string();
+        if (!Get(key).has_value()) cas_->RemoveActionResult(key);
+    }
 }
 
 } // namespace zeromesh::node

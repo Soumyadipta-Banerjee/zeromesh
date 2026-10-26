@@ -477,7 +477,6 @@ void Discovery::HandlePacket(std::string_view packet, const std::string& sender_
             }
         }
         peer.ip_address = sender_ip;
-        peer.latency = std::chrono::milliseconds(1);
         peer.last_seen = std::chrono::steady_clock::now();
         peer_table_->Upsert(std::move(peer));
     } else if (packet.starts_with("ZM3D\t")) {

@@ -3,6 +3,7 @@
 #include "exec/sandbox_runner.hpp"
 #include "plugins/env-host/env_host.hpp"
 
+#include <cstdio>
 #include <thread>
 
 namespace {
@@ -134,4 +135,38 @@ TEST(RunnerOutputSymlinkNotFollowed) {
     ASSERT_EQ(r.outputs.size(), static_cast<size_t>(1));
     ASSERT_TRUE(r.outputs[0].is_symlink);
     ASSERT_EQ(r.outputs[0].symlink_target, std::string("/etc/hostname"));
+}
+
+TEST(RunnerMemoryLimitUnderCap) {
+    Fixture f;
+    const auto cap = zeromesh::exec::ProbeSandboxResourceEnforcement();
+    if (!cap.cgroup_memory && !cap.rlimit_memory) {
+        std::fprintf(stderr, "SKIP RunnerMemoryLimitUnderCap: no memory enforcement available\n");
+        return;
+    }
+    RunSpec spec;
+    spec.mem_bytes = 64ULL * 1024 * 1024;
+    auto r = f.Sh("python3 -c 'b=bytearray(32*1024*1024)'", spec);
+    ASSERT_EQ(r.error, std::string());
+    ASSERT_EQ(r.exit_code, 0);
+    ASSERT_TRUE(r.memory_enforced);
+}
+
+TEST(RunnerMemoryLimitOverCap) {
+    Fixture f;
+    const auto cap = zeromesh::exec::ProbeSandboxResourceEnforcement();
+    if (!cap.cgroup_memory && !cap.rlimit_memory) {
+        std::fprintf(stderr, "SKIP RunnerMemoryLimitOverCap: no memory enforcement available\n");
+        return;
+    }
+    RunSpec spec;
+    spec.mem_bytes = 64ULL * 1024 * 1024;
+    auto r = f.Sh("python3 -c 'b=bytearray(300*1024*1024)'", spec);
+    ASSERT_TRUE(r.memory_enforced);
+    if (cap.cgroup_memory) {
+        ASSERT_EQ(r.exit_code, 137);
+        ASSERT_TRUE(r.error.find("memory limit") != std::string::npos);
+    } else {
+        ASSERT_NE(r.exit_code, 0);
+    }
 }

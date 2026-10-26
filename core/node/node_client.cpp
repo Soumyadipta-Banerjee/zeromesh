@@ -172,6 +172,13 @@ std::optional<v1::PeerInfo> NodeClient::Ping(std::string* error) {
     return info;
 }
 
+std::optional<std::chrono::milliseconds> NodeClient::PingRtt(std::string* error) {
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!Ping(error)) return std::nullopt;
+    const auto dt = std::chrono::steady_clock::now() - t0;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(dt);
+}
+
 std::optional<v1::OfferReply> NodeClient::Offer(const std::string& task_id, const v1::TaskSpec& spec,
                                                 const std::vector<v1::Digest>& needed, std::string* error) {
     auto stub = PinnedStub(error);

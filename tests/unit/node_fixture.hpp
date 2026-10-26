@@ -75,7 +75,8 @@ struct TestNodeFull {
           registry(std::make_shared<plugin::Registry>()) {
         registry->RegisterEnv(envhost::Make());
         runner = std::make_shared<exec::SandboxRunner>(cas, merkle, dir / "scratch");
-        executor = std::make_shared<node::LocalExecutor>(runner, registry, node_id, 2);
+        executor = std::make_shared<node::LocalExecutor>(runner, registry, node_id, 2, dir / "scratch", cas,
+                                                         node::NodeClientFactory{});
     }
 
     ~TestNodeFull() { Stop(); }

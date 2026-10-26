@@ -143,6 +143,7 @@ public:
     void Cancel(const std::string& job_id);
     std::optional<v1::JobStatus> Get(const std::string& job_id) const;
     std::vector<v1::ActiveTask> ListActive() const;
+    std::unordered_set<std::string> ProtectedBlobHashes() const;
     std::shared_ptr<EventStream> Watch(const std::string& job_id);
     void CancelAll();
 
@@ -604,6 +605,24 @@ std::string JobManager::Submit(v1::JobSpec spec) { return impl_->Submit(std::mov
 void JobManager::Cancel(const std::string& job_id) { impl_->Cancel(job_id); }
 std::optional<v1::JobStatus> JobManager::Get(const std::string& job_id) const { return impl_->Get(job_id); }
 std::vector<v1::ActiveTask> JobManager::ListActive() const { return impl_->ListActive(); }
+
+std::unordered_set<std::string> JobManager::Impl::ProtectedBlobHashes() const {
+    std::unordered_set<std::string> out;
+    std::lock_guard lock(mu_);
+    for (const auto& [id, job] : jobs_) {
+        if (!job || job->done) continue;
+        for (const auto& t : job->tasks) {
+            if (!t.spec.input_root().hash().empty()) out.insert(t.spec.input_root().hash());
+            if (!t.has_result) continue;
+            for (const auto& o : t.result.outputs()) {
+                if (!o.digest().hash().empty()) out.insert(o.digest().hash());
+            }
+        }
+    }
+    return out;
+}
+
+std::unordered_set<std::string> JobManager::ProtectedBlobHashes() const { return impl_->ProtectedBlobHashes(); }
 std::shared_ptr<EventStream> JobManager::Watch(const std::string& job_id) { return impl_->Watch(job_id); }
 
 } // namespace zeromesh::node

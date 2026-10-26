@@ -120,6 +120,52 @@ Placer::Placer(std::shared_ptr<node::LocalExecutor> local, std::shared_ptr<net::
     });
 }
 
+int64_t Placer::InputTreeBytes(const v1::TaskSpec& spec) const {
+    const auto root = node::FromProto(spec.input_root());
+    if (root.hash.empty()) return 0;
+    int64_t sum = 0;
+    for (const auto& d : merkle_->CollectTree(root)) {
+        sum += std::max<int64_t>(d.size_bytes, 0);
+    }
+    return sum;
+}
+
+namespace {
+
+std::string PushCacheKey(const std::string& node_id, const std::string& input_root_hash) {
+    return node_id + '\0' + input_root_hash;
+}
+
+} // namespace
+
+int64_t Placer::EstimatedMissingBytes(const std::string& node_id, const std::string& input_root_hash,
+                                      int64_t total_bytes) const {
+    if (total_bytes <= 0) return 0;
+    std::lock_guard lock(push_cache_mu_);
+    auto it = push_cache_.find(PushCacheKey(node_id, input_root_hash));
+    if (it == push_cache_.end()) return -1;
+    return std::max<int64_t>(0, total_bytes - it->second);
+}
+
+void Placer::NoteInputsPushed(const std::string& node_id, const std::string& input_root_hash, int64_t bytes_pushed,
+                              int64_t total_bytes) {
+    if (total_bytes <= 0) return;
+    const std::string key = PushCacheKey(node_id, input_root_hash);
+    std::lock_guard lock(push_cache_mu_);
+    int64_t prev = 0;
+    if (auto it = push_cache_.find(key); it != push_cache_.end()) prev = it->second;
+    const int64_t on_peer =
+        std::min(total_bytes, prev + std::max<int64_t>(0, bytes_pushed));
+    push_cache_[key] = on_peer;
+    push_cache_lru_.remove(key);
+    push_cache_lru_.push_front(key);
+    while (push_cache_.size() > kPushCacheMax) {
+        const std::string evict = push_cache_lru_.back();
+        push_cache_lru_.pop_back();
+        push_cache_.erase(evict);
+    }
+}
+
 Placer::~Placer() {
     std::vector<std::shared_ptr<Task>> tasks;
     {
@@ -303,6 +349,8 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     std::unordered_set<std::string> tried;  // nodes already offered this placement round
     std::string last_reason = "no eligible nodes";
     std::optional<std::vector<v1::Digest>> needed;
+    const std::string input_root_hash = spec.input_root().hash();
+    const int64_t input_tree_bytes = InputTreeBytes(spec);
 
     auto release = [&](const Reservation& res) {
         std::lock_guard lock(shared_->mu);
@@ -342,10 +390,11 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                                            .on_ac = p.is_charging,
                                            .arch = p.arch,
                                            .latency = p.latency,
-                                           .missing_bytes = -1,
+                                           .missing_bytes =
+                                               EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
                                            .in_flight = shared_->InFlightLocked(p.id)});
         }
-        for (const Candidate& c : Rank(spec, std::move(candidates))) {
+        for (const Candidate& c : Rank(spec, std::move(candidates), input_tree_bytes)) {
             shared_->AddLocked(c.node_id, 1);
             {
                 std::lock_guard tlock(task->mu);
@@ -393,10 +442,11 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                                            .on_ac = p.is_charging,
                                            .arch = p.arch,
                                            .latency = p.latency,
-                                           .missing_bytes = -1,
+                                           .missing_bytes =
+                                               EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
                                            .in_flight = 0});
         }
-        return !Rank(spec, std::move(candidates)).empty();
+        return !Rank(spec, std::move(candidates), input_tree_bytes).empty();
     };
 
     // Donor drain may arrive as MarkDraining, or only as a cancelled TaskResult if the
@@ -457,8 +507,24 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         }
         if (!needed) {
             needed.emplace();
-            for (const auto& d : merkle_->CollectTree(node::FromProto(spec.input_root()))) {
+            std::unordered_set<std::string> seen;
+            auto add_digest = [&](const store::Digest& d) {
+                if (d.hash.empty() || !seen.insert(d.hash).second) return;
                 needed->push_back(node::ToProto(d));
+            };
+            for (const auto& d : merkle_->CollectTree(node::FromProto(spec.input_root()))) {
+                add_digest(d);
+            }
+            if (spec.env_spec().name() == "mirror") {
+                auto it = spec.env_spec().params().find("root_digest");
+                if (it != spec.env_spec().params().end() && store::CasStore::IsValidHash(it->second)) {
+                    store::Digest root;
+                    root.hash = it->second;
+                    if (auto bytes = cas_->GetBlob(it->second)) {
+                        root.size_bytes = static_cast<int64_t>(bytes->size());
+                    }
+                    add_digest(root);
+                }
             }
         }
         {
@@ -505,6 +571,12 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             skip.insert(reserved->node_id);
             tried.erase(reserved->node_id);
             continue;
+        }
+        {
+            int64_t pushed = 0;
+            for (const auto& d : missing) pushed += std::max<int64_t>(d.size_bytes(), 0);
+            if (missing.empty()) pushed = input_tree_bytes;
+            NoteInputsPushed(reserved->node_id, input_root_hash, pushed, input_tree_bytes);
         }
         if (task->cancelled.load()) {
             release(*reserved);

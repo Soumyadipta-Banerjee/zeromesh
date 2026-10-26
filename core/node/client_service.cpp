@@ -1,6 +1,7 @@
 #include "node/client_service.hpp"
 
 #include "node/convert.hpp"
+#include "node/mirror_manifest.hpp"
 
 #include <fcntl.h>
 #include <sodium.h>
@@ -378,7 +379,28 @@ grpc::Status ClientService::UploadTree(grpc::ServerContext*, const v1::UploadTre
 
 grpc::Status ClientService::SubmitJob(grpc::ServerContext*, const v1::JobSpec* req, v1::SubmitReply* reply) {
     try {
-        reply->set_job_id(jobs_->Submit(*req));
+        v1::JobSpec job = *req;
+        for (int i = 0; i < job.tasks_size(); ++i) {
+            v1::TaskSpec* t = job.mutable_tasks(i);
+            if (t->env_spec().name() != "mirror") continue;
+            auto* params = t->mutable_env_spec()->mutable_params();
+            if (params->find(kMirrorRequesterParam) == params->end()) {
+                (*params)[kMirrorRequesterParam] = options_.node_id;
+            }
+            if (params->find(kMirrorRootDigestParam) != params->end()) continue;
+            std::map<std::string, std::string> mirror_params(params->begin(), params->end());
+            std::vector<fs::path> paths = ParseMirrorPaths(mirror_params);
+            if (paths.empty()) {
+                const char* home = std::getenv("HOME");
+                if (!home || !home[0]) {
+                    return Invalid("mirror env requires mirror_paths or a HOME directory to export");
+                }
+                paths.push_back(fs::path(home));
+            }
+            store::Digest root = BuildMirrorManifest(*merkle_, paths);
+            (*params)[kMirrorRootDigestParam] = root.hash;
+        }
+        reply->set_job_id(jobs_->Submit(job));
     } catch (const std::invalid_argument& e) {
         return Invalid(e.what());
     } catch (const std::exception& e) {

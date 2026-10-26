@@ -7,13 +7,17 @@
 #include <poll.h>
 #include <signal.h>
 #include <sodium.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <sstream>
 
 namespace zeromesh::exec {
@@ -135,7 +139,192 @@ void ForceRemove(const fs::path& dir) {
     fs::remove_all(dir, ec);
 }
 
+std::string Trim(std::string s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    return s.substr(i);
+}
+
+std::string ReadSmallFile(const fs::path& p) {
+    std::ifstream in(p);
+    if (!in) return {};
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return Trim(ss.str());
+}
+
+bool WriteSmallFile(const fs::path& p, const std::string& data) {
+    std::ofstream out(p);
+    if (!out) return false;
+    out << data;
+    return static_cast<bool>(out);
+}
+
+bool ControllerListed(const std::string& haystack, const char* name) {
+    std::string n(name);
+    size_t pos = 0;
+    while (pos < haystack.size()) {
+        while (pos < haystack.size() && haystack[pos] == ' ') ++pos;
+        size_t end = haystack.find(' ', pos);
+        if (end == std::string::npos) end = haystack.size();
+        if (haystack.compare(pos, end - pos, n) == 0) return true;
+        pos = end + 1;
+    }
+    return false;
+}
+
+bool EnableSubtreeControllers(const fs::path& parent, const char* const* names, size_t count) {
+    const std::string avail = ReadSmallFile(parent / "cgroup.controllers");
+    const std::string enabled = ReadSmallFile(parent / "cgroup.subtree_control");
+    std::ostringstream cmd;
+    for (size_t i = 0; i < count; ++i) {
+        if (!ControllerListed(avail, names[i])) continue;
+        if (ControllerListed(enabled, names[i])) continue;
+        cmd << '+' << names[i] << ' ';
+    }
+    const std::string add = cmd.str();
+    if (add.empty()) return true;
+    return WriteSmallFile(parent / "cgroup.subtree_control", add);
+}
+
+bool CgroupFileWritable(const fs::path& p) { return access(p.c_str(), W_OK) == 0; }
+
+// Deepest cgroup along our ancestry that can host per-task limits (systemd scopes often lack them).
+std::optional<fs::path> FindTaskCgroupParent() {
+    std::ifstream cg("/proc/self/cgroup");
+    std::string line;
+    std::string rel;
+    while (std::getline(cg, line)) {
+        if (line.rfind("0::", 0) == 0) {
+            rel = line.substr(3);
+            break;
+        }
+    }
+    if (rel.empty() || rel[0] != '/') return std::nullopt;
+
+    fs::path cur = fs::path("/sys/fs/cgroup") / rel.substr(1);
+    const fs::path root = "/sys/fs/cgroup";
+    while (true) {
+        static const char* kCtrls[] = {"memory", "cpu", "pids"};
+        EnableSubtreeControllers(cur, kCtrls, 3);
+
+        const std::string probe_name = ".zm-cg-probe-" + RandomHex(4);
+        const fs::path probe = cur / probe_name;
+        std::error_code ec;
+        fs::create_directory(probe, ec);
+        if (!ec) {
+            const bool mem = CgroupFileWritable(probe / "memory.max");
+            const bool cpu = CgroupFileWritable(probe / "cpu.max");
+            fs::remove(probe, ec);
+            if (mem || cpu) return cur;
+        }
+        if (cur == root || cur.parent_path() == cur) break;
+        cur = cur.parent_path();
+    }
+    return std::nullopt;
+}
+
+struct PreparedCgroup {
+    fs::path dir;
+    bool memory{false};
+    bool cpu{false};
+};
+
+std::optional<PreparedCgroup> PrepareTaskCgroup(const fs::path& parent, int cores, uint64_t mem_bytes) {
+    static const char* kCtrls[] = {"memory", "cpu", "pids"};
+    if (!EnableSubtreeControllers(parent, kCtrls, 3)) return std::nullopt;
+
+    PreparedCgroup out;
+    out.dir = parent / ("zm-task-" + RandomHex(8));
+    std::error_code ec;
+    fs::create_directory(out.dir, ec);
+    if (ec) return std::nullopt;
+
+    if (mem_bytes > 0 && CgroupFileWritable(out.dir / "memory.max")) {
+        if (!WriteSmallFile(out.dir / "memory.max", std::to_string(mem_bytes))) {
+            fs::remove(out.dir, ec);
+            return std::nullopt;
+        }
+        if (CgroupFileWritable(out.dir / "memory.swap.max")) WriteSmallFile(out.dir / "memory.swap.max", "0");
+        out.memory = true;
+    }
+    if (cores > 0 && CgroupFileWritable(out.dir / "cpu.max")) {
+        const std::string quota = std::to_string(static_cast<int64_t>(cores) * 100000) + " 100000";
+        if (WriteSmallFile(out.dir / "cpu.max", quota)) out.cpu = true;
+    }
+    if (CgroupFileWritable(out.dir / "pids.max")) WriteSmallFile(out.dir / "pids.max", "4096");
+
+    if (!out.memory && !out.cpu) {
+        fs::remove(out.dir, ec);
+        return std::nullopt;
+    }
+    return out;
+}
+
+void JoinCgroup(const fs::path& dir) {
+    const fs::path procs = dir / "cgroup.procs";
+    int fd = open(procs.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    const std::string pid = std::to_string(getpid()) + "\n";
+    (void)!write(fd, pid.data(), pid.size());
+    close(fd);
+}
+
+void RemoveTaskCgroup(const fs::path& dir) {
+    std::error_code ec;
+    fs::remove(dir, ec);
+}
+
+// RLIMIT_DATA caps the heap; it does not limit mmap-heavy workloads as tightly as cgroup memory.max.
+void ApplyRlimitMemory(uint64_t mem_bytes) {
+    if (mem_bytes == 0) return;
+    rlimit rl{};
+    const rlim_t cap = static_cast<rlim_t>(mem_bytes);
+    rl.rlim_cur = rl.rlim_max = cap;
+    setrlimit(RLIMIT_DATA, &rl);
+}
+
+void ApplyBaselineRlimits() {
+    rlimit rp{};
+    rp.rlim_cur = 4096;
+    rp.rlim_max = 4096;
+    setrlimit(RLIMIT_NPROC, &rp);
+    rlimit rc{};
+    rc.rlim_cur = rc.rlim_max = 0;
+    setrlimit(RLIMIT_CORE, &rc);
+}
+
+bool CgroupHadOomKill(const fs::path& dir) {
+    const std::string events = ReadSmallFile(dir / "memory.events");
+    const std::string key = "oom_kill ";
+    const auto pos = events.find(key);
+    if (pos == std::string::npos) return false;
+    size_t i = pos + key.size();
+    while (i < events.size() && events[i] == ' ') ++i;
+    long long count = 0;
+    try {
+        count = std::stoll(events.substr(i));
+    } catch (...) {
+        return false;
+    }
+    return count > 0;
+}
+
 } // namespace
+
+ResourceEnforcementStatus ProbeSandboxResourceEnforcement() {
+    ResourceEnforcementStatus st;
+    st.rlimit_memory = true;
+    auto parent = FindTaskCgroupParent();
+    if (!parent) return st;
+    auto cg = PrepareTaskCgroup(*parent, 1, 64 * 1024);
+    if (!cg) return st;
+    st.cgroup_memory = cg->memory;
+    st.cgroup_cpu = cg->cpu;
+    RemoveTaskCgroup(cg->dir);
+    return st;
+}
 
 SandboxRunner::SandboxRunner(std::shared_ptr<store::CasStore> store, std::shared_ptr<store::MerkleBuilder> merkle,
                              fs::path scratch_base)
@@ -201,13 +390,33 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     for (auto& a : args) cargv.push_back(a.data());
     cargv.push_back(nullptr);
 
+    std::optional<PreparedCgroup> task_cgroup;
+    const bool want_mem = spec.mem_bytes > 0;
+    const bool want_cpu = spec.cores > 0;
+    if (want_mem || want_cpu) {
+        if (auto parent = FindTaskCgroupParent()) task_cgroup = PrepareTaskCgroup(*parent, spec.cores, spec.mem_bytes);
+    }
+    if (task_cgroup) {
+        result.memory_enforced = task_cgroup->memory;
+        result.cpu_enforced = task_cgroup->cpu;
+    }
+    const bool use_rlimit_mem = want_mem && !(task_cgroup && task_cgroup->memory);
+    if (use_rlimit_mem) result.memory_enforced = true;
+    if (want_cpu && !(task_cgroup && task_cgroup->cpu)) {
+        result.resource_note = "CPU limit not enforced without cgroup delegation";
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         result.error = "fork failed";
+        if (task_cgroup) RemoveTaskCgroup(task_cgroup->dir);
         ForceRemove(scratch);
         return result;
     }
     if (pid == 0) {
+        if (task_cgroup) JoinCgroup(task_cgroup->dir);
+        if (use_rlimit_mem) ApplyRlimitMemory(spec.mem_bytes);
+        ApplyBaselineRlimits();
         setpgid(0, 0);
         EnterIdlePriority();
         int devnull = open("/dev/null", O_RDONLY);
@@ -261,6 +470,15 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     else if (WIFSIGNALED(status)) result.exit_code = 128 + WTERMSIG(status);
     // bwrap reports a missing command as exit 1 + "bwrap: execvp ..."; use the shell convention.
     if (result.exit_code == 1 && result.stderr_head.rfind("bwrap: execvp ", 0) == 0) result.exit_code = 127;
+
+    if (!result.timed_out && !result.cancelled && result.memory_enforced) {
+        const bool cgroup_oom = task_cgroup && CgroupHadOomKill(task_cgroup->dir);
+        const bool oom_exit = result.exit_code == 137;
+        if (cgroup_oom || oom_exit) {
+            result.error = "task exceeded memory limit (killed)";
+        }
+    }
+    if (task_cgroup) RemoveTaskCgroup(task_cgroup->dir);
 
     out_file.close();
     err_file.close();

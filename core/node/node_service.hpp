@@ -31,6 +31,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -73,6 +74,9 @@ public:
     // Node ids of requesters that currently have a reserved or running task here.
     [[nodiscard]] std::vector<std::string> RequestersWithWork() const;
 
+    // Digests of reserved and running remote inputs. GC must not delete these.
+    [[nodiscard]] std::unordered_set<std::string> ProtectedBlobHashes() const;
+
     // Cancels every running remote task whose Policy.preemptible is true (default).
     // Returns how many were cancelled.
     int CancelPreemptible();
@@ -100,6 +104,7 @@ private:
         std::string exec_id;
         int cores{1};
         bool preemptible{true};
+        std::vector<store::Digest> needed;
     };
     void PurgeExpiredLocked();
     int CoresInUseLocked() const;

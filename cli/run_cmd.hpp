@@ -18,6 +18,7 @@ struct RunOptions {
     int cores{0};
     int64_t mem_bytes{0};
     std::string env{"host"};
+    std::vector<std::string> mirror_paths;  // --mirror (repeatable); required for --env mirror
     bool force_large{false};
     // When set, one task per filesystem match of this glob (relative to cwd).
     std::optional<std::string> each_glob;

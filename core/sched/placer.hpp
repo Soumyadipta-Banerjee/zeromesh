@@ -21,12 +21,14 @@
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -70,6 +72,17 @@ private:
     v1::TaskResult RunLocal(const std::shared_ptr<Task>& task, const v1::TaskSpec& spec);
     void OnPeerDrain(const std::string& node_id, const std::string& reason);
     void ReapFinishedLocked();
+
+    [[nodiscard]] int64_t InputTreeBytes(const v1::TaskSpec& spec) const;
+    [[nodiscard]] int64_t EstimatedMissingBytes(const std::string& node_id, const std::string& input_root_hash,
+                                                int64_t total_bytes) const;
+    void NoteInputsPushed(const std::string& node_id, const std::string& input_root_hash, int64_t bytes_pushed,
+                          int64_t total_bytes);
+
+    mutable std::mutex push_cache_mu_;
+    std::unordered_map<std::string, int64_t> push_cache_;  // "node|root" -> bytes known on peer
+    std::list<std::string> push_cache_lru_;
+    static constexpr size_t kPushCacheMax = 128;
 
     std::shared_ptr<node::LocalExecutor> local_;
     std::shared_ptr<net::PeerTable> peers_;

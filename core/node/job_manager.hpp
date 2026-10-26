@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace zeromesh::node {
@@ -56,6 +57,8 @@ public:
     [[nodiscard]] std::optional<v1::JobStatus> Get(const std::string& job_id) const;
     // Snapshot of submitted jobs for zm monitor (working + finished tasks stay listed).
     [[nodiscard]] std::vector<v1::ActiveTask> ListActive() const;
+    // Input and in-flight output digests of jobs that have not finished. GC must keep these.
+    [[nodiscard]] std::unordered_set<std::string> ProtectedBlobHashes() const;
     // nullptr for an unknown job.
     std::shared_ptr<EventStream> Watch(const std::string& job_id);
 

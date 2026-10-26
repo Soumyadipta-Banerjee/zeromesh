@@ -1,5 +1,7 @@
 #include "cli/run_cmd.hpp"
 
+#include "node/mirror_manifest.hpp"
+
 #include <fcntl.h>
 #include <glob.h>
 #include <poll.h>
@@ -23,7 +25,7 @@ namespace zeromesh::cli {
 
 const char* const kRunUsage =
     "Usage: zm run [-o PATH]... [--remote-only|--local-only] [--cores N] [--mem SIZE]\n"
-    "              [--env NAME] [--force-large] [--each GLOB] -- COMMAND [ARGS...]\n"
+    "              [--env NAME] [--mirror PATH]... [--force-large] [--each GLOB] -- COMMAND [ARGS...]\n"
     "\n"
     "Uploads the current directory, runs COMMAND in a sandbox (anywhere in the team), streams\n"
     "its output and writes its outputs back. Without -o, every file the command creates or\n"
@@ -137,6 +139,14 @@ void FillTaskResources(v1::TaskSpec* t, const RunOptions& opts) {
     if (opts.mem_bytes > 0) t->mutable_resources()->set_mem_bytes(opts.mem_bytes);
     t->mutable_policy()->set_may_run_local(!opts.remote_only);
     t->mutable_policy()->set_may_run_remote(!opts.local_only);
+    if (opts.env == "mirror" && !opts.mirror_paths.empty()) {
+        std::string joined;
+        for (const auto& p : opts.mirror_paths) {
+            if (!joined.empty()) joined.push_back('\n');
+            joined += p;
+        }
+        (*t->mutable_env_spec()->mutable_params())[node::kMirrorPathsParam] = std::move(joined);
+    }
 }
 
 int ResultExitCode(const v1::TaskResult& r) {
@@ -283,6 +293,16 @@ std::optional<RunOptions> ParseRunArgs(const std::vector<std::string>& args, std
             auto v = value(a);
             if (!v) return std::nullopt;
             o.env = *v;
+        } else if (a == "--mirror") {
+            auto v = value(a);
+            if (!v) return std::nullopt;
+            std::error_code ec;
+            std::filesystem::path mp = std::filesystem::absolute(*v, ec);
+            if (ec || mp.empty()) {
+                *error = "--mirror path must be absolute or resolvable: '" + *v + "'";
+                return std::nullopt;
+            }
+            o.mirror_paths.push_back(mp.string());
         } else if (a == "--force-large") {
             o.force_large = true;
         } else if (a == "--each") {
@@ -303,6 +323,10 @@ std::optional<RunOptions> ParseRunArgs(const std::vector<std::string>& args, std
     }
     if (o.argv.empty()) {
         *error = "missing command (zm run [options] -- COMMAND ...)";
+        return std::nullopt;
+    }
+    if (o.env == "mirror" && o.mirror_paths.empty()) {
+        *error = "--env mirror requires at least one --mirror PATH";
         return std::nullopt;
     }
     return o;

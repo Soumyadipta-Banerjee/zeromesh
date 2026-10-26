@@ -111,7 +111,21 @@ int NodeService::CoresInUseLocked() const {
     int n = 0;
     for (const auto& [key, r] : reserved_) n += std::max(r.spec.resources().cores(), 1);
     for (const auto& [key, r] : running_) n += r.cores;
+    if (executor_) n += executor_->CoresInUse();
     return n;
+}
+
+std::unordered_set<std::string> NodeService::ProtectedBlobHashes() const {
+    std::unordered_set<std::string> out;
+    std::lock_guard lock(mu_);
+    for (const auto& [_, r] : reserved_) {
+        for (const auto& d : r.needed) out.insert(d.hash);
+        if (!r.spec.input_root().hash().empty()) out.insert(r.spec.input_root().hash());
+    }
+    for (const auto& [_, r] : running_) {
+        for (const auto& d : r.needed) out.insert(d.hash);
+    }
+    return out;
 }
 
 void NodeService::SetDraining(bool draining, std::string reason) {
@@ -272,9 +286,10 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
 
 grpc::Status NodeService::PushBlobs(grpc::ServerContext* ctx, grpc::ServerReader<v1::Chunk>* reader,
                                     v1::Empty* /*resp*/) {
-    if (auto st = RequirePinned(*ctx); !st.ok()) return st;
+    std::string peer;
+    if (auto st = RequirePinned(*ctx, &peer); !st.ok()) return st;
     if (!cas_) return NotConfigured("blobs");
-    BlobReceiver receiver(*cas_);
+    BlobReceiver receiver(*cas_, std::move(peer));
     v1::Chunk chunk;
     while (reader->Read(&chunk)) {
         if (std::string err = receiver.Feed(chunk); !err.empty()) return Invalid(std::move(err));
@@ -342,7 +357,7 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
         spec = std::move(it->second.spec);
         reserved_.erase(it);
         const bool preemptible = !spec.policy().has_preemptible() || spec.policy().preemptible();
-        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible};
+        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible, std::move(needed)};
     }
 
     auto stream = std::make_shared<RunStream>();

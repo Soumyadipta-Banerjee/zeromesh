@@ -17,9 +17,15 @@ int FreeSlots(const Candidate& c, int cores) {
     return capacity - c.in_flight;
 }
 
+int64_t MissingForRank(const Candidate& c, int64_t unknown_missing_bytes) {
+    if (c.missing_bytes >= 0) return c.missing_bytes;
+    return std::max<int64_t>(0, unknown_missing_bytes);
+}
+
 } // namespace
 
-std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates) {
+std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates,
+                            int64_t unknown_missing_bytes) {
     const auto& policy = spec.policy();
     const bool may_local = !policy.has_may_run_local() || policy.may_run_local();
     const bool may_remote = !policy.has_may_run_remote() || policy.may_run_remote();
@@ -44,9 +50,8 @@ std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> can
     // Flamenco-style: fill the mesh. Prefer the node with the most free slots so
     // work spreads across peers instead of packing the requester first.
     auto key = [&](const Candidate& c) {
-        const bool unknown = c.missing_bytes < 0;
-        return std::tuple<int, bool, int64_t, double, bool, std::chrono::milliseconds, const std::string&>(
-            -FreeSlots(c, cores), unknown, unknown ? 0 : c.missing_bytes, c.cpu_load_pct, !c.on_ac, c.latency,
+        return std::tuple<int, int64_t, double, bool, std::chrono::milliseconds, const std::string&>(
+            -FreeSlots(c, cores), MissingForRank(c, unknown_missing_bytes), c.cpu_load_pct, !c.on_ac, c.latency,
             c.node_id);
     };
     std::sort(candidates.begin(), candidates.end(),

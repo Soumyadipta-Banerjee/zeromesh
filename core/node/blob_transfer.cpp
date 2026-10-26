@@ -35,6 +35,7 @@ struct BlobReceiver::Object {
     std::filesystem::path tmp;
     int fd{-1};
     int64_t received{0};
+    uint64_t reserved_bytes{0};
     EVP_MD_CTX* md{nullptr};
 
     ~Object() {
@@ -47,11 +48,18 @@ struct BlobReceiver::Object {
     }
 };
 
-BlobReceiver::BlobReceiver(store::CasStore& cas) : cas_(cas) {}
+BlobReceiver::BlobReceiver(store::CasStore& cas, std::string peer_id)
+    : cas_(cas), peer_id_(std::move(peer_id)) {}
 
 BlobReceiver::~BlobReceiver() = default;
 
-void BlobReceiver::Abort() { current_.reset(); }
+void BlobReceiver::Abort() {
+    if (current_ && current_->reserved_bytes != 0) {
+        cas_.ReleaseIncoming(current_->reserved_bytes);
+        current_->reserved_bytes = 0;
+    }
+    current_.reset();
+}
 
 std::string BlobReceiver::Feed(const v1::Chunk& chunk) {
     if (!current_) {
@@ -59,15 +67,23 @@ std::string BlobReceiver::Feed(const v1::Chunk& chunk) {
         const v1::Digest& d = chunk.digest();
         if (!store::CasStore::IsValidHash(d.hash())) return Abort(), "invalid digest hash";
         if (d.size_bytes() < 0) return Abort(), "invalid digest size";
+        const uint64_t sz = static_cast<uint64_t>(d.size_bytes());
+        if (!cas_.AdmitPeerIngest(peer_id_, sz) || !cas_.ReserveIncoming(sz)) {
+            return "CAS ingest quota exceeded";
+        }
 
         auto obj = std::make_unique<Object>();
         obj->declared = store::Digest{d.hash(), d.size_bytes()};
+        obj->reserved_bytes = sz;
         std::error_code ec;
         const auto dir = cas_.GetBasePath() / "incoming";
         std::filesystem::create_directories(dir, ec);
         std::string tmpl = (dir / "push-XXXXXX").string();
         obj->fd = ::mkstemp(tmpl.data());
-        if (obj->fd < 0) return std::string("cannot create temp file: ") + std::strerror(errno);
+        if (obj->fd < 0) {
+            cas_.ReleaseIncoming(sz);
+            return std::string("cannot create temp file: ") + std::strerror(errno);
+        }
         obj->tmp = tmpl;
         ::fchmod(obj->fd, 0644);
         obj->md = EVP_MD_CTX_new();
@@ -125,7 +141,11 @@ std::string BlobReceiver::Feed(const v1::Chunk& chunk) {
         std::filesystem::rename(obj.tmp, cas_.GetBlobPath(actual), ec);
         if (ec) return Abort(), "cannot store blob: " + ec.message();
         obj.tmp.clear();
+        cas_.NoteBlobCommitted(actual, static_cast<uint64_t>(obj.declared.size_bytes));
     }
+    cas_.ReleaseIncoming(obj.reserved_bytes);
+    cas_.RecordPeerIngest(peer_id_, obj.reserved_bytes);
+    obj.reserved_bytes = 0;
     received_.push_back(obj.declared);
     current_.reset();
     return {};

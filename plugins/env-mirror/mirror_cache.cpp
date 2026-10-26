@@ -106,6 +106,33 @@ uint64_t MirrorCache::EvictionCount() const {
     return eviction_count_;
 }
 
+std::optional<size_t> MirrorCache::ReadRange(const std::string& chunk_hash, off_t offset, char* buf, size_t size) {
+    if (size == 0) return size_t{0};
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = lru_map_.find(chunk_hash);
+    if (it == lru_map_.end()) return std::nullopt;
+    lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
+
+    auto path = cache_dir_ / chunk_hash;
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) return std::nullopt;
+    in.seekg(offset, std::ios::beg);
+    if (!in) return std::nullopt;
+    in.read(buf, static_cast<std::streamsize>(size));
+    return static_cast<size_t>(in.gcount());
+}
+
+void MirrorCache::Clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(cache_dir_, ec)) {
+        if (entry.is_regular_file()) std::filesystem::remove(entry.path(), ec);
+    }
+    lru_list_.clear();
+    lru_map_.clear();
+    current_bytes_ = 0;
+}
+
 void MirrorCache::Evict() {
     if (lru_list_.empty()) return;
 
