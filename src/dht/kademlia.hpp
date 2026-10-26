@@ -78,8 +78,10 @@ public:
 
     /**
      * @brief Announces that the local node holds a specific CAS chunk.
+     * @param chunk_hash  256-bit hash of the chunk.
+     * @param data_port   Optional TCP data port where this node serves chunks (0 = defaults to listen_port).
      */
-    void AnnounceChunk(const Key& chunk_hash);
+    void AnnounceChunk(const Key& chunk_hash, uint16_t data_port = 0);
 
     /**
      * @brief Queries the DHT for peers holding a specific CAS chunk.
