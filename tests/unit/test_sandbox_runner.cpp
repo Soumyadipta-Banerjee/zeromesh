@@ -1,10 +1,13 @@
 #include "tests/unit/test_framework.hpp"
 #include "tests/unit/test_util.hpp"
+#include "exec/landlock.hpp"
 #include "exec/sandbox_runner.hpp"
 #include "plugins/env-host/env_host.hpp"
 
 #include <cstdio>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 
 namespace {
 
@@ -183,4 +186,30 @@ TEST(RunnerMemoryLimitOverCap) {
     } else {
         ASSERT_NE(r.exit_code, 0);
     }
+}
+
+TEST(LandlockRestrictsChildWhenSupported) {
+    // Exercises the Landlock module (previously dead code). It must not wrap bwrap;
+    // this only checks the LSM ruleset API in a child that never execs bubblewrap.
+    if (!zeromesh::exec::LandlockSandbox::IsSupported()) {
+        std::fprintf(stderr, "SKIP LandlockRestrictsChildWhenSupported: landlock unavailable\n");
+        return;
+    }
+    TempDir dir;
+    zeromesh::testing::WriteFile(dir / "ok.txt", "ok");
+    const fs::path ok = dir / "ok.txt";
+
+    pid_t pid = fork();
+    ASSERT_TRUE(pid >= 0);
+    if (pid == 0) {
+        zeromesh::exec::LandlockSandbox ll;
+        ll.AllowReadOnly(dir.path());
+        if (!ll.RestrictCurrentProcess()) _exit(2);
+        if (access(ok.c_str(), R_OK) != 0) _exit(3);
+        _exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
 }

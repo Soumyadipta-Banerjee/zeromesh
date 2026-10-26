@@ -83,7 +83,10 @@ public:
     virtual void Release(const TaskContext&) = 0;
 };
 
-class ClientApiHandle; // defined by the node layer when front-ends land
+// How a front-end reaches this node's local ClientApi (unix socket only for now).
+struct ClientApiHandle {
+    std::filesystem::path unix_socket;
+};
 
 struct PluginConfig {
     std::map<std::string, std::string> values;
