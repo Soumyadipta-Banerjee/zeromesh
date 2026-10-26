@@ -1,4 +1,4 @@
-#include "discovery/peer_table.hpp"
+#include "net/peer_table.hpp"
 #include "ui/tui.hpp"
 
 #include <iostream>
@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
     }
 
     if (command == "status") {
-        auto peer_table = std::make_shared<zeromesh::discovery::PeerTable>();
+        auto peer_table = std::make_shared<zeromesh::net::PeerTable>();
         zeromesh::ui::TerminalUI tui(peer_table);
         tui.PrintStatusSnapshot();
         return 0;
