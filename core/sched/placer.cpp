@@ -35,24 +35,24 @@ int MaxRetries(const v1::TaskSpec& spec) {
     return std::max(0, spec.policy().max_retries());
 }
 
-// Infrastructure failures that M4 re-dispatches. Non-zero exit is never retryable.
-// User/job cancel is never retryable, even if a drain raced with the cancel.
+// Only donor-drain preemption is retryable on a finished TaskResult. Run timeouts,
+// non-zero exits, and donor env/policy errors are final (peer loss / push / pull are
+// retried before a TaskResult exists).
 bool IsRetryable(const v1::TaskResult& r, bool drain_preempted, bool user_cancelled) {
     if (user_cancelled) return false;
+    if (r.timed_out()) return false;
     if (r.cancelled()) return drain_preempted;
-    if (r.timed_out()) return true;
-    if (!r.error().empty()) {
-        // Offer/push/run/pull transport failures, peer loss, placer errors.
-        return true;
-    }
-    return false;  // exit_code (including 0) is final
+    return false;
 }
 
 std::string RetryReason(const v1::TaskResult& r, bool drain_preempted) {
     if (drain_preempted) return "donor drained";
-    if (r.timed_out()) return "timed out";
     if (!r.error().empty()) return r.error();
     return "retry";
+}
+
+bool OfferRejectionRetryable(const std::string& reason) {
+    return reason.find("in use") != std::string::npos || reason.find("draining") != std::string::npos;
 }
 
 } // namespace
@@ -345,9 +345,10 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
 
     const int max_retries = MaxRetries(spec);
     int attempt = 0;  // completed failed attempts that consumed a retry
-    std::unordered_set<std::string> skip;   // nodes that failed a run (loss/drain/timeout)
+    std::unordered_set<std::string> skip;   // nodes skipped after a retryable infra failure
     std::unordered_set<std::string> tried;  // nodes already offered this placement round
     std::string last_reason = "no eligible nodes";
+    std::optional<v1::TaskResult> last_attempt_result;  // last real run, if any
     std::optional<std::vector<v1::Digest>> needed;
     const std::string input_root_hash = spec.input_root().hash();
     const int64_t input_tree_bytes = InputTreeBytes(spec);
@@ -416,6 +417,20 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         if (task->cb.on_state) task->cb.on_state(v1::QUEUED, detail);
     };
 
+    auto fail_placement = [&](std::string reason) {
+        if (last_attempt_result) return task->Done(std::move(*last_attempt_result));
+        return task->Done(Failed(local_id_, "no node can run this task: " + std::move(reason)));
+    };
+
+    auto infra_retry_or_fail = [&](const std::string& node, const std::string& reason) -> bool {
+        last_reason = reason;
+        if (attempt < max_retries) {
+            begin_retry(node, reason);
+            return true;
+        }
+        return false;
+    };
+
     // True when some node could take this task if nothing were in flight (capacity wait vs hard miss).
     auto any_eligible = [&] {
         std::vector<Candidate> candidates;
@@ -468,7 +483,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         if (!reserved) {
             // Wait for in-flight capacity; timeout_s is the run timeout, not a placement cap.
             if (!any_eligible()) {
-                return task->Done(Failed(local_id_, "no node can run this task: " + last_reason));
+                return fail_placement(last_reason);
             }
             tried.clear();
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -479,13 +494,12 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         if (reserved->is_local) {
             if (!local_) {
                 release(*reserved);
-                last_reason = "local executor unavailable";
-                skip.insert(reserved->node_id);
-                tried.erase(reserved->node_id);
-                continue;
+                if (infra_retry_or_fail(reserved->node_id, "local executor unavailable")) continue;
+                return fail_placement(last_reason);
             }
             auto result = RunLocal(task, spec);
             release(*reserved);
+            last_attempt_result = result;
             const bool user_cancel = task->cancelled.load();
             const bool drain = donor_draining(reserved->node_id);
             if (user_cancel) return task->Done(Cancelled(local_id_));
@@ -500,10 +514,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         auto client = peer ? factory_(*peer) : nullptr;
         if (!client) {
             release(*reserved);
-            last_reason = "node " + reserved->node_id + ": not reachable";
-            skip.insert(reserved->node_id);
-            tried.erase(reserved->node_id);
-            continue;
+            const std::string reason = "node " + reserved->node_id + ": not reachable";
+            if (infra_retry_or_fail(reserved->node_id, reason)) continue;
+            return fail_placement(reason);
         }
         if (!needed) {
             needed.emplace();
@@ -536,29 +549,25 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         if (node::EncodedOfferByteSize(task->id, spec, *needed) >
             static_cast<size_t>(node::kNodeApiMaxMessageSize)) {
             release(*reserved);
-            last_reason = "input tree too large to offer: " + std::to_string(needed->size()) + " digests";
-            skip.insert(reserved->node_id);
-            tried.erase(reserved->node_id);
-            continue;
+            return fail_placement("input tree too large to offer: " + std::to_string(needed->size()) +
+                                  " digests");
         }
         auto reply = client->Offer(task->id, spec, *needed, &err);
         if (!reply) {
             release(*reserved);
-            last_reason = "node " + reserved->node_id + ": " + err;
-            skip.insert(reserved->node_id);
-            tried.erase(reserved->node_id);
-            continue;
+            const std::string reason = "node " + reserved->node_id + ": " + err;
+            if (infra_retry_or_fail(reserved->node_id, reason)) continue;
+            return fail_placement(reason);
         }
         if (!reply->accepted()) {
             release(*reserved);
-            last_reason = "node " + reserved->node_id + ": " + reply->reason();
             const std::string& why = reply->reason();
-            if (why.find("in use") != std::string::npos || why.find("draining") != std::string::npos) {
+            if (OfferRejectionRetryable(why)) {
                 tried.erase(reserved->node_id);
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             } else {
-                skip.insert(reserved->node_id);
-                tried.erase(reserved->node_id);
+                return task->Done(
+                    Failed(local_id_, "no node can run this task: node " + reserved->node_id + ": " + why));
             }
             continue;
         }
@@ -567,10 +576,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         std::vector<v1::Digest> missing(reply->missing().begin(), reply->missing().end());
         if (!client->Push(*cas_, missing, &err)) {
             release(*reserved);
-            last_reason = "node " + reserved->node_id + ": uploading inputs failed: " + err;
-            skip.insert(reserved->node_id);
-            tried.erase(reserved->node_id);
-            continue;
+            const std::string reason = "node " + reserved->node_id + ": uploading inputs failed: " + err;
+            if (infra_retry_or_fail(reserved->node_id, reason)) continue;
+            return fail_placement(reason);
         }
         {
             int64_t pushed = 0;
@@ -605,6 +613,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             if (user_cancel) return task->Done(Cancelled(reserved->node_id));
             v1::TaskResult lost =
                 Failed(reserved->node_id, "node " + reserved->node_id + " lost during run (" + err + ")");
+            last_attempt_result = lost;
             if (attempt < max_retries) {
                 begin_retry(reserved->node_id, lost.error());
                 continue;
@@ -612,6 +621,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             return task->Done(std::move(lost));
         }
         result->set_executed_by(reserved->node_id);
+        last_attempt_result = *result;
 
         // Decide retry before pulling outputs so partial donor outputs stay discarded.
         if (IsRetryable(*result, drain, user_cancel) && attempt < max_retries) {
@@ -627,6 +637,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             release(*reserved);
             v1::TaskResult lost =
                 Failed(reserved->node_id, "node " + reserved->node_id + " lost while sending outputs: " + err);
+            last_attempt_result = lost;
             if (attempt < max_retries) {
                 begin_retry(reserved->node_id, lost.error());
                 continue;

@@ -1,6 +1,7 @@
 #include "node/job_manager.hpp"
 
 #include "node/convert.hpp"
+#include "node/mirror_manifest.hpp"
 #include "node/task_key.hpp"
 
 #include <sodium.h>
@@ -122,7 +123,47 @@ struct Job {
     size_t terminal{0};
     bool done{false};
     bool cancelled{false};
+    std::optional<std::chrono::steady_clock::time_point> finished_at;
 };
+
+std::chrono::seconds g_finished_job_blob_grace{std::chrono::minutes(10)};
+std::function<std::chrono::steady_clock::time_point()> g_job_clock;
+
+std::chrono::steady_clock::time_point JobClockNow() {
+    if (g_job_clock) return g_job_clock();
+    return std::chrono::steady_clock::now();
+}
+
+void ProtectTreeHashes(std::unordered_set<std::string>& out, store::MerkleBuilder& merkle, const store::Digest& root) {
+    if (root.hash.empty()) return;
+    try {
+        for (const auto& d : merkle.CollectTree(root)) out.insert(d.hash);
+    } catch (...) {
+        out.insert(root.hash);
+    }
+}
+
+void ProtectMirrorRoot(std::unordered_set<std::string>& out, store::MerkleBuilder& merkle, const v1::TaskSpec& spec) {
+    const auto& params = spec.env_spec().params();
+    auto it = params.find(kMirrorRootDigestParam);
+    if (it == params.end() || !store::CasStore::IsValidHash(it->second)) return;
+    ProtectTreeHashes(out, merkle, store::Digest{it->second, 0});
+}
+
+void ProtectOutputEntry(std::unordered_set<std::string>& out, store::MerkleBuilder& merkle, const v1::OutputEntry& o) {
+    if (o.digest().hash().empty()) return;
+    if (o.is_dir()) {
+        ProtectTreeHashes(out, merkle, FromProto(o.digest()));
+    } else {
+        out.insert(o.digest().hash());
+    }
+}
+
+void ProtectTaskResultBlobs(std::unordered_set<std::string>& out, store::MerkleBuilder& merkle, const v1::TaskResult& r) {
+    if (!r.stdout().hash().empty()) out.insert(r.stdout().hash());
+    if (!r.stderr().hash().empty()) out.insert(r.stderr().hash());
+    for (const auto& o : r.outputs()) ProtectOutputEntry(out, merkle, o);
+}
 
 // Inputs copied out under the lock for a task that is about to start.
 struct Ready {
@@ -479,6 +520,7 @@ void JobManager::Impl::Finish(Job& job, size_t i, v1::TaskState state, const std
 
     if (job.terminal == job.tasks.size() && !job.done) {
         job.done = true;
+        job.finished_at = JobClockNow();
         for (auto& w : job.watchers) w->End();
         job.watchers.clear();
         EvictFinishedJobs();
@@ -607,22 +649,70 @@ std::optional<v1::JobStatus> JobManager::Get(const std::string& job_id) const { 
 std::vector<v1::ActiveTask> JobManager::ListActive() const { return impl_->ListActive(); }
 
 std::unordered_set<std::string> JobManager::Impl::ProtectedBlobHashes() const {
-    std::unordered_set<std::string> out;
-    std::lock_guard lock(mu_);
-    for (const auto& [id, job] : jobs_) {
-        if (!job || job->done) continue;
-        for (const auto& t : job->tasks) {
-            if (!t.spec.input_root().hash().empty()) out.insert(t.spec.input_root().hash());
-            if (!t.has_result) continue;
-            for (const auto& o : t.result.outputs()) {
-                if (!o.digest().hash().empty()) out.insert(o.digest().hash());
+    struct JobSnap {
+        bool done{false};
+        std::optional<std::chrono::steady_clock::time_point> finished_at;
+        std::vector<v1::TaskSpec> specs;
+        std::vector<v1::TaskResult> results;
+        std::vector<bool> has_result;
+    };
+    std::vector<JobSnap> snaps;
+    const auto now = JobClockNow();
+    {
+        std::lock_guard lock(mu_);
+        for (const auto& [_, job] : jobs_) {
+            if (!job) continue;
+            const bool in_grace =
+                job->done && job->finished_at &&
+                (now - *job->finished_at < g_finished_job_blob_grace);
+            if (job->done && !in_grace) continue;
+            JobSnap snap;
+            snap.done = job->done;
+            snap.finished_at = job->finished_at;
+            snap.specs.reserve(job->tasks.size());
+            snap.results.reserve(job->tasks.size());
+            snap.has_result.reserve(job->tasks.size());
+            for (const auto& t : job->tasks) {
+                snap.specs.push_back(t.spec);
+                snap.has_result.push_back(t.has_result);
+                if (t.has_result) snap.results.push_back(t.result);
+                else snap.results.emplace_back();
             }
+            snaps.push_back(std::move(snap));
+        }
+    }
+
+    std::unordered_set<std::string> out;
+    store::MerkleBuilder merkle(cas_);
+    for (const auto& job : snaps) {
+        const bool in_grace =
+            job.done && job.finished_at && (now - *job.finished_at < g_finished_job_blob_grace);
+        for (size_t i = 0; i < job.specs.size(); ++i) {
+            if (!job.done) {
+                ProtectTreeHashes(out, merkle, FromProto(job.specs[i].input_root()));
+                ProtectMirrorRoot(out, merkle, job.specs[i]);
+            }
+            if (!job.has_result[i]) continue;
+            if (!job.done || in_grace) ProtectTaskResultBlobs(out, merkle, job.results[i]);
         }
     }
     return out;
 }
 
 std::unordered_set<std::string> JobManager::ProtectedBlobHashes() const { return impl_->ProtectedBlobHashes(); }
+
+void JobManager::SetFinishedJobBlobGracePeriodForTesting(std::chrono::seconds period) {
+    g_finished_job_blob_grace = period;
+}
+
+void JobManager::SetClockForTesting(std::function<std::chrono::steady_clock::time_point()> now) {
+    g_job_clock = std::move(now);
+}
+
+void JobManager::ResetProtectedBlobTestingHooks() {
+    g_finished_job_blob_grace = std::chrono::minutes(10);
+    g_job_clock = {};
+}
 std::shared_ptr<EventStream> JobManager::Watch(const std::string& job_id) { return impl_->Watch(job_id); }
 
 } // namespace zeromesh::node

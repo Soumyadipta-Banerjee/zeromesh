@@ -9,9 +9,10 @@
 //     CAS before reporting the result.
 // Capacity is reserved atomically before Offer/Run so concurrent tasks do not all
 // pile onto the top-ranked node (at most cores_total/task.cores in flight per node;
-// load-derived cores_free is a ranking/UI signal only). Donor drain, donor loss, or a
-// timeout re-queue up to policy.max_retries times (JobEvent QUEUED, detail
-// "retry n/max: reason"). A non-zero exit is final; user/job cancel is never retried.
+// load-derived cores_free is a ranking/UI signal only). Donor drain, peer loss, and
+// push/pull transport failures re-queue up to policy.max_retries (JobEvent QUEUED,
+// detail "retry n/max: reason"). Run timeouts, non-zero exits, and donor env/policy
+// rejections are final; user/job cancel is never retried.
 
 #include "net/peer_table.hpp"
 #include "net/telemetry.hpp"

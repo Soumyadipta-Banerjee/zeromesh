@@ -1,6 +1,7 @@
 #include "node/local_executor.hpp"
 
 #include "node/convert.hpp"
+#include "node/mirror_manifest.hpp"
 #include "node/requester_blob_source.hpp"
 
 #include <algorithm>
@@ -53,16 +54,6 @@ v1::TaskState StateFromResult(const v1::TaskResult& r) {
     if (r.cancelled()) return v1::CANCELLED;
     if (r.timed_out() || r.exit_code() != 0 || !r.error().empty()) return v1::FAILED;
     return v1::SUCCEEDED;
-}
-
-} // namespace
-
-namespace {
-
-std::string RequesterFromTaskId(const std::string& task_id) {
-    const size_t slash = task_id.find('/');
-    if (slash == std::string::npos) return {};
-    return task_id.substr(0, slash);
 }
 
 } // namespace
@@ -209,7 +200,10 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
     ctx.env.params.insert(spec.env_spec().params().begin(), spec.env_spec().params().end());
     ctx.env.argv.assign(spec.argv().begin(), spec.argv().end());
 
-    const std::string requester = RequesterFromTaskId(item.task_id);
+    std::string requester;
+    if (auto it = ctx.env.params.find(kMirrorRequesterParam); it != ctx.env.params.end()) {
+        requester = it->second;
+    }
     ctx.requester_node_id = requester.empty() ? node_id_ : requester;
 
     std::error_code ec;
@@ -220,7 +214,7 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
 
     std::unique_ptr<plugin::IBlobSource> blob_source;
     if (env_name == "mirror") {
-        if (ctx.requester_node_id == node_id_ || requester.empty()) {
+        if (requester.empty() || ctx.requester_node_id == node_id_) {
             blob_source = std::make_unique<LocalCasBlobSource>(cas_);
         } else {
             if (!client_factory_) {

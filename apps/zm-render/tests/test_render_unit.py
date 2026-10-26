@@ -56,8 +56,9 @@ class BuildJobSpecTest(unittest.TestCase):
             pass
 
         class EnvSpec:
-            def __init__(self, name):
+            def __init__(self, name, params=None):
                 self.name = name
+                self.params = params or {}
 
         class Resources:
             def __init__(self, cores):

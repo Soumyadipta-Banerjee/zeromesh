@@ -140,6 +140,16 @@ TEST(CasCollectGarbage_EvictsLruUnprotected) {
     ASSERT_FALSE(store.HasBlob(newer.hash));
 }
 
+TEST(CasHasBlob_FalseWhenFileRemovedDespiteMemCache) {
+    zeromesh::testing::TempDir d;
+    zeromesh::store::CasStore store(d / "cas");
+    const std::string payload = "cached-small-blob";
+    const auto digest = store.PutBlob(payload);
+    ASSERT_TRUE(store.HasBlob(digest.hash));
+    std::filesystem::remove(store.GetBlobPath(digest.hash));
+    ASSERT_FALSE(store.HasBlob(digest.hash));
+}
+
 TEST(CasCollectGarbage_ProtectedSurvive) {
     zeromesh::testing::TempDir d;
     zeromesh::store::CasLimits limits;
@@ -202,12 +212,12 @@ TEST(CasConcurrentPutAndGc_Integrity) {
     for (int i = 0; i < 40; ++i) {
         const std::string payload = "payload-" + std::to_string(i) + "-" + std::string(64, 'p');
         const auto digest = store.PutBlob(payload);
-        if (!store.HasBlob(digest.hash)) {
-            ++integrity_failures;
-            continue;
-        }
+        // Unprotected blobs may vanish under concurrent GC; that is not corruption.
+        // Fail only when a still-present blob has the wrong bytes/hash.
+        if (!store.HasBlob(digest.hash)) continue;
         const auto got = store.GetBlob(digest.hash);
-        if (!got || *got != payload || zeromesh::store::CasStore::ComputeDigest(*got).hash != digest.hash) {
+        if (!got) continue;  // GC raced between HasBlob and GetBlob
+        if (*got != payload || zeromesh::store::CasStore::ComputeDigest(*got).hash != digest.hash) {
             ++integrity_failures;
         }
     }

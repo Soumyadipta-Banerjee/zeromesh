@@ -216,6 +216,26 @@ TEST(EnvMirrorDenyListCoversZeromeshStateAndConfig) {
     ASSERT_TRUE(rules.Ignored(".config/zeromesh/donor.toml", false));
 }
 
+TEST(EnvMirrorDenyListCoversCommonCredentialPaths) {
+    auto rules = DenyList::CreateIgnoreRules();
+    ASSERT_TRUE(rules.Ignored(".aws", true));
+    ASSERT_TRUE(rules.Ignored(".aws/credentials", false));
+    ASSERT_TRUE(rules.Ignored(".netrc", false));
+    ASSERT_TRUE(rules.Ignored(".git-credentials", false));
+    ASSERT_TRUE(rules.Ignored(".kube", true));
+    ASSERT_TRUE(rules.Ignored(".kube/config", false));
+    ASSERT_TRUE(rules.Ignored(".bash_history", false));
+    ASSERT_TRUE(rules.Ignored(".zsh_history", false));
+    ASSERT_TRUE(rules.Ignored(".local/share/fish/fish_history", false));
+    ASSERT_TRUE(rules.Ignored(".config/gh", true));
+    ASSERT_TRUE(rules.Ignored(".config/gh/hosts.yml", false));
+    ASSERT_TRUE(rules.Ignored(".docker", true));
+    ASSERT_TRUE(rules.Ignored(".docker/config.json", false));
+    ASSERT_TRUE(rules.Ignored(".password-store", true));
+    ASSERT_TRUE(rules.Ignored(".password-store/user.gpg", false));
+    ASSERT_TRUE(rules.Ignored(".gnupg", true));
+}
+
 TEST(EnvMirrorCustomDenyList) {
     TempDir config_dir;
     WriteFile(config_dir / "mirror_deny", "*.custom_secret\nsecrets/\n");

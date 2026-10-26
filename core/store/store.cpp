@@ -226,12 +226,23 @@ void CasStore::TouchBlobOnDisk(const std::filesystem::path& path) const {
     ::utimes(path.c_str(), tv);
 }
 
-void CasStore::DropFromMemCacheLocked(const std::string& hash) {
+void CasStore::DropFromMemCacheLocked(const std::string& hash) const {
     std::lock_guard lock(mem_cache_mutex_);
     auto it = mem_cache_.find(hash);
     if (it == mem_cache_.end()) return;
     cur_mem_bytes_ -= it->second.size();
     mem_cache_.erase(it);
+}
+
+void CasStore::EvictBlobMetadataLocked(const std::string& hash) const {
+    auto it = blobs_.find(hash);
+    if (it == blobs_.end()) return;
+    blob_bytes_ -= it->second.size;
+    blobs_.erase(it);
+    if (auto lit = lru_iters_.find(hash); lit != lru_iters_.end()) {
+        lru_order_.erase(lit->second);
+        lru_iters_.erase(lit);
+    }
 }
 
 bool CasStore::DeleteBlobLocked(const std::string& hash) {
@@ -555,12 +566,13 @@ std::optional<std::string> CasStore::GetBlob(const std::string& hash) const {
 
 bool CasStore::HasBlob(const std::string& hash) const {
     if (!IsValidHash(hash)) return false;
-    {
-        std::lock_guard lock(mem_cache_mutex_);
-        if (mem_cache_.contains(hash)) return true;
-    }
     auto target = blobs_dir_ / hash;
-    if (!std::filesystem::exists(target)) return false;
+    if (!std::filesystem::exists(target)) {
+        DropFromMemCacheLocked(hash);
+        std::lock_guard lock(store_mutex_);
+        EvictBlobMetadataLocked(hash);
+        return false;
+    }
     {
         std::lock_guard lock(store_mutex_);
         if (!blobs_.contains(hash)) {
