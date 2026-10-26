@@ -14,10 +14,11 @@ namespace zeromesh::cli {
 // `color` adds ANSI colours (use it when writing to a terminal).
 void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color);
 
-// Task table for ListActivity (submitted + executing; WORKING and DONE stay listed).
-void RenderActivity(const v1::ActivitySnapshot& activity, std::ostream& os, bool color);
+// One row per task (WORKING and DONE stay listed). `peers` maps executed_by ids to hostnames.
+void RenderActivity(const v1::ActivitySnapshot& activity, std::ostream& os, bool color,
+                    const v1::PeerList* peers = nullptr);
 
-// Full monitor frame: peers + activity.
+// Compact monitor frame: this node, peers, tasks. Fits a tiled pane.
 void RenderMonitor(const v1::PeerList& peers, const v1::ActivitySnapshot& activity, std::ostream& os, bool color);
 
 using PeerFetcher = std::function<std::optional<v1::PeerList>(std::string* error, bool* unavailable)>;
