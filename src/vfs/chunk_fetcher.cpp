@@ -712,4 +712,57 @@ void ChunkFetcher::AnnounceLocalChunk(const std::string& chunk_hash) {
     impl_->dht->AnnounceChunk(key, impl_->config.local_serve_port);
 }
 
+ChunkResult ChunkFetcher::FetchFromPeerDirect(const std::string& ip, uint16_t port, const std::string& chunk_hash) {
+    ChunkResult result{};
+    auto start_time = std::chrono::steady_clock::now();
+
+    // 1. Check chunk cache
+    auto cached = impl_->cache->Get(chunk_hash);
+    if (cached) {
+        result.success = true;
+        result.data = std::move(*cached);
+        result.source_peer_ip = "local-cache";
+        result.rtt = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start_time);
+        return result;
+    }
+
+    // 2. Check CAS store
+    auto cas_blob = impl_->cas_store->GetBlob(chunk_hash);
+    if (cas_blob) {
+        impl_->cache->Put(chunk_hash, *cas_blob);
+        result.success = true;
+        result.data = std::move(*cas_blob);
+        result.source_peer_ip = "local-cas";
+        result.rtt = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start_time);
+        return result;
+    }
+
+    // 3. Directly fetch from given peer
+    auto fetched = impl_->FetchFromPeer(ip, port, chunk_hash);
+    if (!fetched) {
+        result.success = false;
+        return result;
+    }
+
+    // 4. Verify SHA-256 integrity
+    std::string computed = ComputeSha256(*fetched);
+    if (computed != chunk_hash) {
+        result.success = false;
+        return result;
+    }
+
+    // 5. Store verified chunk locally
+    impl_->cas_store->PutBlob(*fetched);
+    impl_->cache->Put(chunk_hash, *fetched);
+
+    result.success = true;
+    result.data = std::move(*fetched);
+    result.source_peer_ip = ip;
+    result.rtt = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - start_time);
+    return result;
+}
+
 } // namespace zeromesh::vfs

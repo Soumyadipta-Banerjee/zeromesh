@@ -399,12 +399,21 @@ static void OnExportClicked(GtkWidget*, gpointer) {
                     g_idle_add(OnProgressIdle, p);
                 });
 
-            std::string magnet = TorrentManifest::MakeMagnetUri(info_hash, manifest.name, manifest.total_bytes);
+            std::string lan_ip = GetLocalLanIp();
+            std::string magnet = TorrentManifest::MakeMagnetUri(
+                info_hash, manifest.name, manifest.total_bytes,
+                lan_ip, g_app.dht_port, g_app.chunk_port);
 
             GuiLogger::Instance().Log(LogLevel::Success, "EXPORT",
                                       "Export succeeded. InfoHash: " + info_hash + " (" +
                                       std::to_string(manifest.files.size()) + " files, " +
                                       std::to_string(manifest.total_bytes / 1024) + " KB)");
+            if (!lan_ip.empty() && lan_ip != "127.0.0.1") {
+                GuiLogger::Instance().Log(LogLevel::Info, "NETWORK",
+                                          "Bound seeder bootstrap endpoint: " + lan_ip + ":" +
+                                          std::to_string(g_app.dht_port) + " (chunk TCP :" +
+                                          std::to_string(g_app.chunk_port) + ")");
+            }
 
             struct FinishExportPayload {
                 std::string magnet;
@@ -464,27 +473,35 @@ static void OnDownloadClicked(GtkWidget*, gpointer) {
         return;
     }
 
-    auto hash_opt = TorrentManifest::ExtractHash(raw_input);
-    if (!hash_opt) {
+    auto meta_opt = TorrentManifest::ExtractMagnetMetadata(raw_input);
+    if (!meta_opt || meta_opt->info_hash.empty()) {
         std::string err = "Invalid Magnet URI or InfoHash: input must contain a valid 64-character SHA-256 hash";
         gtk_label_set_text(GTK_LABEL(g_app.download_status_label), err.c_str());
         GuiLogger::Instance().Log(LogLevel::Error, "DOWNLOAD", err);
         return;
     }
 
-    std::string info_hash = *hash_opt;
+    auto meta = *meta_opt;
+    std::string info_hash = meta.info_hash;
     gtk_widget_set_sensitive(g_app.download_btn, FALSE);
     gtk_label_set_text(GTK_LABEL(g_app.download_status_label), "Resolving manifest in DHT swarm...");
 
     GuiLogger::Instance().Log(LogLevel::Info, "DOWNLOAD", "Resolving torrent InfoHash: " + info_hash);
+    if (!meta.peer_ip.empty()) {
+        GuiLogger::Instance().Log(LogLevel::Info, "NETWORK",
+                                  "Discovered bootstrap seeder endpoint in Magnet: " +
+                                  meta.peer_ip + ":" + std::to_string(meta.dht_port) +
+                                  " (chunk TCP :" + std::to_string(meta.chunk_port) + ")");
+    }
 
-    std::thread([info_hash, dest_dir = g_app.current_dir]() {
+    std::thread([meta, dest_dir = g_app.current_dir]() {
         auto res = g_app.engine->DownloadTorrent(
-            info_hash, dest_dir,
+            meta.info_hash, dest_dir,
             [](float frac, const std::string& status, uint64_t done, uint64_t total) {
                 auto* p = new ProgressPayload{frac, status, done, total, true};
                 g_idle_add(OnProgressIdle, p);
-            });
+            },
+            meta.peer_ip, meta.dht_port, meta.chunk_port);
 
         if (res.success) {
             GuiLogger::Instance().Log(LogLevel::Success, "DOWNLOAD",
@@ -515,6 +532,7 @@ static void OnDownloadClicked(GtkWidget*, gpointer) {
         }, fin);
     }).detach();
 }
+
 
 static void OnDismissErrorBannerClicked(GtkWidget*, gpointer) {
     HideErrorBanner();

@@ -170,6 +170,12 @@ public:
      */
     void AnnounceLocalChunk(const std::string& chunk_hash);
 
+    /**
+     * @brief Directly fetches a chunk from a specific peer IP and port, bypassing DHT provider resolution.
+     * Caches and stores verified chunk in CAS.
+     */
+    ChunkResult FetchFromPeerDirect(const std::string& ip, uint16_t port, const std::string& chunk_hash);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -17,7 +17,7 @@ struct MdnsConfig {
     int grpc_port{8980};
     int cores{4};
     uint64_t ram_bytes{16ULL * 1024 * 1024 * 1024};
-    int multicast_port{8982};
+    int multicast_port{8988};
     std::string multicast_group{"239.255.42.99"};
 };
 

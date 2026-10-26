@@ -196,26 +196,47 @@ struct TorrentManifest {
         return d.hash;
     }
 
+    struct MagnetMetadata {
+        std::string info_hash;
+        std::string display_name;
+        uint64_t total_bytes{0};
+        std::string peer_ip;
+        uint16_t dht_port{0};
+        uint16_t chunk_port{0};
+    };
+
     /**
-     * @brief Generates a standard BitTorrent-like Magnet URI from the manifest info-hash.
+     * @brief Generates a standard BitTorrent-like Magnet URI from the manifest info-hash,
+     * optionally including bootstrap peer address and data ports.
      */
     static std::string MakeMagnetUri(const std::string& info_hash,
                                      const std::string& display_name,
-                                     uint64_t total_bytes) {
+                                     uint64_t total_bytes,
+                                     const std::string& seeder_ip = "",
+                                     uint16_t dht_port = 0,
+                                     uint16_t chunk_port = 0) {
         std::ostringstream ss;
         ss << "magnet:?xt=urn:zm:" << info_hash
            << "&dn=" << UrlEncode(display_name)
            << "&xl=" << total_bytes;
+        if (!seeder_ip.empty() && dht_port > 0) {
+            ss << "&pe=" << seeder_ip << ":" << dht_port;
+            if (chunk_port > 0) {
+                ss << "&cp=" << chunk_port;
+            }
+        }
         return ss.str();
     }
 
     /**
-     * @brief Extracts the 64-character SHA-256 info-hash from a Magnet link or raw hash.
+     * @brief Extracts structured metadata and bootstrap peer info from a Magnet link or raw hash.
      */
-    static std::optional<std::string> ExtractHash(std::string_view input) {
+    static std::optional<MagnetMetadata> ExtractMagnetMetadata(std::string_view input) {
         // Trim whitespace
         while (!input.empty() && std::isspace(input.front())) input.remove_prefix(1);
         while (!input.empty() && std::isspace(input.back())) input.remove_suffix(1);
+
+        MagnetMetadata meta;
 
         // Check if raw 64-char hex
         if (input.size() == 64) {
@@ -223,29 +244,85 @@ struct TorrentManifest {
             for (char c : input) {
                 if (!std::isxdigit(c)) { all_hex = false; break; }
             }
-            if (all_hex) return std::string(input);
+            if (all_hex) {
+                meta.info_hash = std::string(input);
+                return meta;
+            }
         }
 
-        // Check magnet:?xt=urn:zm:<hash>
+        // Find xt=urn:zm:<hash> or xt=urn:btih:<hash>
         std::string_view prefix = "urn:zm:";
         auto pos = input.find(prefix);
+        if (pos == std::string_view::npos) {
+            prefix = "urn:btih:";
+            pos = input.find(prefix);
+        }
+
         if (pos != std::string_view::npos) {
             auto hash_part = input.substr(pos + prefix.size(), 64);
             if (hash_part.size() == 64) {
-                return std::string(hash_part);
+                meta.info_hash = std::string(hash_part);
             }
         }
 
-        // Check magnet:?xt=urn:btih:<hash>
-        prefix = "urn:btih:";
-        pos = input.find(prefix);
-        if (pos != std::string_view::npos) {
-            auto hash_part = input.substr(pos + prefix.size(), 64);
-            if (hash_part.size() == 64) {
-                return std::string(hash_part);
+        if (meta.info_hash.empty()) {
+            return std::nullopt;
+        }
+
+        // Extract dn=
+        auto dn_pos = input.find("&dn=");
+        if (dn_pos != std::string_view::npos) {
+            dn_pos += 4;
+            auto end = input.find('&', dn_pos);
+            meta.display_name = std::string(input.substr(dn_pos, end == std::string_view::npos ? end : end - dn_pos));
+        }
+
+        // Extract xl=
+        auto xl_pos = input.find("&xl=");
+        if (xl_pos != std::string_view::npos) {
+            xl_pos += 4;
+            auto end = input.find('&', xl_pos);
+            try {
+                meta.total_bytes = std::stoull(std::string(input.substr(xl_pos, end == std::string_view::npos ? end : end - xl_pos)));
+            } catch (...) {}
+        }
+
+        // Extract pe=<ip>:<port>
+        auto pe_pos = input.find("&pe=");
+        if (pe_pos != std::string_view::npos) {
+            pe_pos += 4;
+            auto end = input.find('&', pe_pos);
+            std::string_view pe_str = input.substr(pe_pos, end == std::string_view::npos ? end : end - pe_pos);
+            auto colon = pe_str.find(':');
+            if (colon != std::string_view::npos) {
+                meta.peer_ip = std::string(pe_str.substr(0, colon));
+                try {
+                    meta.dht_port = static_cast<uint16_t>(std::stoul(std::string(pe_str.substr(colon + 1))));
+                } catch (...) {}
+            } else {
+                meta.peer_ip = std::string(pe_str);
             }
         }
 
+        // Extract cp=<chunk_port>
+        auto cp_pos = input.find("&cp=");
+        if (cp_pos != std::string_view::npos) {
+            cp_pos += 4;
+            auto end = input.find('&', cp_pos);
+            try {
+                meta.chunk_port = static_cast<uint16_t>(std::stoul(std::string(input.substr(cp_pos, end == std::string_view::npos ? end : end - cp_pos))));
+            } catch (...) {}
+        }
+
+        return meta;
+    }
+
+    /**
+     * @brief Extracts the 64-character SHA-256 info-hash from a Magnet link or raw hash.
+     */
+    static std::optional<std::string> ExtractHash(std::string_view input) {
+        auto meta = ExtractMagnetMetadata(input);
+        if (meta) return meta->info_hash;
         return std::nullopt;
     }
 

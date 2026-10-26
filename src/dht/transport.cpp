@@ -177,6 +177,9 @@ bool UdpTransport::Start(MessageHandler handler) {
     // Allow address reuse.
     int opt = 1;
     setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+    setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
 
     // Enable broadcast if configured.
     if (config_.enable_broadcast) {
