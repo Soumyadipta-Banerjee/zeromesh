@@ -784,6 +784,33 @@ void KademliaDht::StoreValue(const Key& key, const std::string& value) {
     }
 }
 
+void KademliaDht::StoreValueDirect(const std::string& ip, uint16_t port, const Key& key, const std::string& value) {
+    impl_->local_store.PutValue(key, value, impl_->self_id);
+    if (value.size() > kMaxValueSize) return;
+
+    StoreRequest req;
+    req.header = impl_->MakeHeader(RpcType::Store);
+    req.key = key;
+    req.value = value;
+    req.ttl = std::chrono::duration_cast<std::chrono::seconds>(kValueTtl);
+
+    std::string dest = ip + ":" + std::to_string(port);
+    impl_->transport.SendMessage(dest, req);
+}
+
+void KademliaDht::BroadcastStore(const Key& key, const std::string& value) {
+    impl_->local_store.PutValue(key, value, impl_->self_id);
+    if (value.size() > kMaxValueSize) return;
+
+    StoreRequest req;
+    req.header = impl_->MakeHeader(RpcType::Store);
+    req.key = key;
+    req.value = value;
+    req.ttl = std::chrono::duration_cast<std::chrono::seconds>(kValueTtl);
+
+    impl_->transport.BroadcastMessage(req);
+}
+
 std::optional<std::string> KademliaDht::FindValue(const Key& key) {
     return impl_->IterativeFindValue(key);
 }

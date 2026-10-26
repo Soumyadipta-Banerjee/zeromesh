@@ -31,8 +31,11 @@ struct TorrentFileInfo {
 
 struct TorrentManifest {
     std::string name;
+    std::string swarm_id;                 // Unique swarm ID for live multi-seeder sync
+    uint64_t version{1};                  // Monotonically increasing revision number
+    uint64_t updated_at_ms{0};            // Timestamp of latest modification
     uint64_t total_bytes{0};
-    size_t chunk_size_bytes{256 * 1024}; // 256 KB chunks
+    size_t chunk_size_bytes{256 * 1024};  // 256 KB chunks
     uint64_t created_at_sec{0};
     std::vector<TorrentFileInfo> files;
 
@@ -43,6 +46,11 @@ struct TorrentManifest {
         std::ostringstream ss;
         ss << "{\n";
         ss << "  \"name\": \"" << EscapeJson(name) << "\",\n";
+        if (!swarm_id.empty()) {
+            ss << "  \"swarm_id\": \"" << EscapeJson(swarm_id) << "\",\n";
+        }
+        ss << "  \"version\": " << version << ",\n";
+        ss << "  \"updated_at_ms\": " << updated_at_ms << ",\n";
         ss << "  \"total_bytes\": " << total_bytes << ",\n";
         ss << "  \"chunk_size\": " << chunk_size_bytes << ",\n";
         ss << "  \"created_at\": " << created_at_sec << ",\n";
@@ -77,9 +85,21 @@ struct TorrentManifest {
             auto pos = json.find(search);
             if (pos == std::string_view::npos) return std::nullopt;
             pos += search.size();
-            auto end = json.find("\"", pos);
-            if (end == std::string_view::npos) return std::nullopt;
-            return std::string(json.substr(pos, end - pos));
+            size_t end = pos;
+            while (end < json.size()) {
+                if (json[end] == '"') {
+                    size_t bs_count = 0;
+                    size_t k = end;
+                    while (k > pos && json[k - 1] == '\\') {
+                        bs_count++;
+                        k--;
+                    }
+                    if (bs_count % 2 == 0) break;
+                }
+                end++;
+            }
+            if (end >= json.size()) return std::nullopt;
+            return UnescapeJson(json.substr(pos, end - pos));
         };
 
         auto find_uint = [&](std::string_view key) -> std::optional<uint64_t> {
@@ -99,6 +119,9 @@ struct TorrentManifest {
         auto name_opt = find_str("name");
         if (!name_opt) return std::nullopt;
         m.name = *name_opt;
+        m.swarm_id = find_str("swarm_id").value_or("");
+        m.version = find_uint("version").value_or(1);
+        m.updated_at_ms = find_uint("updated_at_ms").value_or(0);
         m.total_bytes = find_uint("total_bytes").value_or(0);
         m.chunk_size_bytes = static_cast<size_t>(find_uint("chunk_size").value_or(256 * 1024));
         m.created_at_sec = find_uint("created_at").value_or(0);
@@ -122,8 +145,20 @@ struct TorrentManifest {
             auto p1 = file_block.find(path_key);
             if (p1 != std::string_view::npos) {
                 p1 += path_key.size();
-                auto p2 = file_block.find("\"", p1);
-                if (p2 != std::string_view::npos) {
+                size_t p2 = p1;
+                while (p2 < file_block.size()) {
+                    if (file_block[p2] == '"') {
+                        size_t bs_count = 0;
+                        size_t k = p2;
+                        while (k > p1 && file_block[k - 1] == '\\') {
+                            bs_count++;
+                            k--;
+                        }
+                        if (bs_count % 2 == 0) break;
+                    }
+                    p2++;
+                }
+                if (p2 < file_block.size()) {
                     fi.relative_path = UnescapeJson(file_block.substr(p1, p2 - p1));
                 }
             }
@@ -326,7 +361,6 @@ struct TorrentManifest {
         return std::nullopt;
     }
 
-private:
     static std::string EscapeJson(std::string_view s) {
         std::ostringstream ss;
         for (char c : s) {
@@ -373,4 +407,80 @@ private:
     }
 };
 
+/**
+ * @brief Dynamic Swarm Head metadata published by any seeder when files are modified, created, or deleted.
+ * This is stored at Key = HexToKey(swarm_id) in the DHT and direct-broadcasted to seeders.
+ */
+struct SwarmHead {
+    std::string swarm_id;
+    uint64_t version{1};
+    std::string manifest_hash;
+    uint64_t updated_at_ms{0};
+    std::string manifest_json; // Inline payload if small, otherwise fetched via manifest_hash
+
+    [[nodiscard]] std::string Serialize() const {
+        std::ostringstream ss;
+        ss << "{\n";
+        ss << "  \"swarm_id\": \"" << TorrentManifest::EscapeJson(swarm_id) << "\",\n";
+        ss << "  \"version\": " << version << ",\n";
+        ss << "  \"manifest_hash\": \"" << TorrentManifest::EscapeJson(manifest_hash) << "\",\n";
+        ss << "  \"updated_at_ms\": " << updated_at_ms << ",\n";
+        ss << "  \"manifest_json\": \"" << TorrentManifest::EscapeJson(manifest_json) << "\"\n";
+        ss << "}\n";
+        return ss.str();
+    }
+
+    static std::optional<SwarmHead> Deserialize(std::string_view json) {
+        SwarmHead h;
+        auto find_str = [&](std::string_view key) -> std::optional<std::string> {
+            std::string search = "\"" + std::string(key) + "\": \"";
+            auto pos = json.find(search);
+            if (pos == std::string_view::npos) return std::nullopt;
+            pos += search.size();
+            size_t end = pos;
+            while (end < json.size()) {
+                if (json[end] == '"') {
+                    size_t bs_count = 0;
+                    size_t k = end;
+                    while (k > pos && json[k - 1] == '\\') {
+                        bs_count++;
+                        k--;
+                    }
+                    if (bs_count % 2 == 0) break;
+                }
+                end++;
+            }
+            if (end >= json.size()) return std::nullopt;
+            return TorrentManifest::UnescapeJson(json.substr(pos, end - pos));
+        };
+
+        auto find_uint = [&](std::string_view key) -> std::optional<uint64_t> {
+            std::string search = "\"" + std::string(key) + "\": ";
+            auto pos = json.find(search);
+            if (pos == std::string_view::npos) return std::nullopt;
+            pos += search.size();
+            size_t i = pos;
+            while (i < json.size() && (std::isdigit(json[i]) || json[i] == ' ')) i++;
+            try {
+                return std::stoull(std::string(json.substr(pos, i - pos)));
+            } catch (...) {
+                return std::nullopt;
+            }
+        };
+
+        auto swarm_opt = find_str("swarm_id");
+        if (!swarm_opt) return std::nullopt;
+        h.swarm_id = *swarm_opt;
+        h.version = find_uint("version").value_or(1);
+        h.manifest_hash = find_str("manifest_hash").value_or("");
+        h.updated_at_ms = find_uint("updated_at_ms").value_or(0);
+        auto raw_mj = find_str("manifest_json");
+        if (raw_mj) {
+            h.manifest_json = *raw_mj;
+        }
+        return h;
+    }
+};
+
 } // namespace zeromesh::examples
+

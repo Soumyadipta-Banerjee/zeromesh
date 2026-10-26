@@ -94,6 +94,16 @@ public:
     void StoreValue(const Key& key, const std::string& value);
 
     /**
+     * @brief Directly sends a StoreRequest for key/value to a specific peer endpoint.
+     */
+    void StoreValueDirect(const std::string& ip, uint16_t port, const Key& key, const std::string& value);
+
+    /**
+     * @brief Broadcasts a StoreRequest on the local subnet.
+     */
+    void BroadcastStore(const Key& key, const std::string& value);
+
+    /**
      * @brief Retrieves a key-value entry from the DHT.
      */
     std::optional<std::string> FindValue(const Key& key);
