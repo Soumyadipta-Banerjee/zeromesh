@@ -19,8 +19,9 @@ namespace zeromesh::net {
 
 namespace {
 
-constexpr std::string_view kAnnounceTag = "ZM2";
-constexpr std::string_view kDrainTag = "ZM2D";
+constexpr std::string_view kAnnounceTag = "ZM3";
+constexpr std::string_view kDrainTag = "ZM3D";
+constexpr size_t kBootIdHexLen = 32;
 constexpr std::string_view kAnnounceLabel = "zm-announce";
 constexpr std::string_view kDrainLabel = "zm-drain";
 constexpr size_t kMaxPacket = 4096;
@@ -139,9 +140,17 @@ std::optional<std::vector<std::string_view>> OpenEnvelope(std::string_view packe
 
 } // namespace
 
+int64_t UnixMsNow() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 std::string FormatAnnouncement(const AnnounceFields& a, const TeamKey& key) {
     const Telemetry& t = a.telemetry;
     const std::string arch = a.arch.empty() ? std::string("unknown") : Sanitize(a.arch, kMaxArchLen);
+    const std::string boot_id = Sanitize(a.boot_id, kBootIdHexLen);
+    const int64_t ts = a.timestamp_ms != 0 ? a.timestamp_ms : UnixMsNow();
 
     std::string body;
     body += kAnnounceTag;
@@ -149,6 +158,12 @@ std::string FormatAnnouncement(const AnnounceFields& a, const TeamKey& key) {
     body += TeamId(key);
     body += '\t';
     body += Sanitize(a.node_id, kMaxIdLen);
+    body += '\t';
+    body += boot_id;
+    body += '\t';
+    AppendNumber(body, a.seq);
+    body += '\t';
+    AppendNumber(body, ts);
     body += '\t';
     body += Sanitize(a.hostname, kMaxHostLen);
     body += '\t';
@@ -172,65 +187,113 @@ std::string FormatAnnouncement(const AnnounceFields& a, const TeamKey& key) {
     return Sign(std::move(body), kAnnounceLabel, key);
 }
 
-std::optional<Peer> ParseAnnouncement(std::string_view packet, const TeamKey& key,
-                                      std::string_view self_node_id) {
-    const auto f = OpenEnvelope(packet, kAnnounceTag, 14, kAnnounceLabel, key, self_node_id);
+std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, const TeamKey& key,
+                                                    std::string_view self_node_id) {
+    const auto f = OpenEnvelope(packet, kAnnounceTag, 17, kAnnounceLabel, key, self_node_id);
     if (!f) return std::nullopt;
     const auto& v = *f;
 
-    const auto node_port = ParseNumber<int>(v[4]);
-    const auto cores_total = ParseNumber<int>(v[6]);
-    const auto cores_free = ParseNumber<int>(v[7]);
-    const auto mem_available = ParseNumber<uint64_t>(v[8]);
-    const auto cpu_load = ParseNumber<double>(v[9]);
-    const auto battery = ParseNumber<int>(v[10]);
+    const auto seq = ParseNumber<uint64_t>(v[4]);
+    const auto timestamp_ms = ParseNumber<int64_t>(v[5]);
+    const auto node_port = ParseNumber<int>(v[7]);
+    const auto cores_total = ParseNumber<int>(v[9]);
+    const auto cores_free = ParseNumber<int>(v[10]);
+    const auto mem_available = ParseNumber<uint64_t>(v[11]);
+    const auto cpu_load = ParseNumber<double>(v[12]);
+    const auto battery = ParseNumber<int>(v[13]);
+    if (!seq || *seq == 0 || !timestamp_ms || *timestamp_ms <= 0) return std::nullopt;
     if (!node_port || *node_port < 1 || *node_port > 65535) return std::nullopt;
     if (!cores_total || *cores_total < 0 || !cores_free || *cores_free < 0) return std::nullopt;
     if (!mem_available || !cpu_load || !std::isfinite(*cpu_load) || *cpu_load < 0) return std::nullopt;
     if (!battery || *battery < -1 || *battery > 100) return std::nullopt;
-    if (v[11] != "0" && v[11] != "1") return std::nullopt;
+    if (v[14] != "0" && v[14] != "1") return std::nullopt;
+    if (v[3].empty()) return std::nullopt;
 
     PeerState state;
-    if (v[12] == "active") {
+    if (v[15] == "active") {
         state = PeerState::Active;
-    } else if (v[12] == "draining") {
+    } else if (v[15] == "draining") {
         state = PeerState::Draining;
     } else {
         return std::nullopt;
     }
 
-    Peer p;
-    p.id = std::string(v[2]);
-    p.hostname = std::string(v[3]);
-    p.node_port = *node_port;
-    p.arch = std::string(v[5]);
-    p.cores = *cores_total;
-    p.cores_free = *cores_free;
-    p.mem_available = *mem_available;
-    p.cpu_load_pct = *cpu_load;
-    p.battery_pct = *battery;
-    p.is_charging = v[11] == "1";
-    p.state = state;
-    return p;
+    ParsedAnnouncement out;
+    out.boot_id = std::string(v[3]);
+    out.seq = *seq;
+    out.timestamp_ms = *timestamp_ms;
+    out.peer.id = std::string(v[2]);
+    out.peer.hostname = std::string(v[6]);
+    out.peer.node_port = *node_port;
+    out.peer.arch = std::string(v[8]);
+    out.peer.cores = *cores_total;
+    out.peer.cores_free = *cores_free;
+    out.peer.mem_available = *mem_available;
+    out.peer.cpu_load_pct = *cpu_load;
+    out.peer.battery_pct = *battery;
+    out.peer.is_charging = v[14] == "1";
+    out.peer.state = state;
+    return out;
 }
 
-std::string FormatDrain(std::string_view node_id, std::string_view reason, const TeamKey& key) {
+std::string FormatDrain(const DrainFields& d, const TeamKey& key) {
+    const int64_t ts = d.timestamp_ms != 0 ? d.timestamp_ms : UnixMsNow();
     std::string body;
     body += kDrainTag;
     body += '\t';
     body += TeamId(key);
     body += '\t';
-    body += Sanitize(node_id, kMaxIdLen);
+    body += Sanitize(d.node_id, kMaxIdLen);
     body += '\t';
-    body += Sanitize(reason, kMaxReasonLen);
+    body += Sanitize(d.boot_id, kBootIdHexLen);
+    body += '\t';
+    AppendNumber(body, d.seq);
+    body += '\t';
+    AppendNumber(body, ts);
+    body += '\t';
+    body += Sanitize(d.reason, kMaxReasonLen);
     return Sign(std::move(body), kDrainLabel, key);
 }
 
 std::optional<DrainNotice> ParseDrain(std::string_view packet, const TeamKey& key,
                                       std::string_view self_node_id) {
-    const auto f = OpenEnvelope(packet, kDrainTag, 5, kDrainLabel, key, self_node_id);
+    const auto f = OpenEnvelope(packet, kDrainTag, 8, kDrainLabel, key, self_node_id);
     if (!f) return std::nullopt;
-    return DrainNotice{std::string((*f)[2]), std::string((*f)[3])};
+    const auto seq = ParseNumber<uint64_t>((*f)[4]);
+    const auto timestamp_ms = ParseNumber<int64_t>((*f)[5]);
+    if (!seq || *seq == 0 || !timestamp_ms || *timestamp_ms <= 0) return std::nullopt;
+    if ((*f)[3].empty()) return std::nullopt;
+    return DrainNotice{std::string((*f)[2]), std::string((*f)[6]), std::string((*f)[3]), *seq,
+                       *timestamp_ms};
+}
+
+bool TimestampAcceptable(int64_t unix_ms, std::chrono::milliseconds max_skew) {
+    if (unix_ms <= 0) return false;
+    const int64_t now = UnixMsNow();
+    const int64_t skew = max_skew.count();
+    return unix_ms >= now - skew && unix_ms <= now + skew;
+}
+
+void ReplayTracker::Clear() {
+    std::lock_guard<std::mutex> lock(mu_);
+    nodes_.clear();
+}
+
+bool ReplayTracker::Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq,
+                           int64_t timestamp_ms) {
+    if (!TimestampAcceptable(timestamp_ms) || node_id.empty() || boot_id.empty() || seq == 0) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    auto& st = nodes_[std::string(node_id)];
+    if (st.boot_id.empty() || st.boot_id != boot_id) {
+        st.boot_id = std::string(boot_id);
+        st.last_seq = seq;
+        return true;
+    }
+    if (seq <= st.last_seq) return false;
+    st.last_seq = seq;
+    return true;
 }
 
 Discovery::Discovery(std::shared_ptr<PeerTable> peer_table, DiscoveryConfig config)
@@ -251,6 +314,16 @@ Discovery::Discovery(std::shared_ptr<PeerTable> peer_table, DiscoveryConfig conf
 
     utsname u{};
     arch_ = uname(&u) == 0 ? std::string(u.machine) : std::string("unknown");
+
+    std::array<uint8_t, 16> boot_bytes{};
+    std::random_device rd;
+    for (auto& b : boot_bytes) b = static_cast<uint8_t>(rd());
+    static constexpr char kDigits[] = "0123456789abcdef";
+    boot_id_.reserve(kBootIdHexLen);
+    for (uint8_t b : boot_bytes) {
+        boot_id_.push_back(kDigits[b >> 4]);
+        boot_id_.push_back(kDigits[b & 0x0f]);
+    }
 
     team_ = std::move(config_.team);
     config_.team.reset();
@@ -287,6 +360,7 @@ void Discovery::SetTeam(std::optional<TeamKey> team) {
     }
     if (changed && peer_table_) {
         peer_table_->Clear();
+        replay_.Clear();
     }
 }
 
@@ -343,6 +417,9 @@ void Discovery::AnnounceNow() {
     }
     a.arch = a.telemetry.arch.empty() ? arch_ : a.telemetry.arch;
     a.state = local_state();
+    a.boot_id = boot_id_;
+    a.seq = wire_seq_.fetch_add(1) + 1;
+    a.timestamp_ms = NowUnixMs();
 
     Send(FormatAnnouncement(a, *team));
 }
@@ -351,7 +428,21 @@ void Discovery::BroadcastNodeDraining(const std::string& reason) {
     const auto team = Team();
     if (!team) return;
     SetLocalState(PeerState::Draining);
-    Send(FormatDrain(config_.node_id, reason, *team));
+    Send(FormatDrain(DrainWireFields(reason), *team));
+}
+
+int64_t Discovery::NowUnixMs() const {
+    return UnixMsNow();
+}
+
+DrainFields Discovery::DrainWireFields(std::string_view reason) {
+    DrainFields d;
+    d.node_id = config_.node_id;
+    d.boot_id = boot_id_;
+    d.seq = wire_seq_.fetch_add(1) + 1;
+    d.timestamp_ms = NowUnixMs();
+    d.reason = std::string(reason);
+    return d;
 }
 
 void Discovery::AdvertiserLoop() {
@@ -373,20 +464,27 @@ void Discovery::HandlePacket(std::string_view packet, const std::string& sender_
     const auto team = Team();
     if (!team || !peer_table_) return;
 
-    if (packet.starts_with("ZM2\t")) {
-        auto peer = ParseAnnouncement(packet, *team, config_.node_id);
-        if (!peer) return;
-        if (peer->state == PeerState::Draining) {
-            if (auto prev = peer_table_->Get(peer->id)) {
-                peer->draining_reason = prev->draining_reason;
+    if (packet.starts_with("ZM3\t")) {
+        auto parsed = ParseAnnouncement(packet, *team, config_.node_id);
+        if (!parsed) return;
+        if (!replay_.Accept(parsed->peer.id, parsed->boot_id, parsed->seq, parsed->timestamp_ms)) {
+            return;
+        }
+        Peer peer = std::move(parsed->peer);
+        if (peer.state == PeerState::Draining) {
+            if (auto prev = peer_table_->Get(peer.id)) {
+                peer.draining_reason = prev->draining_reason;
             }
         }
-        peer->ip_address = sender_ip;
-        peer->latency = std::chrono::milliseconds(1);
-        peer->last_seen = std::chrono::steady_clock::now();
-        peer_table_->Upsert(std::move(*peer));
-    } else if (packet.starts_with("ZM2D\t")) {
+        peer.ip_address = sender_ip;
+        peer.latency = std::chrono::milliseconds(1);
+        peer.last_seen = std::chrono::steady_clock::now();
+        peer_table_->Upsert(std::move(peer));
+    } else if (packet.starts_with("ZM3D\t")) {
         if (auto drain = ParseDrain(packet, *team, config_.node_id)) {
+            if (!replay_.Accept(drain->node_id, drain->boot_id, drain->seq, drain->timestamp_ms)) {
+                return;
+            }
             peer_table_->MarkDraining(drain->node_id, drain->reason);
         }
     }

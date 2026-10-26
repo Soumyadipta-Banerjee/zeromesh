@@ -18,16 +18,21 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 
 namespace zeromesh::net {
 
 inline constexpr std::chrono::seconds kAnnounceInterval{2};
 inline constexpr std::chrono::seconds kPeerStaleAfter{10};
 inline constexpr std::chrono::seconds kPeerPruneAfter{30};
+inline constexpr std::chrono::milliseconds kDiscoveryReplaySkew{30000};
 
 // What a node says about itself in one announcement.
 struct AnnounceFields {
     std::string node_id;
+    std::string boot_id;
+    uint64_t seq{0};
+    int64_t timestamp_ms{0}; // unix ms; 0 means "use now" when formatting
     std::string hostname;
     int node_port{8981};
     std::string arch;
@@ -35,27 +40,61 @@ struct AnnounceFields {
     PeerState state{PeerState::Active};
 };
 
-// ZM2\t<team_id>\t<node_id>\t<hostname>\t<node_port>\t<arch>\t<cores_total>\t<cores_free>
-//    \t<mem_available>\t<cpu_load_pct>\t<battery_pct>\t<on_ac>\t<state>\t<hex mac>
+struct DrainFields {
+    std::string node_id;
+    std::string boot_id;
+    uint64_t seq{0};
+    int64_t timestamp_ms{0};
+    std::string reason;
+};
+
+// ZM3\t<team_id>\t<node_id>\t<boot_id>\t<seq>\t<timestamp_ms>\t<hostname>\t...
+//    \t<state>\t<hex mac>
 // mac = hex(Mac(key, "zm-announce", everything before the last tab)).
-// Tabs and line breaks in string fields are replaced by spaces.
 std::string FormatAnnouncement(const AnnounceFields&, const TeamKey&);
 
-// nullopt for another team, a bad tag, our own node id, or a malformed packet.
-// Never throws. ip_address and last_seen are left for the caller to fill in;
-// memory_bytes stays 0 (mem_total is not on the wire).
-std::optional<Peer> ParseAnnouncement(std::string_view packet, const TeamKey&,
-                                      std::string_view self_node_id);
+struct ParsedAnnouncement {
+    Peer peer;
+    std::string boot_id;
+    uint64_t seq{0};
+    int64_t timestamp_ms{0};
+};
+
+std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, const TeamKey&,
+                                                   std::string_view self_node_id);
 
 struct DrainNotice {
     std::string node_id;
     std::string reason;
+    std::string boot_id;
+    uint64_t seq{0};
+    int64_t timestamp_ms{0};
 };
 
-// ZM2D\t<team_id>\t<node_id>\t<reason>\t<hex mac>, mac label "zm-drain".
-std::string FormatDrain(std::string_view node_id, std::string_view reason, const TeamKey&);
+// ZM3D\t<team_id>\t<node_id>\t<boot_id>\t<seq>\t<timestamp_ms>\t<reason>\t<hex mac>
+std::string FormatDrain(const DrainFields&, const TeamKey&);
 std::optional<DrainNotice> ParseDrain(std::string_view packet, const TeamKey&,
                                       std::string_view self_node_id);
+
+[[nodiscard]] bool TimestampAcceptable(int64_t unix_ms,
+                                       std::chrono::milliseconds max_skew = kDiscoveryReplaySkew);
+
+// Per-sender replay filter: monotonic seq per boot_id; a new boot_id is accepted only
+// when the packet timestamp is within the skew window.
+class ReplayTracker {
+public:
+    [[nodiscard]] bool Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq,
+                              int64_t timestamp_ms);
+    void Clear();
+
+private:
+    struct State {
+        std::string boot_id;
+        uint64_t last_seq{0};
+    };
+    std::mutex mu_;
+    std::unordered_map<std::string, State> nodes_;
+};
 
 struct DiscoveryConfig {
     std::string node_id{};
@@ -66,8 +105,6 @@ struct DiscoveryConfig {
     int discovery_port{8988};                // UDP; multicast send and listen
     std::string multicast_group{"239.255.42.99"};
     std::optional<TeamKey> team{};           // no team: neither announce nor accept
-    // Live resource snapshot for announcements. When empty, `cores`/`ram_bytes` are
-    // announced with zero load, no battery and AC power. Calls are serialized.
     std::function<Telemetry()> telemetry{};
 };
 
@@ -79,26 +116,17 @@ public:
     Discovery(const Discovery&) = delete;
     Discovery& operator=(const Discovery&) = delete;
 
-    // Starts the advertiser and listener threads.
     bool Start();
     void Stop();
     [[nodiscard]] bool IsRunning() const { return running_.load(); }
 
-    // Joins (or with nullopt leaves) a team at runtime. Thread-safe. Changing the team
-    // forgets every peer learned under the previous one.
     void SetTeam(std::optional<TeamKey> team);
 
-    // Sends one announcement now. No-op without a team.
     void AnnounceNow();
 
-    // Sticky local peer state for periodic announcements (Active by default).
-    // Draining stays on the wire until SetLocalState(Active), so a one-shot
-    // BroadcastNodeDraining is not overwritten by the next 2 s announce.
     void SetLocalState(PeerState state);
     [[nodiscard]] PeerState local_state() const;
 
-    // Tells team peers we are draining (battery, thermal, user activity). No-op without a team.
-    // Also sets local state to Draining so subsequent AnnounceNow stay draining.
     void BroadcastNodeDraining(const std::string& reason);
 
     [[nodiscard]] const std::string& node_id() const { return config_.node_id; }
@@ -109,10 +137,15 @@ private:
     void HandlePacket(std::string_view packet, const std::string& sender_ip);
     void Send(const std::string& msg) const;
     [[nodiscard]] std::optional<TeamKey> Team() const;
+    int64_t NowUnixMs() const;
+    DrainFields DrainWireFields(std::string_view reason);
 
     std::shared_ptr<PeerTable> peer_table_;
-    DiscoveryConfig config_;  // config_.team is moved into team_ at construction
+    DiscoveryConfig config_;
     std::string arch_;
+    std::string boot_id_;
+    std::atomic<uint64_t> wire_seq_{0};
+    ReplayTracker replay_;
     mutable std::mutex team_mutex_;
     std::optional<TeamKey> team_;
     std::mutex telemetry_mutex_;

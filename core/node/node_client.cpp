@@ -6,6 +6,7 @@
 #include "node/convert.hpp"
 
 #include <grpcpp/client_context.h>
+#include <grpcpp/create_channel.h>
 
 #include <algorithm>
 #include <stdexcept>
@@ -48,7 +49,32 @@ struct FirstSeenFingerprint {
     }
 };
 
+std::shared_ptr<grpc::Channel> MakeNodeApiChannel(const std::string& address,
+                                                  std::shared_ptr<grpc::ChannelCredentials> creds,
+                                                  bool keepalive) {
+    grpc::ChannelArguments args;
+    args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
+    args.SetMaxReceiveMessageSize(kNodeApiMaxMessageSize);
+    args.SetMaxSendMessageSize(kNodeApiMaxMessageSize);
+    if (keepalive) {
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, net::kKeepaliveTimeMs);
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, net::kKeepaliveTimeoutMs);
+        args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
+        args.SetInt(GRPC_ARG_HTTP2_MAX_PINGS_WITHOUT_DATA, 0);
+    }
+    return grpc::CreateCustomChannel(address, std::move(creds), args);
+}
+
 } // namespace
+
+size_t EncodedOfferByteSize(const std::string& task_id, const v1::TaskSpec& spec,
+                            const std::vector<v1::Digest>& needed) {
+    v1::Offer req;
+    req.set_task_id(task_id);
+    *req.mutable_spec() = spec;
+    for (const auto& d : needed) *req.add_needed() = d;
+    return req.ByteSizeLong();
+}
 
 NodeClient::NodeClient(std::string address, net::Identity self, std::shared_ptr<net::PinStore> pins,
                        std::optional<std::string> expected_node_id)
@@ -68,8 +94,8 @@ void NodeClient::SetDeadline(grpc::ClientContext& ctx) {
 
 bool NodeClient::Admit(const net::TeamKey& key, std::string* error) {
     auto seen = std::make_shared<FirstSeenFingerprint>();
-    auto channel = net::PeerChannel(
-        address_, net::ClientCreds(self_, [seen](std::string_view fp) { return seen->Accept(fp); }));
+    auto channel = MakeNodeApiChannel(
+        address_, net::ClientCreds(self_, [seen](std::string_view fp) { return seen->Accept(fp); }), false);
     auto stub = v1::NodeApi::NewStub(channel);
 
     const std::string nonce_c = AdmitNonce();
@@ -130,8 +156,7 @@ std::shared_ptr<v1::NodeApi::Stub> NodeClient::PinnedStub(std::string* error) {
             auto pinned = pins->FingerprintFor(node);
             return pinned && *pinned == fp;
         };
-        pinned_stub_ =
-            v1::NodeApi::NewStub(net::PeerChannel(address_, net::ClientCreds(self_, accept), /*keepalive=*/true));
+        pinned_stub_ = v1::NodeApi::NewStub(MakeNodeApiChannel(address_, net::ClientCreds(self_, accept), true));
     }
     return pinned_stub_;
 }

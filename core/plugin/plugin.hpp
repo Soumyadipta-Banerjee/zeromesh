@@ -15,7 +15,7 @@
 
 namespace zeromesh::plugin {
 
-inline constexpr uint32_t kAbiMajor = 1;
+inline constexpr uint32_t kAbiMajor = 2;
 
 struct Bind {
     std::string host;

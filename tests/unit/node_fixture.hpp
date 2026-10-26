@@ -93,6 +93,7 @@ struct TestNodeFull {
             },
             cas, registry, executor, [this] { return telemetry; }, policy, peers);
         grpc::ServerBuilder b;
+        node::ApplyNodeApiMessageLimits(b);
         net::AllowKeepalivePings(b);
         b.AddListeningPort("127.0.0.1:" + std::to_string(want_port), net::ServerCreds(id), &port);
         b.RegisterService(service.get());

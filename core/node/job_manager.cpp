@@ -109,6 +109,7 @@ struct TaskRun {
     std::string worker_id;  // set at PLACED, before the task finishes
     v1::TaskResult result;
     bool has_result{false};
+    size_t retained_log_bytes{0};
 };
 
 struct Job {
@@ -163,7 +164,11 @@ private:
     std::shared_ptr<ActionCache> cache_;
     std::shared_ptr<Executor> executor_;
 
-    static constexpr size_t kFinishedJobsListed = 32;
+    static constexpr size_t kFinishedJobsListed = 256;
+    static constexpr size_t kMaxRetainedFinishedJobs = 256;
+    static constexpr size_t kMaxRetainedLogBytesPerTask = 1024 * 1024;
+
+    void EvictFinishedJobs();
 
     mutable std::mutex mu_;
     std::unordered_map<std::string, JobPtr> jobs_;
@@ -265,7 +270,8 @@ void JobManager::Impl::Start(const JobPtr& job, Ready r) {
         store::Digest root = FromProto(spec.input_root());
         for (const auto& [dest, out] : r.overlays) {
             if (out.is_symlink()) continue;
-            root = merkle_->Overlay(root, JoinPath(dest, out.path()), FromProto(out.digest()), out.is_dir());
+            root = merkle_->Overlay(root, JoinPath(dest, out.path()), FromProto(out.digest()), out.is_dir(),
+                                    out.is_executable());
         }
         *spec.mutable_input_root() = ToProto(root);
     } catch (const std::exception& e) {
@@ -399,9 +405,43 @@ void JobManager::Impl::OnLog(const JobPtr& job, size_t i, int fd, std::string_vi
 
 void JobManager::Impl::Emit(Job& job, v1::JobEvent ev) {
     ev.set_job_id(job.id);
+    bool retain = true;
+    if (!ev.log_chunk().empty()) {
+        auto it = job.index.find(ev.task_name());
+        if (it != job.index.end()) {
+            TaskRun& t = job.tasks[it->second];
+            const size_t chunk = ev.log_chunk().size();
+            if (t.retained_log_bytes + chunk > kMaxRetainedLogBytesPerTask) {
+                retain = false;
+            } else {
+                t.retained_log_bytes += chunk;
+            }
+        }
+    }
     std::erase_if(job.watchers, [](const auto& w) { return w->closed(); });
     for (auto& w : job.watchers) w->Push(ev);
-    job.history.push_back(std::move(ev));
+    if (retain) job.history.push_back(std::move(ev));
+}
+
+void JobManager::Impl::EvictFinishedJobs() {
+    size_t finished = 0;
+    for (const auto& id : job_order_) {
+        auto it = jobs_.find(id);
+        if (it != jobs_.end() && it->second->done) ++finished;
+    }
+    while (finished > kMaxRetainedFinishedJobs) {
+        bool removed = false;
+        for (auto it = job_order_.begin(); it != job_order_.end(); ++it) {
+            auto jt = jobs_.find(*it);
+            if (jt == jobs_.end() || !jt->second->done) continue;
+            jobs_.erase(jt);
+            job_order_.erase(it);
+            --finished;
+            removed = true;
+            break;
+        }
+        if (!removed) break;
+    }
 }
 
 void JobManager::Impl::Finish(Job& job, size_t i, v1::TaskState state, const std::string& detail,
@@ -440,6 +480,7 @@ void JobManager::Impl::Finish(Job& job, size_t i, v1::TaskState state, const std
         job.done = true;
         for (auto& w : job.watchers) w->End();
         job.watchers.clear();
+        EvictFinishedJobs();
     }
 }
 

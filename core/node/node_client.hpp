@@ -17,8 +17,10 @@
 #include "zeromesh/v1/node.grpc.pb.h"
 
 #include <grpcpp/channel.h>
+#include <grpcpp/server_builder.h>
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <memory>
@@ -31,6 +33,17 @@
 namespace zeromesh::node {
 
 inline constexpr std::chrono::seconds kNodeRpcTimeout{10};
+// OfferTask carries every input-tree digest; large trees need a bigger gRPC frame than the default 4 MiB.
+inline constexpr int kNodeApiMaxMessageSize = 64 * 1024 * 1024;
+
+inline void ApplyNodeApiMessageLimits(grpc::ServerBuilder& builder) {
+    builder.SetMaxReceiveMessageSize(kNodeApiMaxMessageSize);
+    builder.SetMaxSendMessageSize(kNodeApiMaxMessageSize);
+}
+
+// Serialized size of an Offer RPC (for placer-side limits before calling the peer).
+[[nodiscard]] size_t EncodedOfferByteSize(const std::string& task_id, const v1::TaskSpec& spec,
+                                          const std::vector<v1::Digest>& needed);
 
 class NodeClient {
 public:

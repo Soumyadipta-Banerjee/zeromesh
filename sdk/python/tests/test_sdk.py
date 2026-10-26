@@ -303,6 +303,60 @@ def test_submit_dag_pipeline(shared_zmd, tmp_dir):
         assert f.read() == "10\n20\n"
 
 
+def test_wait_check_raises_job_cancelled(shared_zmd):
+    zm = zeromesh.connect(socket_path=shared_zmd.socket)
+    job = zm.map(argv=["sleep", "30"], items=[1], name="cancel_me")
+    time.sleep(0.1)
+    job.cancel()
+    with pytest.raises(zeromesh.JobCancelled):
+        job.wait(check=True)
+
+
+def test_wait_check_raises_job_timeout_on_timed_out_flag():
+    """timed_out must win over a non-zero exit_code from the daemon."""
+    from unittest import mock
+
+    from zeromesh.job import Job
+
+    res = mock.Mock(
+        exit_code=-1,
+        timed_out=True,
+        cancelled=False,
+        error="",
+        stderr_head=b"",
+    )
+    st = mock.Mock(done=True, results={"task_0": res})
+    client = mock.Mock()
+    client._stub.WatchJob.return_value = iter([])
+    client._stub.GetJob.return_value = st
+
+    job = Job(client, "job-timeout")
+    with pytest.raises(zeromesh.JobTimeout):
+        job.wait(check=True)
+
+
+def test_wait_check_raises_job_cancelled_on_cancelled_flag():
+    from unittest import mock
+
+    from zeromesh.job import Job
+
+    res = mock.Mock(
+        exit_code=-1,
+        timed_out=False,
+        cancelled=True,
+        error="",
+        stderr_head=b"",
+    )
+    st = mock.Mock(done=True, results={"task_0": res})
+    client = mock.Mock()
+    client._stub.WatchJob.return_value = iter([])
+    client._stub.GetJob.return_value = st
+
+    job = Job(client, "job-cancel")
+    with pytest.raises(zeromesh.JobCancelled):
+        job.wait(check=True)
+
+
 def test_wait_check_false(shared_zmd):
     """Verifies that wait(check=False) returns JobStatus instead of raising on task error."""
     zm = zeromesh.connect(socket_path=shared_zmd.socket)

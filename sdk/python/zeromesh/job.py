@@ -81,8 +81,8 @@ class Job:
 
         Args:
             timeout: Maximum seconds to wait. None for unlimited.
-            check: If True (default), raises TaskFailed if any task failed with
-                   a non-zero exit code.
+            check: If True (default), raises JobCancelled / JobTimeout /
+                   TaskFailed when a task was cancelled, timed out, or failed.
             poll_interval: Polling sleep duration if watching stream closes early.
 
         Returns:
@@ -115,6 +115,10 @@ class Job:
 
         if check:
             for task_name, res in st.results.items():
+                if res.cancelled:
+                    raise JobCancelled(f"Task '{task_name}' was cancelled")
+                if res.timed_out:
+                    raise JobTimeout(f"Task '{task_name}' timed out")
                 if res.exit_code != 0:
                     raise TaskFailed(
                         task_name=task_name,
@@ -122,10 +126,6 @@ class Job:
                         stderr_head=res.stderr_head,
                         result=res,
                     )
-                if res.timed_out:
-                    raise JobTimeout(f"Task '{task_name}' timed out")
-                if res.cancelled:
-                    raise JobCancelled(f"Task '{task_name}' was cancelled")
                 if res.error:
                     raise TaskFailed(
                         task_name=task_name,
