@@ -142,3 +142,23 @@ if gtk4_dep.found()
     dependencies: [threads_dep, dl_dep, openssl_dep, gtk4_dep]
   )
 endif
+
+torrent_cli_sources = files(
+  'tests/examples/torrent_cli.cpp',
+  'src/cas/store.cpp',
+  'src/cas/merkle.cpp',
+  'src/discovery/peer_table.cpp',
+  'src/discovery/mdns.cpp',
+  'src/dht/kademlia.cpp',
+  'src/dht/routing_table.cpp',
+  'src/dht/local_store.cpp',
+  'src/dht/transport.cpp',
+  'src/vfs/chunk_fetcher.cpp',
+  'src/vfs/fuse_fs.cpp'
+)
+
+executable('zm-torrent-cli',
+  torrent_cli_sources,
+  include_directories: inc,
+  dependencies: [threads_dep, dl_dep, openssl_dep]
+)
