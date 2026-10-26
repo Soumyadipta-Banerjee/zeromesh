@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace zeromesh::store {
 
@@ -214,6 +215,29 @@ DirectoryManifest MerkleBuilder::LoadManifest(const Digest& tree) {
     auto m = DirectoryManifest::Deserialize(*data);
     if (!m) throw std::runtime_error("corrupt tree " + tree.hash);
     return *m;
+}
+
+std::vector<Digest> MerkleBuilder::CollectTree(const Digest& root) {
+    std::vector<Digest> out;
+    if (root.hash.empty()) return out;
+    std::unordered_set<std::string> seen{root.hash};
+    std::vector<Digest> trees{root};
+    out.push_back(root);
+    while (!trees.empty()) {
+        Digest tree = std::move(trees.back());
+        trees.pop_back();
+        DirectoryManifest m = LoadManifest(tree);
+        for (const auto& d : m.directories) {
+            if (seen.insert(d.digest.hash).second) {
+                out.push_back(d.digest);
+                trees.push_back(d.digest);
+            }
+        }
+        for (const auto& f : m.files) {
+            if (seen.insert(f.digest.hash).second) out.push_back(f.digest);
+        }
+    }
+    return out;
 }
 
 namespace {
