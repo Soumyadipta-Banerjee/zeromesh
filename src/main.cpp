@@ -1,6 +1,9 @@
+#include "cas/merkle.hpp"
 #include "cas/store.hpp"
+#include "discovery/mdns.hpp"
 #include "discovery/peer_table.hpp"
 #include "executor/host_guard.hpp"
+#include "executor/runner.hpp"
 #include "reapi/action_cache.hpp"
 #include "reapi/cas_service.hpp"
 #include "reapi/execution_service.hpp"
@@ -18,7 +21,7 @@ void PrintBanner() {
   ______               __  __           _     
  |___  /              |  \/  |         | |    
     / / ___ _ __ ___  | \  / | ___  ___| |__  
-   / / / _ \ '__/ _ \ | |\/| |/ _ \/ __| '_ \ 
+   / / / _ \ '__/ _ \ | |\/| |/ _ \/ __| '_ \
   / /_|  __/ | | (_) || |  | |  __/\__ \ | | |
  /_____\___|_|  \___/ |_|  |_|\___||___/_| |_|
   Zero-Config P2P Remote Execution Mesh
@@ -58,13 +61,21 @@ int main(int argc, char** argv) {
 
     // Core subsystem initialization
     auto cas_store = std::make_shared<zeromesh::cas::CasStore>();
+    auto merkle = std::make_shared<zeromesh::cas::MerkleBuilder>(cas_store);
+    auto task_runner = std::make_shared<zeromesh::executor::TaskRunner>(cas_store, merkle);
     auto peer_table = std::make_shared<zeromesh::discovery::PeerTable>();
     auto scheduler = std::make_shared<zeromesh::scheduler::Scheduler>(peer_table);
+
+    // mDNS zero-configuration peer discovery
+    zeromesh::discovery::MdnsConfig mdns_cfg{
+        .grpc_port = 8980
+    };
+    auto mdns_engine = std::make_shared<zeromesh::discovery::MdnsEngine>(peer_table, mdns_cfg);
 
     // Option 1: REAPI Gateway Services
     auto cas_svc = std::make_shared<zeromesh::reapi::CasService>(cas_store);
     auto ac_svc = std::make_shared<zeromesh::reapi::ActionCacheService>(cas_store);
-    auto exec_svc = std::make_shared<zeromesh::reapi::ExecutionService>(cas_store, ac_svc, scheduler, nullptr);
+    auto exec_svc = std::make_shared<zeromesh::reapi::ExecutionService>(cas_store, ac_svc, scheduler, task_runner);
 
     zeromesh::reapi::ServerConfig config{
         .host = "127.0.0.1",
@@ -77,12 +88,14 @@ int main(int argc, char** argv) {
         std::cout << "[+] ContentAddressableStorage (CAS) initialized at " << cas_store->GetBasePath() << "\n"
                   << "[+] ActionCache (AC) initialized with Cache-First fast path\n"
                   << "[+] Locality-Aware Scheduler initialized\n"
+                  << "[+] mDNS Zero-Config Discovery listening on LAN multicast\n"
                   << "[+] REAPI v2 Gateway listening on 127.0.0.1:8980\n"
                   << "\nBuild tools can now connect:\n"
                   << "  export RECC_SERVER=127.0.0.1:8980\n"
                   << "  export CMAKE_CXX_COMPILER_LAUNCHER=recc\n"
                   << std::endl;
 
+        mdns_engine->Start();
         server.Start();
         return 0;
     }

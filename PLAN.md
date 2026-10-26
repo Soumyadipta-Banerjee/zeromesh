@@ -104,7 +104,7 @@ ZeroMesh operates as a single binary daemon (`zmd` / `zm`) installed on each mac
 - [x] Add thermal and battery guard checks (suspend donor execution if battery < 20% or discharging)
 
 ### Phase 3: P2P Mesh & Blob Transfer
-- [ ] Implement mDNS publisher and subscriber (`_zeromesh._tcp`) for zero-configuration subnet discovery
+- [x] Implement mDNS publisher and subscriber (`_zeromesh._tcp`) for zero-configuration subnet discovery
 - [x] Implement PeerTable with automatic stale node eviction and heartbeat gossiping
 - [ ] Implement P2P missing blob syncer to stream input trees between nodes over LAN
 - [x] Add team-wide Action Cache lookups across peers to avoid duplicate compilation
