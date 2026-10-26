@@ -54,3 +54,43 @@ TEST(PluginMissingFileReportsError) {
     ASSERT_FALSE(reg.LoadFile("/nonexistent/libnope.so", &err));
     ASSERT_FALSE(err.empty());
 }
+
+class CountingFrontend final : public zeromesh::plugin::IFrontend {
+public:
+    explicit CountingFrontend(int* starts, int* stops) : starts_(starts), stops_(stops) {}
+    std::string_view Name() const override { return "counting"; }
+    bool Start(zeromesh::plugin::ClientApiHandle& h, const zeromesh::plugin::PluginConfig&) override {
+        socket_ = h.unix_socket;
+        if (starts_) ++(*starts_);
+        return true;
+    }
+    void Stop() override {
+        if (stops_) ++(*stops_);
+    }
+    std::filesystem::path socket_;
+
+private:
+    int* starts_;
+    int* stops_;
+};
+
+TEST(PluginFrontendsStartAndStop) {
+    int starts = 0;
+    int stops = 0;
+    zeromesh::plugin::Registry reg;
+    reg.RegisterFrontend(std::make_unique<CountingFrontend>(&starts, &stops));
+    ASSERT_EQ(reg.Frontends().size(), static_cast<size_t>(1));
+
+    zeromesh::plugin::ClientApiHandle handle;
+    handle.unix_socket = "/tmp/zm-test.sock";
+    reg.StartFrontends(handle, {});
+    ASSERT_EQ(starts, 1);
+    ASSERT_EQ(stops, 0);
+
+    reg.StopFrontends();
+    ASSERT_EQ(stops, 1);
+
+    reg.StartFrontends(handle, {});
+    ASSERT_EQ(starts, 2);
+    // Destructor also stops started frontends.
+}
