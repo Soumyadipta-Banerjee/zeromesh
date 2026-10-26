@@ -24,6 +24,8 @@ class RenderOptions:
     encode: Optional[Path] = None
     blender_bin: str = "blender"
     cores: int = 1
+    may_run_local: bool = True
+    may_run_remote: bool = True
 
 
 @dataclass
@@ -73,8 +75,14 @@ def build_job_spec(
     cores: int,
     blender_bin: str,
     common_pb2: Any,
+    may_run_local: bool = True,
+    may_run_remote: bool = True,
 ) -> Any:
     """Build a JobSpec with one task per chunk."""
+    policy = common_pb2.Policy(
+        may_run_local=may_run_local,
+        may_run_remote=may_run_remote,
+    )
     tasks = []
     for ch in chunks:
         tasks.append(
@@ -85,6 +93,7 @@ def build_job_spec(
                 outputs=["out/"],
                 env_spec=common_pb2.EnvSpec(name=env),
                 resources=common_pb2.Resources(cores=cores),
+                policy=policy,
             )
         )
     return common_pb2.JobSpec(name="zm-render", tasks=tasks)
@@ -152,6 +161,8 @@ def run_render(
         cores=opts.cores,
         blender_bin=opts.blender_bin,
         common_pb2=common_pb2,
+        may_run_local=opts.may_run_local,
+        may_run_remote=opts.may_run_remote,
     )
     job = client.submit(job_spec)
 

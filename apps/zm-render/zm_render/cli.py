@@ -58,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cores requested per chunk task (default: 1)",
     )
     p.add_argument(
+        "--remote-only",
+        action="store_true",
+        help="Only run on peer donors (needed when local Blender lives under /opt)",
+    )
+    p.add_argument(
         "--socket",
         default=None,
         help="Override zmd unix socket path",
@@ -101,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
         encode=args.encode,
         blender_bin=args.blender,
         cores=args.cores,
+        may_run_local=not args.remote_only,
+        may_run_remote=True,
     )
 
     from zm_render.render import MissingFramesError
