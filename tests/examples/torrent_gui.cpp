@@ -119,6 +119,7 @@ struct AppContext {
     GtkWidget* status_label{nullptr};
     GtkWidget* peers_label{nullptr};
     GtkWidget* ports_label{nullptr};
+    GtkWidget* sync_status_label{nullptr};
     GtkWidget* error_badge_label{nullptr};
     GtkWidget* error_banner_box{nullptr};
     GtkWidget* error_banner_label{nullptr};
@@ -829,6 +830,12 @@ static GtkWidget* BuildHeaderBar() {
 
     gtk_box_append(GTK_BOX(box), h_stats);
 
+    GtkWidget* h_sync = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+    g_app.sync_status_label = gtk_label_new("🔄 Live Swarm Sync: Standing by (export or join a swarm to begin)");
+    gtk_label_set_xalign(GTK_LABEL(g_app.sync_status_label), 0.0f);
+    gtk_box_append(GTK_BOX(h_sync), g_app.sync_status_label);
+    gtk_box_append(GTK_BOX(box), h_sync);
+
     // Error Alert Banner (Hidden by default, revealed on error)
     g_app.error_banner_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_widget_add_css_class(g_app.error_banner_box, "error-banner");
@@ -1177,6 +1184,38 @@ int main(int argc, char** argv) {
 
     g_app.engine = std::make_unique<TorrentEngine>(storage, g_app.dht_port, g_app.chunk_port);
     g_app.engine->Start();
+
+    struct SyncDispatchPayload {
+        std::string event_type;
+        std::string details;
+        uint64_t version;
+        size_t file_count;
+    };
+
+    g_app.engine->SetSyncCallback([](const std::string& type, const std::string& details, uint64_t version, size_t file_count) {
+        auto* payload = new SyncDispatchPayload{type, details, version, file_count};
+        g_idle_add([](gpointer data) -> gboolean {
+            auto* p = static_cast<SyncDispatchPayload*>(data);
+            if (p->event_type == "LOCAL_UPDATE") {
+                GuiLogger::Instance().Log(LogLevel::Success, "SYNC", p->details);
+            } else if (p->event_type == "REMOTE_DETECTED") {
+                GuiLogger::Instance().Log(LogLevel::Info, "SYNC", p->details);
+            } else if (p->event_type == "SYNC_COMPLETE") {
+                GuiLogger::Instance().Log(LogLevel::Success, "SYNC", p->details);
+            } else {
+                GuiLogger::Instance().Log(LogLevel::Info, "SYNC", p->details);
+            }
+
+            if (g_app.sync_status_label) {
+                std::string st = "🔄 Live Swarm Sync: Active (v" + std::to_string(p->version) +
+                                 ", " + std::to_string(p->file_count) + " files)";
+                gtk_label_set_text(GTK_LABEL(g_app.sync_status_label), st.c_str());
+            }
+
+            delete p;
+            return G_SOURCE_REMOVE;
+        }, payload);
+    });
 
     GtkApplication* app = gtk_application_new("org.zeromesh.torrent", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(OnAppActivate), nullptr);

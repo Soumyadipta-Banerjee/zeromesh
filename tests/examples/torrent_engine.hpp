@@ -16,6 +16,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -107,6 +109,31 @@ public:
                                                 uint64_t bytes_transferred,
                                                 uint64_t total_bytes)>;
 
+    using SyncEventCallback = std::function<void(const std::string& event_type,
+                                                 const std::string& details,
+                                                 uint64_t version,
+                                                 size_t file_count)>;
+
+    struct SyncFolderState {
+        std::string swarm_id;
+        std::filesystem::path local_dir;
+        std::atomic<uint64_t> current_version{1};
+        size_t chunk_size_bytes{256 * 1024};
+        std::atomic<bool> active{false};
+        std::atomic<bool> is_applying_remote{false};
+        std::string latest_manifest_hash;
+
+        struct FileSnapshot {
+            uint64_t size{0};
+            std::filesystem::file_time_type mtime{};
+            std::vector<std::string> chunk_hashes;
+        };
+        std::unordered_map<std::string, FileSnapshot> file_snapshot;
+        std::vector<std::pair<std::string, uint16_t>> known_dht_peers;
+        std::vector<std::pair<std::string, uint16_t>> known_chunk_peers;
+        std::mutex sync_mutex;
+    };
+
     TorrentEngine(std::filesystem::path storage_dir,
                   uint16_t dht_port = 8982,
                   uint16_t chunk_port = 8984)
@@ -167,6 +194,19 @@ public:
                     node.port = dht_port_;
                     node.last_seen = std::chrono::steady_clock::now();
                     dht_->InsertNode(node);
+
+                    std::lock_guard<std::mutex> lock(sync_state_.sync_mutex);
+                    bool found = false;
+                    for (const auto& kp : sync_state_.known_dht_peers) {
+                        if (kp.first == p.ip_address && kp.second == dht_port_) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        sync_state_.known_dht_peers.push_back({p.ip_address, dht_port_});
+                        sync_state_.known_chunk_peers.push_back({p.ip_address, chunk_port_});
+                    }
                 }
                 std::this_thread::sleep_for(std::chrono::seconds(2));
             }
@@ -178,6 +218,11 @@ public:
     void Stop() {
         if (!running_.exchange(false)) return;
 
+        StopLiveSync();
+        if (live_sync_thread_.joinable()) {
+            live_sync_thread_.join();
+        }
+
         if (sync_thread_.joinable()) {
             sync_thread_.join();
         }
@@ -187,13 +232,33 @@ public:
         dht_->Stop();
     }
 
-    void AddDhtPeer(const std::string& ip, uint16_t dht_port, const std::string& node_id_hex) {
+    void SetSyncCallback(SyncEventCallback cb) {
+        sync_event_cb_ = std::move(cb);
+    }
+
+    [[nodiscard]] bool IsLiveSyncActive() const {
+        return sync_state_.active.load();
+    }
+
+    [[nodiscard]] uint64_t GetLiveSyncVersion() const {
+        return sync_state_.current_version.load();
+    }
+
+    [[nodiscard]] std::string GetLiveSyncSwarmId() const {
+        return sync_state_.swarm_id;
+    }
+
+    void AddDhtPeer(const std::string& ip, uint16_t dht_port, const std::string& node_id_hex, uint16_t chunk_port = 0) {
         dht::DhtNode node;
         node.id = HexToKey(node_id_hex);
         node.ip_address = ip;
         node.port = dht_port;
         node.last_seen = std::chrono::steady_clock::now();
         dht_->InsertNode(node);
+
+        std::lock_guard<std::mutex> lock(sync_state_.sync_mutex);
+        sync_state_.known_dht_peers.push_back({ip, dht_port});
+        sync_state_.known_chunk_peers.push_back({ip, chunk_port > 0 ? chunk_port : chunk_port_});
     }
 
     [[nodiscard]] std::shared_ptr<dht::KademliaDht> GetDht() const {
@@ -210,6 +275,357 @@ public:
         s.total_bytes_downloaded = total_bytes_downloaded_.load();
         return s;
     }
+
+    void PublishSwarmHead(const std::string& swarm_id,
+                          uint64_t version,
+                          const std::string& manifest_hash,
+                          const std::string& manifest_json) {
+        SwarmHead head;
+        head.swarm_id = swarm_id;
+        head.version = version;
+        head.manifest_hash = manifest_hash;
+        head.updated_at_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        if (manifest_json.size() <= 7000) {
+            head.manifest_json = manifest_json;
+        }
+
+        std::string head_json = head.Serialize();
+        dht_->StoreValue(HexToKey(swarm_id), head_json);
+        dht_->BroadcastStore(HexToKey(swarm_id), head_json);
+
+        std::vector<std::pair<std::string, uint16_t>> peers_copy;
+        {
+            std::lock_guard<std::mutex> lock(sync_state_.sync_mutex);
+            peers_copy = sync_state_.known_dht_peers;
+        }
+        for (const auto& peer : peers_copy) {
+            dht_->StoreValueDirect(peer.first, peer.second, HexToKey(swarm_id), head_json);
+        }
+    }
+
+    void StartLiveSync(const std::string& swarm_id,
+                       const std::filesystem::path& dir_path,
+                       size_t chunk_size_bytes = 256 * 1024,
+                       const std::string& peer_ip = "",
+                       uint16_t peer_dht_port = 0,
+                       uint16_t peer_chunk_port = 0,
+                       const TorrentManifest* initial_manifest = nullptr) {
+        {
+            std::lock_guard<std::mutex> lock(sync_state_.sync_mutex);
+            sync_state_.swarm_id = swarm_id;
+            sync_state_.local_dir = dir_path;
+            sync_state_.chunk_size_bytes = chunk_size_bytes;
+
+            if (!peer_ip.empty()) {
+                if (peer_dht_port > 0) sync_state_.known_dht_peers.push_back({peer_ip, peer_dht_port});
+                if (peer_chunk_port > 0) sync_state_.known_chunk_peers.push_back({peer_ip, peer_chunk_port});
+            }
+
+            sync_state_.file_snapshot.clear();
+            if (initial_manifest != nullptr) {
+                sync_state_.current_version.store(initial_manifest->version > 0 ? initial_manifest->version : 1);
+                sync_state_.latest_manifest_hash = swarm_id;
+                for (const auto& fi : initial_manifest->files) {
+                    auto full_p = dir_path / fi.relative_path;
+                    std::error_code ec;
+                    auto mtime = std::filesystem::last_write_time(full_p, ec);
+                    sync_state_.file_snapshot[fi.relative_path] = {fi.size_bytes, mtime, fi.chunk_hashes};
+                }
+            } else {
+                sync_state_.current_version.store(1);
+                try {
+                    if (std::filesystem::exists(dir_path)) {
+                        for (const auto& entry : std::filesystem::recursive_directory_iterator(dir_path)) {
+                            if (entry.is_regular_file()) {
+                                auto rel = std::filesystem::relative(entry.path(), dir_path).string();
+                                sync_state_.file_snapshot[rel] = {entry.file_size(), entry.last_write_time(), {}};
+                            }
+                        }
+                    }
+                } catch (...) {}
+            }
+
+            sync_state_.active.store(true);
+        }
+
+        if (!live_sync_thread_.joinable()) {
+            live_sync_thread_ = std::thread([this]() {
+                while (running_.load()) {
+                    if (sync_state_.active.load()) {
+                        SyncTick();
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                }
+            });
+        }
+    }
+
+    void StopLiveSync() {
+        sync_state_.active.store(false);
+    }
+
+    bool CheckLocalChangesAndPublish() {
+        std::unique_lock<std::mutex> lock(sync_state_.sync_mutex, std::try_to_lock);
+        if (!lock.owns_lock() || !sync_state_.active.load() || sync_state_.is_applying_remote.load()) {
+            return false;
+        }
+        if (!std::filesystem::exists(sync_state_.local_dir) || !std::filesystem::is_directory(sync_state_.local_dir)) {
+            return false;
+        }
+
+        struct DiskFile {
+            std::string rel_path;
+            std::filesystem::path full_path;
+            uint64_t size{0};
+            std::filesystem::file_time_type mtime{};
+        };
+        std::vector<DiskFile> disk_files;
+        try {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(sync_state_.local_dir)) {
+                if (entry.is_regular_file()) {
+                    auto rel = std::filesystem::relative(entry.path(), sync_state_.local_dir).string();
+                    disk_files.push_back({rel, entry.path(), entry.file_size(), entry.last_write_time()});
+                }
+            }
+        } catch (...) {
+            return false;
+        }
+
+        bool has_changes = false;
+        std::unordered_set<std::string> on_disk_paths;
+        for (const auto& df : disk_files) {
+            on_disk_paths.insert(df.rel_path);
+            auto it = sync_state_.file_snapshot.find(df.rel_path);
+            if (it == sync_state_.file_snapshot.end()) {
+                has_changes = true;
+                break;
+            } else if (it->second.size != df.size || it->second.mtime != df.mtime) {
+                has_changes = true;
+                break;
+            }
+        }
+        if (!has_changes) {
+            for (const auto& [snap_path, _] : sync_state_.file_snapshot) {
+                if (on_disk_paths.find(snap_path) == on_disk_paths.end()) {
+                    has_changes = true;
+                    break;
+                }
+            }
+        }
+
+        if (!has_changes) return false;
+
+        // Debounce briefly to ensure file writes are flushed
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        TorrentManifest manifest;
+        manifest.name = sync_state_.local_dir.filename().empty() ? "shared_folder" : sync_state_.local_dir.filename().string();
+        manifest.swarm_id = sync_state_.swarm_id;
+        manifest.version = ++sync_state_.current_version;
+        manifest.chunk_size_bytes = sync_state_.chunk_size_bytes;
+        manifest.created_at_sec = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        manifest.updated_at_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+
+        uint64_t total_bytes = 0;
+        std::unordered_map<std::string, SyncFolderState::FileSnapshot> new_snapshot;
+        std::vector<char> buffer(sync_state_.chunk_size_bytes);
+
+        for (const auto& df : disk_files) {
+            total_bytes += df.size;
+            TorrentFileInfo fi;
+            fi.relative_path = df.rel_path;
+            fi.size_bytes = df.size;
+
+            auto it = sync_state_.file_snapshot.find(df.rel_path);
+            if (it != sync_state_.file_snapshot.end() && it->second.size == df.size &&
+                it->second.mtime == df.mtime && !it->second.chunk_hashes.empty()) {
+                fi.chunk_hashes = it->second.chunk_hashes;
+                new_snapshot[df.rel_path] = it->second;
+            } else {
+                std::ifstream ifs(df.full_path, std::ios::binary);
+                if (!ifs) continue;
+                while (ifs) {
+                    ifs.read(buffer.data(), buffer.size());
+                    std::streamsize bytes_read = ifs.gcount();
+                    if (bytes_read <= 0) break;
+
+                    std::string chunk_data(buffer.data(), bytes_read);
+                    auto digest = cas_store_->PutBlob(chunk_data);
+                    chunk_cache_->Put(digest.hash, chunk_data);
+                    chunk_fetcher_->AnnounceLocalChunk(digest.hash);
+                    fi.chunk_hashes.push_back(digest.hash);
+                    total_bytes_seeded_ += bytes_read;
+                }
+                new_snapshot[df.rel_path] = {df.size, df.mtime, fi.chunk_hashes};
+            }
+            manifest.files.push_back(std::move(fi));
+        }
+        manifest.total_bytes = total_bytes;
+        sync_state_.file_snapshot = std::move(new_snapshot);
+
+        std::string manifest_json = manifest.Serialize();
+        std::string manifest_hash = TorrentManifest::ComputeInfoHash(manifest_json);
+        cas_store_->PutBlob(manifest_json);
+        chunk_cache_->Put(manifest_hash, manifest_json);
+        chunk_fetcher_->AnnounceLocalChunk(manifest_hash);
+        dht_->StoreValue(HexToKey(manifest_hash), manifest_json);
+
+        PublishSwarmHead(sync_state_.swarm_id, manifest.version, manifest_hash, manifest_json);
+        sync_state_.latest_manifest_hash = manifest_hash;
+
+        if (sync_event_cb_) {
+            sync_event_cb_("LOCAL_UPDATE", "Published swarm update v" + std::to_string(manifest.version) +
+                                           " (" + std::to_string(manifest.files.size()) + " files)",
+                           manifest.version, manifest.files.size());
+        }
+        return true;
+    }
+
+    bool CheckRemoteUpdatesAndApply() {
+        std::unique_lock<std::mutex> lock(sync_state_.sync_mutex, std::try_to_lock);
+        if (!lock.owns_lock() || !sync_state_.active.load() || sync_state_.is_applying_remote.load()) {
+            return false;
+        }
+
+        auto val = dht_->FindValue(HexToKey(sync_state_.swarm_id));
+        if (!val || val->empty()) {
+            return false;
+        }
+
+        std::optional<TorrentManifest> remote_manifest;
+        auto head_opt = SwarmHead::Deserialize(*val);
+        if (head_opt) {
+            if (head_opt->version <= sync_state_.current_version.load()) {
+                return false;
+            }
+            if (!head_opt->manifest_json.empty()) {
+                remote_manifest = TorrentManifest::Deserialize(head_opt->manifest_json);
+            } else if (!head_opt->manifest_hash.empty()) {
+                auto m_res = chunk_fetcher_->FetchChunk(head_opt->manifest_hash);
+                if (!m_res.success) {
+                    for (const auto& p : sync_state_.known_chunk_peers) {
+                        m_res = chunk_fetcher_->FetchFromPeerDirect(p.first, p.second, head_opt->manifest_hash);
+                        if (m_res.success) break;
+                    }
+                }
+                if (m_res.success) {
+                    remote_manifest = TorrentManifest::Deserialize(m_res.data);
+                }
+            }
+        } else {
+            auto m_opt = TorrentManifest::Deserialize(*val);
+            if (m_opt && m_opt->version > sync_state_.current_version.load()) {
+                remote_manifest = m_opt;
+            }
+        }
+
+        if (!remote_manifest) return false;
+
+        sync_state_.is_applying_remote.store(true);
+
+        if (sync_event_cb_) {
+            sync_event_cb_("REMOTE_DETECTED", "Discovered swarm update v" + std::to_string(remote_manifest->version) +
+                                              " (" + std::to_string(remote_manifest->files.size()) + " files). Synchronizing...",
+                           remote_manifest->version, remote_manifest->files.size());
+        }
+
+        std::unordered_set<std::string> remote_paths;
+        for (const auto& f : remote_manifest->files) {
+            remote_paths.insert(f.relative_path);
+        }
+
+        size_t deleted_count = 0;
+        for (auto it = sync_state_.file_snapshot.begin(); it != sync_state_.file_snapshot.end();) {
+            if (remote_paths.find(it->first) == remote_paths.end()) {
+                auto path_to_remove = sync_state_.local_dir / it->first;
+                std::error_code ec;
+                std::filesystem::remove(path_to_remove, ec);
+                auto parent = path_to_remove.parent_path();
+                if (parent != sync_state_.local_dir && std::filesystem::is_empty(parent, ec)) {
+                    std::filesystem::remove(parent, ec);
+                }
+                deleted_count++;
+                it = sync_state_.file_snapshot.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        size_t updated_count = 0;
+        for (const auto& file : remote_manifest->files) {
+            auto out_path = sync_state_.local_dir / file.relative_path;
+            auto snap_it = sync_state_.file_snapshot.find(file.relative_path);
+
+            bool identical = false;
+            if (snap_it != sync_state_.file_snapshot.end() && std::filesystem::exists(out_path)) {
+                if (snap_it->second.chunk_hashes == file.chunk_hashes && snap_it->second.size == file.size_bytes) {
+                    identical = true;
+                }
+            }
+
+            if (identical) continue;
+
+            try {
+                std::filesystem::create_directories(out_path.parent_path());
+            } catch (...) {}
+
+            std::ofstream ofs(out_path, std::ios::binary | std::ios::trunc);
+            if (!ofs) continue;
+
+            bool file_ok = true;
+            for (const auto& ch_hash : file.chunk_hashes) {
+                auto chunk_res = chunk_fetcher_->FetchChunk(ch_hash);
+                if (!chunk_res.success) {
+                    for (const auto& p : sync_state_.known_chunk_peers) {
+                        chunk_res = chunk_fetcher_->FetchFromPeerDirect(p.first, p.second, ch_hash);
+                        if (chunk_res.success) break;
+                    }
+                }
+                if (!chunk_res.success) {
+                    file_ok = false;
+                    break;
+                }
+                ofs.write(chunk_res.data.data(), chunk_res.data.size());
+                chunk_fetcher_->AnnounceLocalChunk(ch_hash);
+            }
+            ofs.close();
+
+            if (file_ok) {
+                updated_count++;
+                std::error_code ec;
+                auto mtime = std::filesystem::last_write_time(out_path, ec);
+                sync_state_.file_snapshot[file.relative_path] = {file.size_bytes, mtime, file.chunk_hashes};
+            }
+        }
+
+        sync_state_.current_version.store(remote_manifest->version);
+        sync_state_.latest_manifest_hash = TorrentManifest::ComputeInfoHash(remote_manifest->Serialize());
+        chunk_fetcher_->AnnounceLocalChunk(sync_state_.latest_manifest_hash);
+
+        sync_state_.is_applying_remote.store(false);
+
+        if (sync_event_cb_) {
+            std::string desc = "Swarm synchronized to v" + std::to_string(sync_state_.current_version.load());
+            if (updated_count > 0 || deleted_count > 0) {
+                desc += " (" + std::to_string(updated_count) + " updated, " + std::to_string(deleted_count) + " deleted)";
+            }
+            sync_event_cb_("SYNC_COMPLETE", desc, sync_state_.current_version.load(), remote_manifest->files.size());
+        }
+        return true;
+    }
+
+    bool SyncTick() {
+        bool local = CheckLocalChangesAndPublish();
+        bool remote = CheckRemoteUpdatesAndApply();
+        return local || remote;
+    }
+
 
     /**
      * @brief Exports a directory as a torrent, chunks all files, announces to DHT,
@@ -294,6 +710,10 @@ public:
         // Serialize and publish manifest
         std::string manifest_json = manifest.Serialize();
         std::string info_hash = TorrentManifest::ComputeInfoHash(manifest_json);
+        manifest.swarm_id = info_hash;
+        manifest.version = 1;
+        manifest_json = manifest.Serialize();
+        info_hash = TorrentManifest::ComputeInfoHash(manifest_json);
 
         // Store manifest in CAS and announce in DHT
         cas_store_->PutBlob(manifest_json);
@@ -301,8 +721,12 @@ public:
         dht_->StoreValue(HexToKey(info_hash), manifest_json);
         chunk_fetcher_->AnnounceLocalChunk(info_hash);
 
+        // Publish SwarmHead and start live sync
+        PublishSwarmHead(info_hash, 1, info_hash, manifest_json);
+        StartLiveSync(info_hash, dir_path, chunk_size_bytes, "", 0, 0, &manifest);
+
         if (progress_cb) {
-            progress_cb(1.0f, "Seeding active for: " + manifest.name, total_dir_bytes, total_dir_bytes);
+            progress_cb(1.0f, "Seeding & Live Sync active for: " + manifest.name, total_dir_bytes, total_dir_bytes);
         }
 
         return {manifest, info_hash};
@@ -382,6 +806,23 @@ public:
         }
 
         auto manifest_opt = TorrentManifest::Deserialize(manifest_json);
+        if (!manifest_opt) {
+            auto head_opt = SwarmHead::Deserialize(manifest_json);
+            if (head_opt) {
+                if (!head_opt->manifest_json.empty()) {
+                    manifest_opt = TorrentManifest::Deserialize(head_opt->manifest_json);
+                } else if (!head_opt->manifest_hash.empty()) {
+                    auto mres = chunk_fetcher_->FetchChunk(head_opt->manifest_hash);
+                    if (!mres.success && !bootstrap_peer_ip.empty() && bootstrap_chunk_port > 0) {
+                        mres = chunk_fetcher_->FetchFromPeerDirect(bootstrap_peer_ip, bootstrap_chunk_port, head_opt->manifest_hash);
+                    }
+                    if (mres.success) {
+                        manifest_opt = TorrentManifest::Deserialize(mres.data);
+                    }
+                }
+            }
+        }
+
         if (!manifest_opt) {
             std::string err = "Corrupted or malformed manifest JSON for hash " + info_hash;
             if (progress_cb) {
@@ -479,13 +920,16 @@ public:
         }
         chunk_fetcher_->AnnounceLocalChunk(info_hash);
 
+        std::string effective_swarm_id = manifest.swarm_id.empty() ? info_hash : manifest.swarm_id;
+        StartLiveSync(effective_swarm_id, target_dir, manifest.chunk_size_bytes,
+                      bootstrap_peer_ip, bootstrap_dht_port, bootstrap_chunk_port, &manifest);
+
         if (progress_cb) {
-            progress_cb(1.0f, "Download Complete! Now seeding: " + manifest.name, total_bytes, total_bytes);
+            progress_cb(1.0f, "Download Complete! Now seeding & live syncing: " + manifest.name, total_bytes, total_bytes);
         }
 
         return {true, "", downloaded_bytes, total_bytes};
     }
-
 
 private:
     std::filesystem::path storage_dir_;
@@ -503,6 +947,12 @@ private:
     std::shared_ptr<discovery::PeerTable> peer_table_;
     std::shared_ptr<discovery::MdnsEngine> mdns_;
     std::thread sync_thread_;
+
+    // Live Swarm Sync Subsystem
+    SyncFolderState sync_state_;
+    std::thread live_sync_thread_;
+    SyncEventCallback sync_event_cb_;
 };
 
 } // namespace zeromesh::examples
+
