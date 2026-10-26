@@ -31,15 +31,18 @@ public:
     // A queued task completes at once as cancelled; a running one has its sandbox killed.
     void Cancel(const std::string& task_id) override;
 
-    // Snapshot of queued/running sandboxes on this node (for zm monitor).
+    // Snapshot of sandboxes on this node for zm monitor (queued/running + recent finished).
     struct ActiveItem {
         std::string task_id;
         v1::TaskSpec spec;
         bool started{false};
+        v1::TaskState state{v1::QUEUED};
     };
     [[nodiscard]] std::vector<ActiveItem> ListActive() const;
 
 private:
+    static constexpr size_t kRecentLimit = 128;
+
     struct Item {
         std::string task_id;
         v1::TaskSpec spec;
@@ -50,6 +53,7 @@ private:
 
     void Worker(std::stop_token st);
     v1::TaskResult Run(Item& item);
+    void RememberFinished(std::string task_id, v1::TaskSpec spec, v1::TaskState state);
 
     std::shared_ptr<exec::SandboxRunner> runner_;
     std::shared_ptr<plugin::Registry> registry_;
@@ -59,6 +63,7 @@ private:
     std::condition_variable_any cv_;
     std::deque<std::shared_ptr<Item>> queue_;
     std::unordered_map<std::string, std::shared_ptr<Item>> items_;  // queued and running
+    std::deque<ActiveItem> recent_;                                 // finished (monitor history)
     std::vector<std::jthread> workers_;                             // last: joined first
 };
 
