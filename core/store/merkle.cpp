@@ -1,11 +1,11 @@
-#include "cas/merkle.hpp"
+#include "store/merkle.hpp"
 
 #include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 
-namespace zeromesh::cas {
+namespace zeromesh::store {
 
 std::string DirectoryManifest::Serialize() const {
     // Make a sorted copy to guarantee deterministic hashing
@@ -187,4 +187,4 @@ bool MerkleBuilder::MaterializeDirectoryRecursive(const Digest& dir_digest, cons
     return true;
 }
 
-} // namespace zeromesh::cas
+} // namespace zeromesh::store

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "cas/merkle.hpp"
-#include "cas/store.hpp"
+#include "store/merkle.hpp"
+#include "store/store.hpp"
 #include "executor/bwrap.hpp"
 #include "executor/host_guard.hpp"
 #include "executor/landlock.hpp"
@@ -18,7 +18,7 @@ struct ExecutionRequest {
     std::string action_id;
     std::vector<std::string> command_args;
     std::vector<std::pair<std::string, std::string>> env_vars;
-    cas::Digest input_root_digest;
+    store::Digest input_root_digest;
     std::vector<std::string> expected_output_files;
     std::vector<std::string> expected_output_directories;
     std::string working_directory{"."};
@@ -28,10 +28,10 @@ struct ExecutionRequest {
 struct ExecutionResult {
     int exit_code{0};
     std::string stdout_raw;
-    cas::Digest stdout_digest;
+    store::Digest stdout_digest;
     std::string stderr_raw;
-    cas::Digest stderr_digest;
-    std::vector<std::pair<std::string, cas::Digest>> output_files;
+    store::Digest stderr_digest;
+    std::vector<std::pair<std::string, store::Digest>> output_files;
     std::chrono::milliseconds execution_duration{0};
     std::string worker_id;
 };
@@ -43,7 +43,7 @@ struct ExecutionResult {
  */
 class TaskRunner {
 public:
-    TaskRunner(std::shared_ptr<cas::CasStore> store, std::shared_ptr<cas::MerkleBuilder> merkle);
+    TaskRunner(std::shared_ptr<store::CasStore> store, std::shared_ptr<store::MerkleBuilder> merkle);
     ~TaskRunner() = default;
 
     /**
@@ -52,8 +52,8 @@ public:
     [[nodiscard]] ExecutionResult Run(const ExecutionRequest& request);
 
 private:
-    std::shared_ptr<cas::CasStore> store_;
-    std::shared_ptr<cas::MerkleBuilder> merkle_;
+    std::shared_ptr<store::CasStore> store_;
+    std::shared_ptr<store::MerkleBuilder> merkle_;
     std::filesystem::path sandbox_base_dir_;
 };
 
