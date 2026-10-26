@@ -50,6 +50,9 @@ core_sources = files(
   'src/ui/tui.cpp',
   'core/plugin/loader.cpp',
   'core/node/task_key.cpp',
+  'core/node/action_cache.cpp',
+  'core/node/local_executor.cpp',
+  'core/node/job_manager.cpp',
 )
 
 zm_core = static_library('zm_core', core_sources,
@@ -77,6 +80,7 @@ test_bin = executable('unit_tests',
     'tests/unit/test_proto.cpp',
     'tests/unit/test_plugin.cpp',
     'tests/unit/test_task_key.cpp',
+    'tests/unit/test_job_manager.cpp',
     'tests/unit/test_ignore.cpp',
   ),
   include_directories: inc,
