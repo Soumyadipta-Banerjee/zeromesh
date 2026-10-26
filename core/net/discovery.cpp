@@ -1,4 +1,4 @@
-#include "discovery/mdns.hpp"
+#include "net/discovery.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -11,9 +11,9 @@
 #include <sstream>
 #include <vector>
 
-namespace zeromesh::discovery {
+namespace zeromesh::net {
 
-MdnsEngine::MdnsEngine(std::shared_ptr<PeerTable> peer_table, MdnsConfig config)
+Discovery::Discovery(std::shared_ptr<PeerTable> peer_table, DiscoveryConfig config)
     : peer_table_(std::move(peer_table)), config_(std::move(config)) {
     char hostname_buf[256] = {0};
     if (gethostname(hostname_buf, sizeof(hostname_buf) - 1) == 0) {
@@ -30,22 +30,22 @@ MdnsEngine::MdnsEngine(std::shared_ptr<PeerTable> peer_table, MdnsConfig config)
     }
 }
 
-MdnsEngine::~MdnsEngine() {
+Discovery::~Discovery() {
     Stop();
 }
 
-bool MdnsEngine::Start() {
+bool Discovery::Start() {
     if (running_.load()) {
         return true;
     }
 
     running_ = true;
-    listener_thread_ = std::thread(&MdnsEngine::ListenerLoop, this);
-    advertiser_thread_ = std::thread(&MdnsEngine::AdvertiserLoop, this);
+    listener_thread_ = std::thread(&Discovery::ListenerLoop, this);
+    advertiser_thread_ = std::thread(&Discovery::AdvertiserLoop, this);
     return true;
 }
 
-void MdnsEngine::Stop() {
+void Discovery::Stop() {
     if (!running_.load()) {
         return;
     }
@@ -60,7 +60,7 @@ void MdnsEngine::Stop() {
     }
 }
 
-void MdnsEngine::AnnounceNow() {
+void Discovery::AnnounceNow() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return;
 
@@ -74,21 +74,40 @@ void MdnsEngine::AnnounceNow() {
     dest_addr.sin_port = htons(static_cast<uint16_t>(config_.multicast_port));
     dest_addr.sin_addr.s_addr = inet_addr(config_.multicast_group.c_str());
 
+    Telemetry t;
+    if (config_.telemetry) {
+        std::lock_guard<std::mutex> lock(telemetry_mutex_);
+        t = config_.telemetry();
+    } else {
+        t.cores_total = config_.cores;
+        t.cores_free = config_.cores;
+        t.mem_total = config_.ram_bytes;
+        t.mem_available = config_.ram_bytes;
+    }
+
+    // Fields: id hostname grpc_port cores mem_total load battery on_ac
+    //         arch node_port cores_free mem_available
     std::ostringstream ss;
     ss << "ZM_ANNOUNCE\t"
        << config_.node_id << "\t"
        << config_.hostname << "\t"
        << config_.grpc_port << "\t"
-       << config_.cores << "\t"
-       << config_.ram_bytes << "\t"
-       << 0.0 << "\t" << -1 << "\t" << "1";
+       << t.cores_total << "\t"
+       << t.mem_total << "\t"
+       << t.cpu_load_pct << "\t"
+       << t.battery_pct << "\t"
+       << (t.on_ac ? "1" : "0") << "\t"
+       << (t.arch.empty() ? "unknown" : t.arch) << "\t"
+       << config_.node_port << "\t"
+       << t.cores_free << "\t"
+       << t.mem_available;
 
     std::string msg = ss.str();
     sendto(sock, msg.data(), msg.size(), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
     close(sock);
 }
 
-void MdnsEngine::BroadcastNodeDraining(const std::string& reason) {
+void Discovery::BroadcastNodeDraining(const std::string& reason) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return;
 
@@ -107,7 +126,7 @@ void MdnsEngine::BroadcastNodeDraining(const std::string& reason) {
     close(sock);
 }
 
-void MdnsEngine::AdvertiserLoop() {
+void Discovery::AdvertiserLoop() {
     while (running_.load()) {
         AnnounceNow();
         if (peer_table_) {
@@ -121,7 +140,7 @@ void MdnsEngine::AdvertiserLoop() {
     }
 }
 
-void MdnsEngine::ListenerLoop() {
+void Discovery::ListenerLoop() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return;
 
@@ -186,21 +205,29 @@ void MdnsEngine::ListenerLoop() {
                 continue;
             }
 
-            Peer peer{
-                .id = peer_id,
-                .hostname = tokens[2],
-                .ip_address = sender_ip,
-                .grpc_port = std::stoi(tokens[3]),
-                .cores = std::stoi(tokens[4]),
-                .memory_bytes = std::stoull(tokens[5]),
-                .cpu_load_pct = std::stod(tokens[6]),
-                .battery_pct = std::stoi(tokens[7]),
-                .is_charging = (tokens[8] == "1"),
-                .state = PeerState::Active,
-                .draining_reason = "",
-                .latency = std::chrono::milliseconds(1),
-                .last_seen = std::chrono::steady_clock::now()
-            };
+            Peer peer;
+            try {
+                peer.id = peer_id;
+                peer.hostname = tokens[2];
+                peer.ip_address = sender_ip;
+                peer.grpc_port = std::stoi(tokens[3]);
+                peer.cores = std::stoi(tokens[4]);
+                peer.memory_bytes = std::stoull(tokens[5]);
+                peer.cpu_load_pct = std::stod(tokens[6]);
+                peer.battery_pct = std::stoi(tokens[7]);
+                peer.is_charging = (tokens[8] == "1");
+                if (tokens.size() >= 13) {
+                    peer.arch = tokens[9];
+                    peer.node_port = std::stoi(tokens[10]);
+                    peer.cores_free = std::stoi(tokens[11]);
+                    peer.mem_available = std::stoull(tokens[12]);
+                }
+            } catch (const std::exception&) {
+                continue;  // malformed announcement from the LAN: drop it
+            }
+            peer.state = PeerState::Active;
+            peer.latency = std::chrono::milliseconds(1);
+            peer.last_seen = std::chrono::steady_clock::now();
 
             if (peer_table_) {
                 peer_table_->Upsert(std::move(peer));
@@ -217,4 +244,4 @@ void MdnsEngine::ListenerLoop() {
     close(sock);
 }
 
-} // namespace zeromesh::discovery
+} // namespace zeromesh::net
