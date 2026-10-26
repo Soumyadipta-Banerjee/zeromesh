@@ -83,10 +83,8 @@ public:
     virtual void Release(const TaskContext&) = 0;
 };
 
-// How a front-end reaches this node's local ClientApi (unix socket only for now).
-struct ClientApiHandle {
-    std::filesystem::path unix_socket;
-};
+// Concrete type lives in plugin/client_api_handle.hpp (needs generated gRPC headers).
+class ClientApiHandle;
 
 struct PluginConfig {
     std::map<std::string, std::string> values;

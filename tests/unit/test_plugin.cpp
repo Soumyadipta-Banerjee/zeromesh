@@ -1,5 +1,8 @@
 #include "tests/unit/test_framework.hpp"
+#include "plugin/client_api_handle.hpp"
 #include "plugin/loader.hpp"
+
+#include <grpcpp/grpcpp.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -60,14 +63,14 @@ public:
     explicit CountingFrontend(int* starts, int* stops) : starts_(starts), stops_(stops) {}
     std::string_view Name() const override { return "counting"; }
     bool Start(zeromesh::plugin::ClientApiHandle& h, const zeromesh::plugin::PluginConfig&) override {
-        socket_ = h.unix_socket;
+        socket_ = h.socket_path();
         if (starts_) ++(*starts_);
         return true;
     }
     void Stop() override {
         if (stops_) ++(*stops_);
     }
-    std::filesystem::path socket_;
+    std::string socket_;
 
 private:
     int* starts_;
@@ -81,8 +84,9 @@ TEST(PluginFrontendsStartAndStop) {
     reg.RegisterFrontend(std::make_unique<CountingFrontend>(&starts, &stops));
     ASSERT_EQ(reg.Frontends().size(), static_cast<size_t>(1));
 
-    zeromesh::plugin::ClientApiHandle handle;
-    handle.unix_socket = "/tmp/zm-test.sock";
+    auto handle = zeromesh::plugin::ClientApiHandle(
+        "/tmp/zm-test.sock",
+        grpc::CreateChannel("unix:///tmp/zm-test.sock", grpc::InsecureChannelCredentials()));
     reg.StartFrontends(handle, {});
     ASSERT_EQ(starts, 1);
     ASSERT_EQ(stops, 0);
