@@ -57,3 +57,16 @@ TEST(CasStore_ActionCachePutAndGet) {
 
     std::filesystem::remove_all(tmp_cas);
 }
+
+#include "tests/unit/test_util.hpp"
+
+TEST(CasRejectsNonDigestHash) {
+    zeromesh::testing::TempDir d;
+    zeromesh::store::CasStore cas(d / "cas");
+    zeromesh::testing::WriteFile(d / "secret", "s");
+    ASSERT_FALSE(cas.GetBlob("../../secret").has_value());
+    ASSERT_FALSE(cas.HasBlob("../../secret"));
+    ASSERT_FALSE(cas.GetActionResult("../secret").has_value());
+    ASSERT_FALSE(cas.PutActionResult("../x", "r"));
+    ASSERT_FALSE(std::filesystem::exists(d / "x"));
+}

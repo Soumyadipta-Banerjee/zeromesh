@@ -40,6 +40,10 @@ public:
      */
     static Digest ComputeDigest(std::string_view data);
 
+    // True for exactly 64 lowercase hex characters. Every lookup by hash rejects
+    // anything else, so a hash received from a peer can never name a path.
+    static bool IsValidHash(std::string_view hash);
+
     /**
      * @brief Computes SHA-256 hash and byte size for a file on disk.
      */

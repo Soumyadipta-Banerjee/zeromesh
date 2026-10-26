@@ -122,3 +122,97 @@ TEST(MerkleBuilder_BuildAndMaterializeTree) {
     std::filesystem::remove_all(test_dest);
     std::filesystem::remove_all(test_cas);
 }
+
+#include "tests/unit/test_util.hpp"
+#include "store/ignore.hpp"
+
+namespace {
+using zeromesh::testing::ReadFile;
+using zeromesh::testing::TempDir;
+using zeromesh::testing::WriteFile;
+
+struct Stores {
+    TempDir dir;
+    std::shared_ptr<zeromesh::store::CasStore> cas = std::make_shared<zeromesh::store::CasStore>(dir / "cas");
+    zeromesh::store::MerkleBuilder merkle{cas};
+};
+} // namespace
+
+TEST(MerkleOverlayFile) {
+    Stores s;
+    TempDir src;
+    WriteFile(src / "a.txt", "A");
+    auto base = s.merkle.BuildTree(src.path());
+    auto png = s.cas->PutBlob("PNG");
+    auto merged = s.merkle.Overlay(base, "frames/f1.png", png, false);
+    TempDir out;
+    ASSERT_TRUE(s.merkle.MaterializeTree(merged, out / "m"));
+    ASSERT_EQ(ReadFile(out / "m/a.txt"), std::string("A"));
+    ASSERT_EQ(ReadFile(out / "m/frames/f1.png"), std::string("PNG"));
+}
+
+TEST(MerkleOverlayTreeMerges) {
+    Stores s;
+    TempDir base_src, item_src;
+    WriteFile(base_src / "frames/old.png", "OLD");
+    WriteFile(item_src / "new.png", "NEW");
+    auto base = s.merkle.BuildTree(base_src.path());
+    auto item = s.merkle.BuildTree(item_src.path());
+    auto merged = s.merkle.Overlay(base, "frames", item, true);
+    TempDir out;
+    ASSERT_TRUE(s.merkle.MaterializeTree(merged, out / "m"));
+    ASSERT_EQ(ReadFile(out / "m/frames/old.png"), std::string("OLD"));
+    ASSERT_EQ(ReadFile(out / "m/frames/new.png"), std::string("NEW"));
+}
+
+TEST(MerkleSymlinkNotFollowed) {
+    Stores s;
+    TempDir src;
+    std::filesystem::create_symlink("/etc/passwd", src / "link");
+    auto root = s.merkle.BuildTree(src.path());
+    auto manifest = zeromesh::store::DirectoryManifest::Deserialize(*s.cas->GetBlob(root.hash));
+    ASSERT_EQ(manifest->symlinks.size(), static_cast<size_t>(1));
+    ASSERT_EQ(manifest->files.size(), static_cast<size_t>(0));
+    TempDir out;
+    ASSERT_TRUE(s.merkle.MaterializeTree(root, out / "m"));
+    ASSERT_TRUE(std::filesystem::is_symlink(out / "m/link"));
+    ASSERT_EQ(std::filesystem::read_symlink(out / "m/link").string(), std::string("/etc/passwd"));
+}
+
+TEST(MerkleRejectsTraversal) {
+    Stores s;
+    auto blob = s.cas->PutBlob("evil");
+    zeromesh::store::DirectoryManifest m;
+    m.files.push_back({.name = "../evil", .digest = blob, .is_executable = false});
+    auto root = s.cas->PutBlob(m.Serialize());
+    TempDir out;
+    ASSERT_FALSE(s.merkle.MaterializeTree(root, out / "m"));
+    ASSERT_FALSE(std::filesystem::exists(out / "evil"));
+}
+
+TEST(MerkleUnicodeSpaces) {
+    Stores s;
+    TempDir src;
+    WriteFile(src / "dir with space/ünï.txt", "u");
+    auto root = s.merkle.BuildTree(src.path());
+    TempDir out;
+    ASSERT_TRUE(s.merkle.MaterializeTree(root, out / "m"));
+    ASSERT_EQ(ReadFile(out / "m/dir with space/ünï.txt"), std::string("u"));
+}
+
+TEST(MerkleBuildHonoursIgnoreAndCountsBytes) {
+    Stores s;
+    TempDir src;
+    WriteFile(src / "keep.txt", "12345");
+    WriteFile(src / "skip.log", "xxxxxxxx");
+    WriteFile(src / ".git/HEAD", "ref");
+    WriteFile(src / ".zmignore", "*.log\n");
+    uint64_t total = 0;
+    auto root = s.merkle.BuildTree(src.path(), zeromesh::store::IgnoreRules::ForRoot(src.path()), &total);
+    TempDir out;
+    ASSERT_TRUE(s.merkle.MaterializeTree(root, out / "m"));
+    ASSERT_TRUE(std::filesystem::exists(out / "m/keep.txt"));
+    ASSERT_FALSE(std::filesystem::exists(out / "m/skip.log"));
+    ASSERT_FALSE(std::filesystem::exists(out / "m/.git"));
+    ASSERT_EQ(total, static_cast<uint64_t>(5 + 6)); // keep.txt + .zmignore ("*.log\n")
+}
