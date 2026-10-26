@@ -23,6 +23,7 @@ class RenderOptions:
     env: str = "host"
     encode: Optional[Path] = None
     blender_bin: str = "blender"
+    engine: Optional[str] = None
     cores: int = 1
     may_run_local: bool = True
     may_run_remote: bool = True
@@ -48,18 +49,34 @@ class MissingFramesError(RuntimeError):
         self.frames = list(frames)
 
 
-def blender_argv(blend_rel: str, chunk: Chunk, blender_bin: str = "blender") -> list[str]:
+@dataclass
+class ChunkTaskFailure:
+    chunk: Chunk
+    message: str
+
+
+class ChunkTasksFailed(RuntimeError):
+    """One or more render chunks failed on the mesh."""
+
+    def __init__(self, failures: list[ChunkTaskFailure], message: str):
+        super().__init__(message)
+        self.failures = failures
+
+
+def blender_argv(
+    blend_rel: str,
+    chunk: Chunk,
+    blender_bin: str = "blender",
+    engine: Optional[str] = None,
+) -> list[str]:
     """Argv for one chunk: render frames [start, end] as PNG under //out/."""
-    # Cycles (CPU set in .blend): Workbench/EEVEE need a display.
     # -noaudio: sandbox has no PipeWire. Do not pass --cycles-device (Blender 5
-    # treats unknown long opts as filenames).
-    return [
+    # treats unknown long opts as filenames). Engine is opt-in via -E.
+    argv = [
         blender_bin,
         "-b",
-        "-noaudio",
         blend_rel,
-        "-E",
-        "CYCLES",
+        "-noaudio",
         "-o",
         "//out/frame_####",
         "-F",
@@ -70,6 +87,10 @@ def blender_argv(blend_rel: str, chunk: Chunk, blender_bin: str = "blender") -> 
         str(chunk.end),
         "-a",
     ]
+    if engine:
+        idx = argv.index("-noaudio") + 1
+        argv[idx:idx] = ["-E", engine]
+    return argv
 
 
 # Sandbox has no PipeWire/Pulse; force null audio backends.
@@ -90,6 +111,7 @@ def build_job_spec(
     cores: int,
     blender_bin: str,
     common_pb2: Any,
+    engine: Optional[str] = None,
     may_run_local: bool = True,
     may_run_remote: bool = True,
 ) -> Any:
@@ -103,7 +125,9 @@ def build_job_spec(
         tasks.append(
             common_pb2.TaskSpec(
                 name=ch.name,
-                argv=blender_argv(blend_rel, ch, blender_bin=blender_bin),
+                argv=blender_argv(
+                    blend_rel, ch, blender_bin=blender_bin, engine=engine
+                ),
                 input_root=input_root,
                 outputs=["out/"],
                 env_spec=common_pb2.EnvSpec(name=env),
@@ -204,6 +228,7 @@ def run_render(
         env=opts.env,
         cores=opts.cores,
         blender_bin=opts.blender_bin,
+        engine=opts.engine,
         common_pb2=common_pb2,
         may_run_local=opts.may_run_local,
         may_run_remote=opts.may_run_remote,
@@ -245,15 +270,36 @@ def run_render(
                 extra=f"[{done_frames}/{total} frames]",
             )
 
-    status = job.wait(check=True)
-    # Fill executed_by / progress from final results if the event stream was sparse.
-    for name, res in status.results.items():
-        if name not in by_name:
-            continue
-        cp = by_name[name]
-        if not cp.executed_by:
+    status = job.wait(check=False)
+    chunk_failures: list[ChunkTaskFailure] = []
+    succeeded_chunks: list[Chunk] = []
+
+    for ch in chunks:
+        res = status.results.get(ch.name)
+        cp = by_name[ch.name]
+        if res is not None and not cp.executed_by:
             cp.executed_by = res.executed_by
-        if not cp.done and res.exit_code == 0:
+        if res is None:
+            chunk_failures.append(
+                ChunkTaskFailure(ch, "no task result from daemon")
+            )
+            continue
+        if res.cancelled:
+            chunk_failures.append(ChunkTaskFailure(ch, "cancelled"))
+            continue
+        if res.timed_out:
+            chunk_failures.append(ChunkTaskFailure(ch, "timed out"))
+            continue
+        if res.exit_code != 0:
+            err = (res.stderr_head or b"").decode("utf-8", errors="replace").strip()
+            detail = err or res.error or f"exit code {res.exit_code}"
+            chunk_failures.append(ChunkTaskFailure(ch, detail))
+            continue
+        if res.error:
+            chunk_failures.append(ChunkTaskFailure(ch, res.error))
+            continue
+        succeeded_chunks.append(ch)
+        if not cp.done:
             cp.done = True
             done_frames += cp.chunk.end - cp.chunk.start + 1
             _print_event(
@@ -276,8 +322,8 @@ def run_render(
     out_dir = opts.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fetch each chunk into a staging dir, then flatten frames into out_dir.
-    for ch in chunks:
+    # Fetch succeeded chunks into a staging dir, then flatten frames into out_dir.
+    for ch in succeeded_chunks:
         staging = out_dir / f".chunk_{ch.start}_{ch.end}"
         if staging.exists():
             shutil.rmtree(staging)
@@ -288,6 +334,15 @@ def run_render(
 
     result = collect_frames(out_dir, opts.frames)
     result.progress = progress
+
+    if chunk_failures:
+        lines = [
+            f"frames {f.chunk.start}-{f.chunk.end}: {f.message}" for f in chunk_failures
+        ]
+        raise ChunkTasksFailed(
+            chunk_failures,
+            "chunk task(s) failed:\n  " + "\n  ".join(lines),
+        )
 
     if result.frames_missing:
         missing = ", ".join(str(n) for n in result.frames_missing)

@@ -38,8 +38,9 @@ jobs:
             meson ninja-build pkg-config bubblewrap \
             g++ clang \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev
-          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
+            libsodium-dev libssl-dev libfuse3-dev fuse3
+          pip install --upgrade pip
+          pip install ./sdk/python[dev]
 
       - name: Configure Linux kernel and network for sandboxing and discovery
         run: |
@@ -78,8 +79,9 @@ jobs:
           sudo apt-get install -y \
             meson ninja-build g++ pkg-config bubblewrap \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev
-          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
+            libsodium-dev libssl-dev libfuse3-dev fuse3
+          pip install --upgrade pip
+          pip install ./sdk/python[dev]
 
       - name: Configure Linux kernel and network
         run: |
@@ -114,7 +116,7 @@ jobs:
         run: |
           pacman -Sy --noconfirm archlinux-keyring || true
           pacman -Syu --noconfirm \
-            base-devel meson ninja gcc pkgconf bubblewrap iproute2 \
+            base-devel meson ninja gcc pkgconf bubblewrap iproute2 fuse3 \
             protobuf grpc libsodium openssl \
             python python-pytest python-protobuf python-grpcio python-grpcio-tools
 
@@ -151,11 +153,12 @@ jobs:
           sudo apt-get install -y \
             meson ninja-build g++ pkg-config bubblewrap \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev
+            libsodium-dev libssl-dev libfuse3-dev fuse3
 
       - name: Install Python dependencies
         run: |
-          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
+          pip install --upgrade pip
+          pip install ./sdk/python[dev]
 
       - name: Configure Linux kernel and network
         run: |
@@ -197,8 +200,9 @@ jobs:
           sudo apt-get install -y \
             meson ninja-build g++ pkg-config dpkg-dev \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev
-          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
+            libsodium-dev libssl-dev libfuse3-dev fuse3
+          pip install --upgrade pip
+          pip install ./sdk/python[dev]
 
       - name: Build binaries
         run: |

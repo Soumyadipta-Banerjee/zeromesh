@@ -49,6 +49,9 @@ public:
     /// Checks if a given path is currently mounted according to /proc/self/mounts.
     static bool IsPathMounted(const std::filesystem::path& path);
 
+    /// Lazy-unmount via fusermount3 without invoking a shell.
+    static bool FusermountUnmountLazy(const std::filesystem::path& mount_point);
+
     /// Mounts the filesystem using a root Merkle manifest digest.
     bool Mount(const std::string& root_manifest_digest);
 

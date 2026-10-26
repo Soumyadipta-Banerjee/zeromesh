@@ -309,6 +309,7 @@ int Daemon::Run() {
         }
 
         grpc::ServerBuilder node_builder;
+        node::ApplyNodeApiMessageLimits(node_builder);
         net::AllowKeepalivePings(node_builder);
         node_builder.AddListeningPort("0.0.0.0:" + std::to_string(config_.node_port), net::ServerCreds(identity));
         node_builder.RegisterService(node_service.get());

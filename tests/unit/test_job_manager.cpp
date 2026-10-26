@@ -247,6 +247,54 @@ TEST(JobDependencyFailurePropagates) {
     ASSERT_EQ(detail["c"], std::string("dependency b failed"));
 }
 
+class VerboseExecutor : public FakeExecutor {
+public:
+    using FakeExecutor::FakeExecutor;
+    void Execute(const std::string&, const v1::TaskSpec& spec, zeromesh::node::TaskCallbacks cb) override {
+        v1::TaskResult r;
+        auto it = results.find(spec.name());
+        if (it != results.end()) r = it->second;
+        cb.on_state(v1::RUNNING, "");
+        for (int i = 0; i < 2500; ++i) cb.on_log(1, std::string(500, 'x'));
+        cb.on_done(r);
+    }
+};
+
+TEST(JobLogHistoryCapped) {
+    Fixture f;
+    f.fake = std::make_shared<VerboseExecutor>(f.cas);
+    JobManager jm{f.cas, f.merkle, f.cache, f.fake};
+    auto id = jm.Submit(Job({Task("t", "x")}));
+    Drain(jm, id);
+    auto replay = jm.Watch(id);
+    size_t log_bytes = 0;
+    size_t log_events = 0;
+    while (auto ev = replay->Next(std::chrono::seconds(5))) {
+        if (!ev->log_chunk().empty()) {
+            log_bytes += ev->log_chunk().size();
+            ++log_events;
+        }
+    }
+    ASSERT_TRUE(log_events < static_cast<size_t>(2500));
+    ASSERT_TRUE(log_bytes <= static_cast<size_t>(1024 * 1024));
+}
+
+TEST(JobEvictsOldFinishedJobs) {
+    Fixture f;
+    std::string first;
+    std::string last;
+    for (int i = 0; i < 260; ++i) {
+        auto id = f.jm.Submit(Job({Task("t", "x")}));
+        Drain(f.jm, id);
+        if (i == 0) first = id;
+        last = id;
+    }
+    ASSERT_FALSE(f.jm.Get(first).has_value());
+    ASSERT_TRUE(f.jm.Get(last).has_value());
+    auto rows = f.jm.ListActive();
+    ASSERT_TRUE(rows.size() >= static_cast<size_t>(256));
+}
+
 TEST(JobWatchReplaysHistory) {
     Fixture f;
     auto id = f.jm.Submit(Job({Task("t", "x")}));

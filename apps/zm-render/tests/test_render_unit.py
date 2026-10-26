@@ -16,10 +16,17 @@ class BlenderArgvTest(unittest.TestCase):
         ch = split_chunks(FrameRange(5, 12), 10)[0]
         argv = blender_argv("shot.blend", ch)
         self.assertEqual(argv[0], "blender")
-        self.assertIn("-b", argv)
+        self.assertEqual(argv[argv.index("-b") + 1], "shot.blend")
+        self.assertIn("-noaudio", argv)
+        self.assertNotIn("-E", argv)
         self.assertEqual(argv[argv.index("-s") + 1], "5")
         self.assertEqual(argv[argv.index("-e") + 1], "12")
         self.assertIn("-a", argv)
+
+    def test_optional_engine(self):
+        ch = split_chunks(FrameRange(1, 1), 1)[0]
+        argv = blender_argv("shot.blend", ch, engine="CYCLES")
+        self.assertEqual(argv[argv.index("-E") + 1], "CYCLES")
 
 
 class CollectFramesTest(unittest.TestCase):

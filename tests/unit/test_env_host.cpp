@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace {
@@ -76,4 +77,27 @@ TEST(EnvHostAbsolutePathInMountedDir) {
     auto env = zeromesh::envhost::Make();
     ASSERT_TRUE(env->Check({.params = {}, .argv = {"/usr/bin/env"}}).ok);
     ASSERT_FALSE(env->Check({.params = {}, .argv = {"/home/nobody/tool"}}).ok);
+}
+
+TEST(EnvHostRejectsCommandOnUnboundPath) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "zm_env_host_unbound_path";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_FALSE(ec);
+    const fs::path tool = dir / "zm_only_here_tool";
+    {
+        std::ofstream out(tool);
+        ASSERT_TRUE(out.good());
+        out << "#!/bin/sh\nexit 0\n";
+    }
+    fs::permissions(tool, fs::perms::owner_all, ec);
+    ASSERT_FALSE(ec);
+
+    const std::string wide_path = dir.string() + ":" + zeromesh::envhost::DefaultPathEnv();
+    ASSERT_TRUE(zeromesh::envhost::Make(wide_path)->Check(Argv("zm_only_here_tool")).ok);
+    ASSERT_FALSE(zeromesh::envhost::Make()->Check(Argv("zm_only_here_tool")).ok);
+
+    fs::remove(tool, ec);
+    fs::remove(dir, ec);
 }

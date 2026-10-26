@@ -151,6 +151,17 @@ TEST(MerkleOverlayFile) {
     ASSERT_EQ(ReadFile(out / "m/frames/f1.png"), std::string("PNG"));
 }
 
+TEST(MerkleOverlayPreservesExecutable) {
+    Stores s;
+    auto blob = s.cas->PutBlob("#!/bin/sh\necho hi\n");
+    zeromesh::store::Digest empty_root;
+    auto merged = s.merkle.Overlay(empty_root, "bin/tool", blob, false, true);
+    TempDir out;
+    ASSERT_TRUE(s.merkle.MaterializeTree(merged, out / "m"));
+    const auto perms = std::filesystem::status(out / "m/bin/tool").permissions();
+    ASSERT_NE((perms & std::filesystem::perms::owner_exec), std::filesystem::perms::none);
+}
+
 TEST(MerkleOverlayTreeMerges) {
     Stores s;
     TempDir base_src, item_src;

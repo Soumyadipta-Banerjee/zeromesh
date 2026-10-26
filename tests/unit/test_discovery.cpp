@@ -13,9 +13,12 @@ using namespace zeromesh::net;
 
 namespace {
 
-AnnounceFields SampleFields() {
-    return AnnounceFields{
+AnnounceFields SampleFields(uint64_t seq = 1, int64_t timestamp_ms = 0) {
+    AnnounceFields a{
         .node_id = "node-a",
+        .boot_id = "0123456789abcdef0123456789abcdef",
+        .seq = seq,
+        .timestamp_ms = timestamp_ms,
         .hostname = "box\twith\ntabs",
         .node_port = 18981,
         .arch = "riscv64",
@@ -23,6 +26,28 @@ AnnounceFields SampleFields() {
                                .mem_available = 600, .cpu_load_pct = 25.5, .battery_pct = 42,
                                .on_ac = false, .arch = "riscv64"},
     };
+    if (a.timestamp_ms == 0) {
+        a.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+    }
+    return a;
+}
+
+DrainFields SampleDrain(uint64_t seq = 1, int64_t timestamp_ms = 0) {
+    DrainFields d{
+        .node_id = "node-a",
+        .boot_id = "0123456789abcdef0123456789abcdef",
+        .seq = seq,
+        .timestamp_ms = timestamp_ms,
+        .reason = "user\tis back",
+    };
+    if (d.timestamp_ms == 0) {
+        d.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+    }
+    return d;
 }
 
 int RandomHighPort() {
@@ -44,21 +69,21 @@ DiscoveryConfig LoopbackConfig(const std::string& id, int port, const TeamKey& k
 TEST(AnnounceRoundTrip) {
     const TeamKey key = GenerateTeamKey();
     const auto packet = FormatAnnouncement(SampleFields(), key);
-    ASSERT_TRUE(packet.starts_with("ZM2\t" + TeamId(key) + "\t"));
+    ASSERT_TRUE(packet.starts_with("ZM3\t" + TeamId(key) + "\t"));
 
-    const auto peer = ParseAnnouncement(packet, key, "self");
-    ASSERT_TRUE(peer.has_value());
-    ASSERT_EQ(peer->id, "node-a");
-    ASSERT_EQ(peer->hostname, "box with tabs");  // sanitised on format
-    ASSERT_EQ(peer->node_port, 18981);
-    ASSERT_EQ(peer->arch, "riscv64");
-    ASSERT_EQ(peer->cores, 16);
-    ASSERT_EQ(peer->cores_free, 12);
-    ASSERT_EQ(peer->mem_available, 600u);
-    ASSERT_EQ(peer->cpu_load_pct, 25.5);
-    ASSERT_EQ(peer->battery_pct, 42);
-    ASSERT_FALSE(peer->is_charging);
-    ASSERT_TRUE(peer->state == PeerState::Active);
+    const auto parsed = ParseAnnouncement(packet, key, "self");
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_EQ(parsed->peer.id, "node-a");
+    ASSERT_EQ(parsed->peer.hostname, "box with tabs");
+    ASSERT_EQ(parsed->peer.node_port, 18981);
+    ASSERT_EQ(parsed->peer.arch, "riscv64");
+    ASSERT_EQ(parsed->peer.cores, 16);
+    ASSERT_EQ(parsed->peer.cores_free, 12);
+    ASSERT_EQ(parsed->peer.mem_available, 600u);
+    ASSERT_EQ(parsed->peer.cpu_load_pct, 25.5);
+    ASSERT_EQ(parsed->peer.battery_pct, 42);
+    ASSERT_FALSE(parsed->peer.is_charging);
+    ASSERT_TRUE(parsed->peer.state == PeerState::Active);
 }
 
 TEST(AnnounceOtherTeamIgnored) {
@@ -71,9 +96,9 @@ TEST(AnnounceTamperedRejected) {
     auto packet = FormatAnnouncement(SampleFields(), key);
     const auto pos = packet.find("\t18981\t");
     ASSERT_TRUE(pos != std::string::npos);
-    packet[pos + 1] = '2';  // node_port 18981 -> 28981
+    packet[pos + 1] = '2';
     ASSERT_FALSE(ParseAnnouncement(packet, key, "self").has_value());
-    ASSERT_FALSE(ParseAnnouncement("ZM2\tgarbage", key, "self").has_value());
+    ASSERT_FALSE(ParseAnnouncement("ZM3\tgarbage", key, "self").has_value());
 }
 
 TEST(AnnounceSelfIgnored) {
@@ -84,13 +109,42 @@ TEST(AnnounceSelfIgnored) {
 
 TEST(DrainRoundTrip) {
     const TeamKey key = GenerateTeamKey();
-    const auto packet = FormatDrain("node-a", "user\tis back", key);
+    const auto packet = FormatDrain(SampleDrain(), key);
     const auto drain = ParseDrain(packet, key, "self");
     ASSERT_TRUE(drain.has_value());
     ASSERT_EQ(drain->node_id, "node-a");
     ASSERT_EQ(drain->reason, "user is back");
     ASSERT_FALSE(ParseDrain(packet, GenerateTeamKey(), "self").has_value());
     ASSERT_FALSE(ParseDrain(packet, key, "node-a").has_value());
+}
+
+TEST(ReplayTrackerRejectsReplayedSeq) {
+    ReplayTracker tracker;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    ASSERT_TRUE(tracker.Accept("node-a", "boot1", 1, now));
+    ASSERT_FALSE(tracker.Accept("node-a", "boot1", 1, now));
+    ASSERT_TRUE(tracker.Accept("node-a", "boot1", 2, now));
+}
+
+TEST(ReplayTrackerRejectsStaleTimestamp) {
+    ReplayTracker tracker;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    ASSERT_FALSE(tracker.Accept("node-a", "boot1", 1, now - 60'000));
+    ASSERT_FALSE(TimestampAcceptable(now - 60'000));
+    ASSERT_TRUE(TimestampAcceptable(now));
+}
+
+TEST(ReplayTrackerAcceptsNewBootIdWithFreshTimestamp) {
+    ReplayTracker tracker;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    ASSERT_TRUE(tracker.Accept("node-a", "boot1", 5, now));
+    ASSERT_TRUE(tracker.Accept("node-a", "boot2", 1, now));
 }
 
 TEST(DiscoveryLoopbackSameTeam) {
@@ -123,7 +177,7 @@ TEST(DiscoveryLoopbackOtherTeam) {
     ASSERT_TRUE(a.Start());
     ASSERT_TRUE(b.Start());
 
-    std::this_thread::sleep_for(std::chrono::seconds(3));  // > one announce interval
+    std::this_thread::sleep_for(std::chrono::seconds(3));
     ASSERT_EQ(table_a->Count(), 0u);
     ASSERT_EQ(table_b->Count(), 0u);
 }

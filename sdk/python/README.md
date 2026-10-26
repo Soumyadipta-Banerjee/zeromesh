@@ -10,6 +10,12 @@ It talks directly to the local ZeroMesh daemon (`zmd`) over its UNIX domain sock
 pip install ./sdk/python
 ```
 
+For development (pytest, regenerating protos on `pip install -e`):
+
+```bash
+pip install './sdk/python[dev]'
+```
+
 Ensure `zmd` is running locally before submitting jobs:
 ```bash
 zmd &

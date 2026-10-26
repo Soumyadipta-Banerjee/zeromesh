@@ -23,6 +23,8 @@ const std::vector<std::string>& DenyList::DefaultPatterns() {
         "**/.gnupg",
         ".config/zeromesh",
         "**/.config/zeromesh",
+        ".local/share/zeromesh",
+        "**/.local/share/zeromesh",
         ".local/share/keyrings",
         "**/.local/share/keyrings",
         ".env*",

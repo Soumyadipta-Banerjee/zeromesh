@@ -1,7 +1,10 @@
 #include "tests/unit/test_framework.hpp"
 #include "store/store.hpp"
 
+#include <atomic>
 #include <filesystem>
+#include <thread>
+#include <vector>
 
 TEST(CasComputeDigest_KnownVectors) {
     // Standard NIST SHA-256 test vector for empty string:
@@ -59,6 +62,29 @@ TEST(CasStore_ActionCachePutAndGet) {
 }
 
 #include "tests/unit/test_util.hpp"
+
+TEST(CasStore_ConcurrentPutBlob) {
+    zeromesh::testing::TempDir d;
+    zeromesh::store::CasStore store(d / "cas");
+    const std::string payload = "shared blob payload for concurrent writers";
+    const auto expected = zeromesh::store::CasStore::ComputeDigest(payload);
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back([&] {
+            try {
+                auto got = store.PutBlob(payload);
+                if (got != expected) ++failures;
+            } catch (...) {
+                ++failures;
+            }
+        });
+    }
+    for (auto& t : threads) t.join();
+    ASSERT_EQ(failures.load(), 0);
+    ASSERT_TRUE(store.HasBlob(expected.hash));
+    ASSERT_EQ(store.GetBlob(expected.hash), std::optional<std::string>(payload));
+}
 
 TEST(CasRejectsNonDigestHash) {
     zeromesh::testing::TempDir d;

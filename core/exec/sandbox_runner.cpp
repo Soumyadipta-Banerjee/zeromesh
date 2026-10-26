@@ -50,6 +50,54 @@ bool SafeRelative(const std::string& p) {
     return true;
 }
 
+// True if any path component before the final one is a symlink (or missing / not a directory).
+bool SymlinkAmongParents(const fs::path& root, const fs::path& rel) {
+    fs::path cur = root;
+    fs::path norm = rel.lexically_normal();
+    if (norm.empty() || norm == ".") return false;
+
+    auto it = norm.begin();
+    const auto end = norm.end();
+    for (; it != end; ++it) {
+        if (*it == ".") continue;
+        if (*it == "..") return true;
+        cur /= *it;
+        auto next = std::next(it);
+        if (next == end) break;
+        struct stat st {};
+        if (lstat(cur.c_str(), &st) != 0) return true;
+        if (S_ISLNK(st.st_mode)) return true;
+        if (!S_ISDIR(st.st_mode)) return true;
+    }
+    return false;
+}
+
+// Output paths must stay under work; parent directories must not be symlinks (the leaf may be).
+bool SafeOutputPath(const fs::path& work, const std::string& rel) {
+    if (!SafeRelative(rel)) return false;
+    fs::path norm = fs::path(rel).lexically_normal();
+    const std::string norm_str = norm.string();
+    if (norm_str.empty() || norm_str == ".") return false;
+    if (SymlinkAmongParents(work, norm)) return false;
+
+    const fs::path full = work / norm;
+    struct stat st {};
+    if (lstat(full.c_str(), &st) != 0) return true;
+
+    if (S_ISLNK(st.st_mode)) return true;
+
+    std::error_code ec;
+    const fs::path canon_file = fs::weakly_canonical(full, ec);
+    if (ec) return false;
+    const fs::path canon_work = fs::weakly_canonical(work, ec);
+    if (ec) return false;
+    const fs::path inside = fs::relative(canon_file, canon_work, ec);
+    if (ec) return false;
+    if (inside.empty() || inside == ".") return true;
+    const std::string rel_str = inside.string();
+    return rel_str != ".." && rel_str.rfind("../", 0) != 0;
+}
+
 struct FileStamp {
     uintmax_t size;
     int64_t mtime_ns;
@@ -66,7 +114,9 @@ Snapshot TakeSnapshot(const fs::path& root) {
         struct stat st {};
         if (lstat(it->path().c_str(), &st) != 0) continue;
         if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) continue;
-        snap[fs::relative(it->path(), root).string()] =
+        const auto rel = fs::relative(it->path(), root);
+        if (SymlinkAmongParents(root, rel)) continue;
+        snap[rel.string()] =
             FileStamp{static_cast<uintmax_t>(st.st_size), st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec};
     }
     return snap;
@@ -218,7 +268,8 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     result.stderr_digest = store_->PutBlobFile(scratch / "stderr");
 
     auto capture = [&](const std::string& rel) {
-        fs::path p = work / rel;
+        if (!SafeOutputPath(work, rel)) return;
+        fs::path p = work / fs::path(rel).lexically_normal();
         struct stat st {};
         if (lstat(p.c_str(), &st) != 0) return;
         OutputEntry e;

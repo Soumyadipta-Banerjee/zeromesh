@@ -7,6 +7,8 @@ project('zeromesh', 'cpp',
   ]
 )
 
+add_project_arguments('-DZM_INSTALL_PREFIX="' + get_option('prefix') + '"', language: 'cpp')
+
 cpp = meson.get_compiler('cpp')
 
 threads_dep = dependency('threads')

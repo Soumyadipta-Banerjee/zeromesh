@@ -17,8 +17,10 @@
 #include <sstream>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace zeromesh::mirror {
 
@@ -325,6 +327,34 @@ bool MirrorFuse::IsPathMounted(const std::filesystem::path& path) {
     return false;
 }
 
+bool MirrorFuse::FusermountUnmountLazy(const std::filesystem::path& mount_point) {
+    const std::string path = mount_point.string();
+    if (path.empty()) return false;
+
+    const pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        char arg0[] = "fusermount3";
+        char arg1[] = "-u";
+        char arg2[] = "-z";
+        std::vector<char> arg3(path.begin(), path.end());
+        arg3.push_back('\0');
+        char* argv[] = {arg0, arg1, arg2, arg3.data(), nullptr};
+        execvp("fusermount3", argv);
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 bool MirrorFuse::Mount(const std::string& root_manifest_digest) {
     auto root = std::make_shared<VirtualNode>();
     root->name = "";
@@ -393,7 +423,7 @@ void MirrorFuse::Unmount() {
     if (IsPathMounted(mount_point_)) {
         ::umount2(mount_point_.c_str(), MNT_DETACH);
         if (IsPathMounted(mount_point_)) {
-            ::system(("fusermount3 -u -z " + mount_point_.string() + " 2>/dev/null").c_str());
+            FusermountUnmountLazy(mount_point_);
         }
     }
 

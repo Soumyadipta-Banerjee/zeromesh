@@ -12,6 +12,7 @@ depends=(
     'libsodium'
     'openssl'
     'bubblewrap'
+    'fuse3'
     'python'
     'python-protobuf'
     'python-grpcio'
@@ -21,6 +22,7 @@ makedepends=(
     'ninja'
     'pkgconf'
     'gcc'
+    'fuse3'
     'python-grpcio-tools'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Soumyadipta-Banerjee/zeromesh/archive/refs/tags/v$pkgver.tar.gz")

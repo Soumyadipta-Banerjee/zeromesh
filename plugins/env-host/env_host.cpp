@@ -16,6 +16,8 @@ namespace fs = std::filesystem;
 
 constexpr const char* kSandboxPath = "/usr/local/bin:/usr/bin:/bin";
 
+std::string_view SandboxPathEnv() { return kSandboxPath; }
+
 bool IsExecutableFile(const fs::path& p) {
     std::error_code ec;
     return fs::is_regular_file(p, ec) && ::access(p.c_str(), X_OK) == 0;
@@ -77,7 +79,7 @@ public:
         for (const char* p : {"/etc/alternatives", "/etc/ld.so.cache", "/etc/ssl"}) {
             if (fs::exists(p, ec)) env.binds.push_back({p, p, true});
         }
-        env.env.emplace_back("PATH", kSandboxPath);
+        env.env.emplace_back("PATH", std::string(SandboxPathEnv()));
         return {.value = std::move(env), .error = {}};
     }
 
@@ -90,8 +92,7 @@ private:
 } // namespace
 
 std::string DefaultPathEnv() {
-    const char* p = std::getenv("PATH");
-    return p != nullptr ? std::string(p) : std::string(kSandboxPath);
+    return std::string(kSandboxPath);
 }
 
 std::unique_ptr<plugin::IEnvProvider> Make(std::string path_env) {

@@ -68,6 +68,33 @@ def test_render_collects_all_frames(zmd, tmp_path):
         assert p.stat().st_size > 0
 
 
+def test_partial_chunk_failure_still_fetches_ok_chunks(zmd, tmp_path):
+    scene = tmp_path / "scene"
+    scene.mkdir()
+    (scene / "partialfail.blend").write_bytes(b"BLENDER-fake\x00")
+    blender = scene / "blender"
+    shutil.copy(FAKE_BLENDER, blender)
+    blender.chmod(0o755)
+    out = tmp_path / "renders"
+    rc = zm_render_main([
+        str(scene / "partialfail.blend"),
+        "--frames",
+        "1-4",
+        "--chunk",
+        "2",
+        "-o",
+        str(out),
+        "--blender",
+        "./blender",
+        "--socket",
+        zmd.socket,
+    ])
+    assert rc != 0
+    assert (out / frame_filename(1)).is_file()
+    assert (out / frame_filename(2)).is_file()
+    assert not (out / frame_filename(3)).is_file()
+
+
 def test_missing_frame_fails(zmd, tmp_path):
     scene = _scene_dir(tmp_path, skip3=True)
     out = tmp_path / "renders"

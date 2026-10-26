@@ -11,7 +11,7 @@
 
 namespace zeromesh::envhost {
 
-// $PATH, or "/usr/local/bin:/usr/bin:/bin" when it is unset.
+// PATH exposed inside the host sandbox (same string Check() resolves against by default).
 std::string DefaultPathEnv();
 
 // `path_env` is the ':'-separated search path Check() resolves argv[0] against.

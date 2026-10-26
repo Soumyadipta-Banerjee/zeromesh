@@ -10,6 +10,11 @@ build:
 	ninja -C build
 
 test: build
+	@if ! python3 -c "import pytest" 2>/dev/null; then \
+		echo "make test: pytest not found. Install SDK dev deps, e.g.:"; \
+		echo "  pip install './sdk/python[dev]'"; \
+		exit 1; \
+	fi
 	meson test -C build --print-errorlogs
 
 install: build
