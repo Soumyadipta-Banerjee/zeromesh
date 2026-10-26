@@ -66,6 +66,13 @@ public:
      */
     Digest Overlay(const Digest& base_tree, const std::string& at_path, const Digest& item, bool item_is_tree);
 
+    /**
+     * @brief Every digest reachable from the tree `root`: the root manifest, each sub-tree
+     * manifest and each file blob, deduplicated, root first. An empty root hash gives an
+     * empty list. Throws std::runtime_error if a manifest is missing or corrupt.
+     */
+    std::vector<Digest> CollectTree(const Digest& root);
+
     // A manifest entry name is safe when it is non-empty, not "." or "..", and has no '/' or NUL.
     static bool IsSafeName(std::string_view name);
 
