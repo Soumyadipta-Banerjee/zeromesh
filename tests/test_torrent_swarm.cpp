@@ -155,8 +155,16 @@ TEST(TorrentEngine_LiveSyncUpdatesCreatesAndDeletes) {
     ASSERT_TRUE(node_a.SyncTick());
     ASSERT_EQ(node_a.GetLiveSyncVersion(), 2);
 
-    // Trigger Node B remote check
-    ASSERT_TRUE(node_b.SyncTick());
+    // Trigger Node B remote check (polling up to 2s for UDP packet delivery)
+    bool synced_b = false;
+    for (int i = 0; i < 20; ++i) {
+        if (node_b.SyncTick()) {
+            synced_b = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ASSERT_TRUE(synced_b);
     ASSERT_EQ(node_b.GetLiveSyncVersion(), 2);
 
     // Verify file appeared on Node B
@@ -182,8 +190,16 @@ TEST(TorrentEngine_LiveSyncUpdatesCreatesAndDeletes) {
     ASSERT_TRUE(node_b.SyncTick());
     ASSERT_EQ(node_b.GetLiveSyncVersion(), 3);
 
-    // Trigger Node A remote check
-    ASSERT_TRUE(node_a.SyncTick());
+    // Trigger Node A remote check (polling up to 2s for UDP packet delivery)
+    bool synced_a = false;
+    for (int i = 0; i < 20; ++i) {
+        if (node_a.SyncTick()) {
+            synced_a = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ASSERT_TRUE(synced_a);
     ASSERT_EQ(node_a.GetLiveSyncVersion(), 3);
 
     // Verify file1 updated on Node A
