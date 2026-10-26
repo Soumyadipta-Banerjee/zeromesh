@@ -50,6 +50,8 @@ sources = files(
   'src/executor/runner.cpp',
   'src/executor/bwrap.cpp',
   'src/executor/landlock.cpp',
+  'src/dsm/dsm_engine.cpp',
+  'src/ui/tui.cpp',
   'src/verify/byzantine_spot_checker.cpp'
 )
 
@@ -75,6 +77,8 @@ test_sources = files(
   'tests/test_verify.cpp',
   'tests/test_host_guard.cpp',
   'tests/test_executor.cpp',
+  'tests/test_tui.cpp',
+  'tests/test_dsm.cpp',
   'src/cas/store.cpp',
   'src/cas/merkle.cpp',
   'src/discovery/peer_table.cpp',
@@ -92,6 +96,8 @@ test_sources = files(
   'src/executor/runner.cpp',
   'src/executor/bwrap.cpp',
   'src/executor/landlock.cpp',
+  'src/dsm/dsm_engine.cpp',
+  'src/ui/tui.cpp',
   'src/verify/byzantine_spot_checker.cpp'
 )
 
