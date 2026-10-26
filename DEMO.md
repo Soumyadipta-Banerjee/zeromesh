@@ -30,25 +30,24 @@ pip install -e ./sdk/python -e ./apps/zm-render pytest grpcio
 Ubuntu sandbox tip: `sudo sysctl kernel.apparmor_restrict_userns=0`  
 (or `kernel.apparmor_restrict_unprivileged_userns=0`).
 
-## Offload demo (two roles)
+## Quick (all steps in order)
 
-**On each donor (other machines):**
-
-```bash
-./scripts/setup_donor.sh
-# first time / new team: ./scripts/setup_donor.sh --join 'ZM-XXXX-…-XXC'
-```
-
-Checks Blender, starts `zmd`, opens `zm monitor`. Leave it running.
-
-**On this laptop (requester):**
+**This laptop:**
 
 ```bash
-./scripts/setup_offload.sh
-# optional: ./scripts/setup_offload.sh --frames 1-240 --chunk 16
+./scripts/demo_quick.sh
 ```
 
-Submits `spin_cube.blend` with `--remote-only`, then opens `zm monitor`.
+Order: start zmd → create/show team → wait for you to start donors → status →
+remote-only `zm-render` → `zm monitor`.
+
+**When it prints the join phrase, on each donor:**
+
+```bash
+./scripts/setup_donor.sh --join 'ZM-XXXX-…-XXC'
+```
+
+(blender check → zmd → monitor). Then press Enter back on this laptop.
 
 ## Demo script (manual)
 
