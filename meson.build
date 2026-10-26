@@ -162,3 +162,15 @@ test('integration_remote', python3,
   timeout: 180,
   is_parallel: false,
 )
+
+test('sdk_python', python3,
+  args: ['-m', 'pytest', '-v', meson.project_source_root() / 'sdk/python/tests'],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.project_source_root() / 'sdk/python' + ':' + meson.project_source_root() / 'tests/integration',
+  },
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 120,
+  is_parallel: false,
+)
+
