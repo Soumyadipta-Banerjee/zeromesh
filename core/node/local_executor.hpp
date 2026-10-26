@@ -31,6 +31,14 @@ public:
     // A queued task completes at once as cancelled; a running one has its sandbox killed.
     void Cancel(const std::string& task_id) override;
 
+    // Snapshot of queued/running sandboxes on this node (for zm monitor).
+    struct ActiveItem {
+        std::string task_id;
+        v1::TaskSpec spec;
+        bool started{false};
+    };
+    [[nodiscard]] std::vector<ActiveItem> ListActive() const;
+
 private:
     struct Item {
         std::string task_id;
@@ -47,7 +55,7 @@ private:
     std::shared_ptr<plugin::Registry> registry_;
     std::string node_id_;
 
-    std::mutex mu_;
+    mutable std::mutex mu_;
     std::condition_variable_any cv_;
     std::deque<std::shared_ptr<Item>> queue_;
     std::unordered_map<std::string, std::shared_ptr<Item>> items_;  // queued and running

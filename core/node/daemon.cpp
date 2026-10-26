@@ -285,7 +285,7 @@ int Daemon::Run() {
         opts.node_id = node_id;
         opts.node_port = config_.node_port;
         opts.upload_limit_bytes = UploadLimitFromEnv();
-        client_service = std::make_unique<ClientService>(cas, merkle, jobs, peers, opts, team);
+        client_service = std::make_unique<ClientService>(cas, merkle, jobs, peers, opts, team, local_executor);
 
         DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
         node_service = std::make_unique<NodeService>(

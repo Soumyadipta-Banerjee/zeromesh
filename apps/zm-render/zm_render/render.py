@@ -50,10 +50,16 @@ class MissingFramesError(RuntimeError):
 
 def blender_argv(blend_rel: str, chunk: Chunk, blender_bin: str = "blender") -> list[str]:
     """Argv for one chunk: render frames [start, end] as PNG under //out/."""
+    # Cycles (CPU set in .blend): Workbench/EEVEE need a display.
+    # -noaudio: sandbox has no PipeWire. Do not pass --cycles-device (Blender 5
+    # treats unknown long opts as filenames).
     return [
         blender_bin,
         "-b",
+        "-noaudio",
         blend_rel,
+        "-E",
+        "CYCLES",
         "-o",
         "//out/frame_####",
         "-F",
@@ -64,6 +70,15 @@ def blender_argv(blend_rel: str, chunk: Chunk, blender_bin: str = "blender") -> 
         str(chunk.end),
         "-a",
     ]
+
+
+# Sandbox has no PipeWire/Pulse; force null audio backends.
+_BLENDER_ENV = {
+    "ALSOFT_DRIVERS": "null",
+    "SDL_AUDIODRIVER": "dummy",
+    "PIPEWIRE_RUNTIME_DIR": "/tmp",
+    "XDG_RUNTIME_DIR": "/tmp",
+}
 
 
 def build_job_spec(
@@ -94,6 +109,7 @@ def build_job_spec(
                 env_spec=common_pb2.EnvSpec(name=env),
                 resources=common_pb2.Resources(cores=cores),
                 policy=policy,
+                env=_BLENDER_ENV,
             )
         )
     return common_pb2.JobSpec(name="zm-render", tasks=tasks)
@@ -115,18 +131,36 @@ def collect_frames(out_dir: Path, frames: FrameRange) -> RenderResult:
     return result
 
 
-def _print_progress(
-    done_frames: int,
-    total_frames: int,
-    chunk: Chunk,
-    executed_by: str,
-    file: TextIO,
-) -> None:
-    who = executed_by or "?"
-    print(
-        f"[{done_frames}/{total_frames}] frames {chunk.start}-{chunk.end} on {who}",
-        file=file,
-    )
+def _peer_names(client: Any) -> dict[str, str]:
+    """Map node_id (and 8-char prefix) → hostname."""
+    out: dict[str, str] = {}
+    try:
+        for p in client.peers():
+            nid = getattr(p, "node_id", "") or ""
+            host = getattr(p, "hostname", "") or nid[:8]
+            if not nid:
+                continue
+            out[nid] = host
+            out[nid[:8]] = host
+    except Exception:
+        pass
+    return out
+
+
+def _who(node_id: str, names: dict[str, str]) -> str:
+    if not node_id:
+        return "?"
+    host = names.get(node_id) or names.get(node_id[:8])
+    if host:
+        return f"{host} ({node_id[:8]})"
+    return node_id[:8]
+
+
+def _print_event(kind: str, chunk: Chunk, who: str, file: TextIO, extra: str = "") -> None:
+    msg = f"{kind:9} frames {chunk.start:>3}-{chunk.end:<3}  →  {who}"
+    if extra:
+        msg += f"  {extra}"
+    print(msg, file=file, flush=True)
 
 
 def run_render(
@@ -152,6 +186,16 @@ def run_render(
     chunks = split_chunks(opts.frames, opts.chunk)
     total = opts.frames.count
 
+    names = _peer_names(client)
+    print(
+        f"zm-render: {total} frames → {len(chunks)} chunks "
+        f"(chunk={opts.chunk}, env={opts.env})",
+        file=prog,
+        flush=True,
+    )
+    for ch in chunks:
+        print(f"  queue     frames {ch.start:>3}-{ch.end:<3}  ({ch.name})", file=prog, flush=True)
+
     root = client.upload(scene_dir)
     job_spec = build_job_spec(
         input_root=root,
@@ -165,24 +209,41 @@ def run_render(
         may_run_remote=opts.may_run_remote,
     )
     job = client.submit(job_spec)
+    print(f"zm-render: submitted job {job.job_id}", file=prog, flush=True)
 
     progress = [ChunkProgress(chunk=ch) for ch in chunks]
     by_name = {p.chunk.name: p for p in progress}
     done_frames = 0
+    started: set[str] = set()
 
+    running = common_pb2.RUNNING
+    placed = common_pb2.PLACED
     succeeded = common_pb2.SUCCEEDED
     for ev in job.events():
         name = getattr(ev, "task_name", "") or ""
+        if name not in by_name:
+            continue
+        cp = by_name[name]
         state = getattr(ev, "state", None)
-        if name in by_name and state == succeeded:
-            cp = by_name[name]
-            if not cp.done:
-                res = getattr(ev, "result", None)
-                who = getattr(res, "executed_by", "") if res is not None else ""
-                cp.executed_by = who or cp.executed_by
-                cp.done = True
-                done_frames += cp.chunk.end - cp.chunk.start + 1
-                _print_progress(done_frames, total, cp.chunk, cp.executed_by, prog)
+        detail = (getattr(ev, "detail", "") or "").strip()
+        if state in (running, placed) and name not in started:
+            started.add(name)
+            # detail sometimes carries placer hint; result.executed_by only on finish
+            who = detail if detail else "mesh…"
+            _print_event("RUNNING", cp.chunk, who, prog)
+        if state == succeeded and not cp.done:
+            res = getattr(ev, "result", None)
+            who_id = getattr(res, "executed_by", "") if res is not None else ""
+            cp.executed_by = who_id or cp.executed_by
+            cp.done = True
+            done_frames += cp.chunk.end - cp.chunk.start + 1
+            _print_event(
+                "DONE",
+                cp.chunk,
+                _who(cp.executed_by, names),
+                prog,
+                extra=f"[{done_frames}/{total} frames]",
+            )
 
     status = job.wait(check=True)
     # Fill executed_by / progress from final results if the event stream was sparse.
@@ -195,7 +256,22 @@ def run_render(
         if not cp.done and res.exit_code == 0:
             cp.done = True
             done_frames += cp.chunk.end - cp.chunk.start + 1
-            _print_progress(done_frames, total, cp.chunk, cp.executed_by, prog)
+            _print_event(
+                "DONE",
+                cp.chunk,
+                _who(cp.executed_by, names),
+                prog,
+                extra=f"[{done_frames}/{total} frames]",
+            )
+
+    # Summary by host
+    by_host: dict[str, list[str]] = {}
+    for cp in progress:
+        label = _who(cp.executed_by, names)
+        by_host.setdefault(label, []).append(f"{cp.chunk.start}-{cp.chunk.end}")
+    print("zm-render: who did what", file=prog, flush=True)
+    for host, ranges in sorted(by_host.items()):
+        print(f"  {host}: frames {', '.join(ranges)}", file=prog, flush=True)
 
     out_dir = opts.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

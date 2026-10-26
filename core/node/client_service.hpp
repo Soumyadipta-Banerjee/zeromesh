@@ -6,6 +6,7 @@
 #include "net/team.hpp"
 #include "net/telemetry.hpp"
 #include "node/job_manager.hpp"
+#include "node/local_executor.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 #include "zeromesh/v1/client.grpc.pb.h"
@@ -55,7 +56,8 @@ class ClientService final : public v1::ClientApi::Service {
 public:
     ClientService(std::shared_ptr<store::CasStore> cas, std::shared_ptr<store::MerkleBuilder> merkle,
                   std::shared_ptr<JobManager> jobs, std::shared_ptr<net::PeerTable> peers,
-                  ClientServiceOptions options, std::shared_ptr<TeamState> team = nullptr);
+                  ClientServiceOptions options, std::shared_ptr<TeamState> team = nullptr,
+                  std::shared_ptr<LocalExecutor> local_executor = nullptr);
 
     grpc::Status PutObjects(grpc::ServerContext* ctx, grpc::ServerReader<v1::Chunk>* reader,
                             v1::PutObjectsReply* reply) override;
@@ -71,6 +73,8 @@ public:
     grpc::Status CancelJob(grpc::ServerContext* ctx, const v1::JobRef* req, v1::Empty* reply) override;
     grpc::Status FetchOutputs(grpc::ServerContext* ctx, const v1::FetchRequest* req, v1::FetchReply* reply) override;
     grpc::Status ListPeers(grpc::ServerContext* ctx, const v1::Empty* req, v1::PeerList* reply) override;
+    grpc::Status ListActivity(grpc::ServerContext* ctx, const v1::Empty* req,
+                              v1::ActivitySnapshot* reply) override;
     grpc::Status TeamCreate(grpc::ServerContext* ctx, const v1::Empty* req, v1::TeamSecretReply* reply) override;
     grpc::Status TeamJoin(grpc::ServerContext* ctx, const v1::TeamJoinRequest* req, v1::Empty* reply) override;
     grpc::Status TeamLeave(grpc::ServerContext* ctx, const v1::Empty* req, v1::Empty* reply) override;
@@ -86,6 +90,7 @@ private:
     std::shared_ptr<net::PeerTable> peers_;
     ClientServiceOptions options_;
     std::shared_ptr<TeamState> team_;
+    std::shared_ptr<LocalExecutor> local_executor_;
 
     std::mutex telemetry_mu_;
     net::TelemetrySampler telemetry_;

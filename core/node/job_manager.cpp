@@ -139,6 +139,7 @@ public:
     std::string Submit(v1::JobSpec spec);
     void Cancel(const std::string& job_id);
     std::optional<v1::JobStatus> Get(const std::string& job_id) const;
+    std::vector<v1::ActiveTask> ListActive() const;
     std::shared_ptr<EventStream> Watch(const std::string& job_id);
     void CancelAll();
 
@@ -481,6 +482,27 @@ std::optional<v1::JobStatus> JobManager::Impl::Get(const std::string& job_id) co
     return st;
 }
 
+std::vector<v1::ActiveTask> JobManager::Impl::ListActive() const {
+    std::lock_guard lock(mu_);
+    std::vector<v1::ActiveTask> out;
+    for (const auto& [id, job] : jobs_) {
+        if (job->done) continue;
+        for (const auto& t : job->tasks) {
+            if (t.state == v1::SUCCEEDED || t.state == v1::FAILED || t.state == v1::CANCELLED) continue;
+            v1::ActiveTask a;
+            a.set_job_id(job->id);
+            a.set_task_name(t.spec.name());
+            a.set_state(t.state);
+            a.set_role("submitted");
+            for (const auto& arg : t.spec.argv()) a.add_argv(arg);
+            a.set_cores(t.spec.resources().cores() > 0 ? t.spec.resources().cores() : 1);
+            if (t.has_result && !t.result.executed_by().empty()) a.set_detail(t.result.executed_by());
+            out.push_back(std::move(a));
+        }
+    }
+    return out;
+}
+
 std::shared_ptr<EventStream> JobManager::Impl::Watch(const std::string& job_id) {
     std::lock_guard lock(mu_);
     auto it = jobs_.find(job_id);
@@ -507,6 +529,7 @@ JobManager::~JobManager() { impl_->CancelAll(); }
 std::string JobManager::Submit(v1::JobSpec spec) { return impl_->Submit(std::move(spec)); }
 void JobManager::Cancel(const std::string& job_id) { impl_->Cancel(job_id); }
 std::optional<v1::JobStatus> JobManager::Get(const std::string& job_id) const { return impl_->Get(job_id); }
+std::vector<v1::ActiveTask> JobManager::ListActive() const { return impl_->ListActive(); }
 std::shared_ptr<EventStream> JobManager::Watch(const std::string& job_id) { return impl_->Watch(job_id); }
 
 } // namespace zeromesh::node

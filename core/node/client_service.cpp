@@ -255,9 +255,10 @@ void TeamState::Apply(std::optional<net::TeamKey> next) {
 
 ClientService::ClientService(std::shared_ptr<store::CasStore> cas, std::shared_ptr<store::MerkleBuilder> merkle,
                              std::shared_ptr<JobManager> jobs, std::shared_ptr<net::PeerTable> peers,
-                             ClientServiceOptions options, std::shared_ptr<TeamState> team)
+                             ClientServiceOptions options, std::shared_ptr<TeamState> team,
+                             std::shared_ptr<LocalExecutor> local_executor)
     : cas_(std::move(cas)), merkle_(std::move(merkle)), jobs_(std::move(jobs)), peers_(std::move(peers)),
-      options_(std::move(options)), team_(std::move(team)) {
+      options_(std::move(options)), team_(std::move(team)), local_executor_(std::move(local_executor)) {
     if (sodium_init() < 0) throw std::runtime_error("libsodium initialisation failed");
     telemetry_.Sample();  // prime the CPU-load delta
 }
@@ -533,6 +534,25 @@ grpc::Status ClientService::ListPeers(grpc::ServerContext*, const v1::Empty*, v1
                 info.set_admitted(team_->pins->FingerprintFor(p.id).has_value());
             }
             *reply->add_peers() = std::move(info);
+        }
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status ClientService::ListActivity(grpc::ServerContext*, const v1::Empty*, v1::ActivitySnapshot* reply) {
+    if (jobs_) {
+        for (auto& a : jobs_->ListActive()) *reply->add_tasks() = std::move(a);
+    }
+    if (local_executor_) {
+        for (const auto& item : local_executor_->ListActive()) {
+            v1::ActiveTask a;
+            a.set_task_name(item.spec.name().empty() ? item.task_id : item.spec.name());
+            a.set_state(item.started ? v1::RUNNING : v1::QUEUED);
+            a.set_role("executing");
+            for (const auto& arg : item.spec.argv()) a.add_argv(arg);
+            a.set_cores(item.spec.resources().cores() > 0 ? item.spec.resources().cores() : 1);
+            a.set_detail(item.started ? "sandbox" : "queued");
+            *reply->add_tasks() = std::move(a);
         }
     }
     return grpc::Status::OK;
