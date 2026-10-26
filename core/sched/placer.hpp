@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace zeromesh::sched {
 
@@ -48,6 +49,9 @@ public:
 
     void Execute(const std::string& task_id, const v1::TaskSpec& spec, node::TaskCallbacks cb) override;
     void Cancel(const std::string& task_id) override;
+
+    // Node ids of remote peers that currently have at least one task in flight here.
+    [[nodiscard]] std::vector<std::string> NodesWithInFlight() const;
 
     struct Task;
     struct Shared;
