@@ -30,28 +30,61 @@ zeromesh_headers = declare_dependency(
   dependencies: [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep, fuse3_dep]
 )
 
-# Note for team developers:
-# Once you begin implementing .cpp files for your respective workstreams,
-# uncomment the executable target below:
-#
-# sources = files(
-#   'src/main.cpp',
-#   'src/discovery/mdns.cpp',
-#   'src/discovery/peer_table.cpp',
-#   'src/reapi/server.cpp',
-#   'src/reapi/execution_service.cpp',
-#   'src/reapi/cas_service.cpp',
-#   'src/reapi/action_cache.cpp',
-#   'src/cas/store.cpp',
-#   'src/cas/merkle.cpp',
-#   'src/cas/p2p_syncer.cpp',
-#   'src/scheduler/scheduler.cpp',
-#   'src/scheduler/heuristics.cpp',
-#   'src/executor/runner.cpp',
-#   'src/executor/bwrap.cpp',
-#   'src/executor/landlock.cpp',
-#   'src/executor/host_guard.cpp',
-#   'src/ui/tui.cpp'
-# )
-# zm_bin = executable('zm', sources, dependencies: zeromesh_headers, install: true)
-# alias_target('zmd', zm_bin)
+# Core REAPI Gateway and Daemon sources (Option 1)
+sources = files(
+  'src/main.cpp',
+  'src/cas/store.cpp',
+  'src/cas/merkle.cpp',
+  'src/discovery/peer_table.cpp',
+  'src/reapi/action_cache.cpp',
+  'src/reapi/cas_service.cpp',
+  'src/reapi/execution_service.cpp',
+  'src/reapi/server.cpp',
+  'src/scheduler/heuristics.cpp',
+  'src/scheduler/scheduler.cpp',
+  'src/executor/runner.cpp',
+  'src/executor/bwrap.cpp',
+  'src/verify/byzantine_spot_checker.cpp'
+)
+
+zm_bin = executable('zm',
+  sources,
+  include_directories: inc,
+  dependencies: [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep],
+  install: true
+)
+
+alias_target('zmd', zm_bin)
+
+# Unit test suite
+test_sources = files(
+  'tests/test_main.cpp',
+  'tests/test_cas.cpp',
+  'tests/test_merkle.cpp',
+  'tests/test_reapi.cpp',
+  'tests/test_scheduler.cpp',
+  'tests/test_peer_table.cpp',
+  'tests/test_bwrap.cpp',
+  'tests/test_verify.cpp',
+  'tests/test_host_guard.cpp',
+  'src/cas/store.cpp',
+  'src/cas/merkle.cpp',
+  'src/discovery/peer_table.cpp',
+  'src/reapi/action_cache.cpp',
+  'src/reapi/cas_service.cpp',
+  'src/reapi/execution_service.cpp',
+  'src/reapi/server.cpp',
+  'src/scheduler/heuristics.cpp',
+  'src/scheduler/scheduler.cpp',
+  'src/executor/runner.cpp',
+  'src/executor/bwrap.cpp',
+  'src/verify/byzantine_spot_checker.cpp'
+)
+
+test_bin = executable('unit_tests',
+  test_sources,
+  include_directories: inc,
+  dependencies: [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep]
+)
+
+test('all_unit_tests', test_bin)
