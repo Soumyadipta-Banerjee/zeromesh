@@ -7,9 +7,9 @@
 //     inputs the peer lacks, RunTask while forwarding its events, then pull the
 //     outputs (whole trees for directory outputs) and stdout/stderr into the local
 //     CAS before reporting the result.
-// No candidate accepting gives FAILED "no node can run this task: <last reason>";
-// a broken run stream (peer gone, keepalive timeout) gives FAILED
-// "node <id> lost during run". There are no retries yet.
+// When every node is full, Place waits for an in-flight slot (render-farm queue)
+// instead of failing. Hard rejects (policy/arch/mem) still fail immediately.
+// A broken run stream gives FAILED "node <id> lost during run". No retries yet.
 
 #include "net/peer_table.hpp"
 #include "net/telemetry.hpp"

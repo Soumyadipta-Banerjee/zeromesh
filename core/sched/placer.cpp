@@ -4,7 +4,10 @@
 #include "sched/rank.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <exception>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 
@@ -54,17 +57,22 @@ struct Placer::Task {
 // Shared with callbacks that may outlive the Placer (the LocalExecutor's).
 struct Placer::Shared {
     std::mutex mu;
+    std::condition_variable cv;  // woken when an in-flight slot frees
     std::map<std::string, std::shared_ptr<Task>> tasks;
     std::map<std::string, int> in_flight;  // node id -> tasks we run there
 
-    int InFlight(const std::string& node) {
-        std::lock_guard lock(mu);
+    int InFlightLocked(const std::string& node) const {
         auto it = in_flight.find(node);
         return it == in_flight.end() ? 0 : it->second;
+    }
+    int InFlight(const std::string& node) {
+        std::lock_guard lock(mu);
+        return InFlightLocked(node);
     }
     void Add(const std::string& node, int delta) {
         std::lock_guard lock(mu);
         if ((in_flight[node] += delta) <= 0) in_flight.erase(node);
+        if (delta < 0) cv.notify_all();
     }
     void Forget(const std::string& task_id) {
         std::lock_guard lock(mu);
@@ -165,7 +173,7 @@ void Placer::RunLocal(const std::shared_ptr<Task>& task, const v1::TaskSpec& spe
         task->is_local = true;
     }
     if (task->cb.on_state) task->cb.on_state(v1::PLACED, "node " + local_id_);
-    shared_->Add(local_id_, 1);
+    // in_flight already reserved by Place before this call.
     node::TaskCallbacks cb;
     cb.on_state = task->cb.on_state;
     cb.on_log = task->cb.on_log;
@@ -232,43 +240,86 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     const net::Telemetry self = telemetry_ ? telemetry_() : net::Telemetry{};
     if (spec.resources().arch().empty() && !self.arch.empty()) spec.mutable_resources()->set_arch(self.arch);
 
-    std::vector<Candidate> candidates;
-    if (local_) {
-        candidates.push_back(Candidate{.node_id = local_id_,
-                                       .is_local = true,
-                                       .cores_free = self.cores_free,
-                                       .mem_available = self.mem_available,
-                                       .cpu_load_pct = self.cpu_load_pct,
-                                       .on_ac = self.on_ac,
-                                       .arch = self.arch,
-                                       .latency = std::chrono::milliseconds(0),
-                                       .missing_bytes = 0,
-                                       .in_flight = shared_->InFlight(local_id_)});
-    }
-    for (const auto& p : peers_->ListActive()) {
-        if (p.id == local_id_) continue;
-        candidates.push_back(Candidate{.node_id = p.id,
-                                       .is_local = false,
-                                       .cores_free = p.cores_free,
-                                       .mem_available = p.mem_available,
-                                       .cpu_load_pct = p.cpu_load_pct,
-                                       .on_ac = p.is_charging,
-                                       .arch = p.arch,
-                                       .latency = p.latency,
-                                       .missing_bytes = -1,
-                                       .in_flight = shared_->InFlight(p.id)});
-    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(
+                              spec.policy().timeout_s() > 0 ? spec.policy().timeout_s() : 3600);
 
     std::string last_reason = "no eligible nodes";
     std::optional<std::vector<v1::Digest>> needed;
-    for (const Candidate& c : Rank(spec, std::move(candidates))) {
-        if (task->cancelled) return task->Done(Cancelled(local_id_));
-        if (c.is_local) return RunLocal(task, spec);
+    std::unordered_set<std::string> rejected;  // offer/push failures this attempt
 
-        auto peer = peers_->Get(c.node_id);
+    // Flamenco-style: wait for a free slot when the mesh is full. Reserve under the
+    // lock so parallel placers spread instead of all packing the requester.
+    while (!task->cancelled) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return task->Done(Failed(local_id_, "no node can run this task: timed out waiting for a free slot"));
+        }
+
+        std::vector<Candidate> ranked;
+        {
+            std::unique_lock lock(shared_->mu);
+            std::vector<Candidate> candidates;
+            if (local_) {
+                candidates.push_back(Candidate{.node_id = local_id_,
+                                               .is_local = true,
+                                               .cores_free = self.cores_free,
+                                               .mem_available = self.mem_available,
+                                               .cpu_load_pct = self.cpu_load_pct,
+                                               .on_ac = self.on_ac,
+                                               .arch = self.arch,
+                                               .latency = std::chrono::milliseconds(0),
+                                               .missing_bytes = 0,
+                                               .in_flight = shared_->InFlightLocked(local_id_)});
+            }
+            for (const auto& p : peers_->ListActive()) {
+                if (p.id == local_id_) continue;
+                if (rejected.count(p.id)) continue;
+                candidates.push_back(Candidate{.node_id = p.id,
+                                               .is_local = false,
+                                               .cores_free = p.cores_free,
+                                               .mem_available = p.mem_available,
+                                               .cpu_load_pct = p.cpu_load_pct,
+                                               .on_ac = p.is_charging,
+                                               .arch = p.arch,
+                                               .latency = p.latency,
+                                               .missing_bytes = -1,
+                                               .in_flight = shared_->InFlightLocked(p.id)});
+            }
+            ranked = Rank(spec, candidates);
+            if (ranked.empty()) {
+                for (auto& c : candidates) c.in_flight = 0;
+                const bool hard = Rank(spec, candidates).empty();
+                if (hard && rejected.empty()) {
+                    lock.unlock();
+                    return task->Done(Failed(local_id_, "no node can run this task: no eligible nodes"));
+                }
+                if (hard && !rejected.empty()) {
+                    lock.unlock();
+                    return task->Done(Failed(local_id_, "no node can run this task: " + last_reason));
+                }
+                // Mesh full: wait for a slot to free (another task finished).
+                shared_->cv.wait_for(lock, std::chrono::milliseconds(100),
+                                     [&] { return task->cancelled.load(); });
+                continue;
+            }
+            // Reserve the best node before releasing the lock.
+            if ((shared_->in_flight[ranked.front().node_id] += 1) <= 0) {
+                shared_->in_flight.erase(ranked.front().node_id);
+            }
+        }
+
+        const Candidate chosen = ranked.front();
+        if (task->cancelled) {
+            shared_->Add(chosen.node_id, -1);
+            return task->Done(Cancelled(local_id_));
+        }
+        if (chosen.is_local) return RunLocal(task, spec);
+
+        auto peer = peers_->Get(chosen.node_id);
         auto client = peer ? factory_(*peer) : nullptr;
         if (!client) {
-            last_reason = "node " + c.node_id + ": not reachable";
+            last_reason = "node " + chosen.node_id + ": not reachable";
+            rejected.insert(chosen.node_id);
+            shared_->Add(chosen.node_id, -1);
             continue;
         }
         if (!needed) {
@@ -285,30 +336,38 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         std::string err;
         auto reply = client->Offer(task->id, spec, *needed, &err);
         if (!reply) {
-            last_reason = "node " + c.node_id + ": " + err;
+            last_reason = "node " + chosen.node_id + ": " + err;
+            rejected.insert(chosen.node_id);
+            shared_->Add(chosen.node_id, -1);
             continue;
         }
         if (!reply->accepted()) {
-            last_reason = "node " + c.node_id + ": " + reply->reason();
+            last_reason = "node " + chosen.node_id + ": " + reply->reason();
+            rejected.insert(chosen.node_id);
+            shared_->Add(chosen.node_id, -1);
             continue;
         }
-        if (task->cb.on_state) task->cb.on_state(v1::PLACED, "node " + c.node_id);
+        if (task->cb.on_state) task->cb.on_state(v1::PLACED, "node " + chosen.node_id);
 
         std::vector<v1::Digest> missing(reply->missing().begin(), reply->missing().end());
         if (!client->Push(*cas_, missing, &err)) {
-            last_reason = "node " + c.node_id + ": uploading inputs failed: " + err;
+            last_reason = "node " + chosen.node_id + ": uploading inputs failed: " + err;
+            rejected.insert(chosen.node_id);
+            shared_->Add(chosen.node_id, -1);
             continue;
         }
-        if (task->cancelled) return task->Done(Cancelled(local_id_));
+        if (task->cancelled) {
+            shared_->Add(chosen.node_id, -1);
+            return task->Done(Cancelled(local_id_));
+        }
 
-        shared_->Add(c.node_id, 1);
         bool cancel_forwarded = false;
         auto on_event = [&](const v1::JobEvent& ev) {
             if (task->cancelled && !cancel_forwarded) {
-                cancel_forwarded = true;  // Cancel() arrived before the stream was registered
+                cancel_forwarded = true;
                 client->Cancel(task->id);
             }
-            if (ev.has_result()) return;  // the final event: returned by Run
+            if (ev.has_result()) return;
             if (ev.log_fd() != 0) {
                 if (task->cb.on_log) task->cb.on_log(ev.log_fd(), ev.log_chunk());
             } else if ((ev.state() == v1::PLACED || ev.state() == v1::RUNNING) && task->cb.on_state) {
@@ -316,18 +375,18 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             }
         };
         auto result = client->Run(task->id, on_event, &err);
-        shared_->Add(c.node_id, -1);
+        shared_->Add(chosen.node_id, -1);
         if (!result) {
-            if (task->cancelled) return task->Done(Cancelled(c.node_id));
-            return task->Done(Failed(c.node_id, "node " + c.node_id + " lost during run (" + err + ")"));
+            if (task->cancelled) return task->Done(Cancelled(chosen.node_id));
+            return task->Done(Failed(chosen.node_id, "node " + chosen.node_id + " lost during run (" + err + ")"));
         }
-        // The pinned channel authenticated the peer; record that identity, not its claim.
-        result->set_executed_by(c.node_id);
+        result->set_executed_by(chosen.node_id);
         if (!result->cancelled() && !PullOutputs(*client, *cas_, *result, &err)) {
-            return task->Done(Failed(c.node_id, "node " + c.node_id + " lost while sending outputs: " + err));
+            return task->Done(Failed(chosen.node_id, "node " + chosen.node_id + " lost while sending outputs: " + err));
         }
         return task->Done(std::move(*result));
     }
+    if (task->cancelled) return task->Done(Cancelled(local_id_));
     task->Done(Failed(local_id_, "no node can run this task: " + last_reason));
 }
 
