@@ -51,6 +51,18 @@ struct SwarmStats {
 };
 
 /**
+ * @brief Result of a torrent download operation with detailed error diagnostics.
+ */
+struct DownloadResult {
+    bool success{false};
+    std::string error_message;
+    uint64_t bytes_downloaded{0};
+    uint64_t total_bytes{0};
+
+    operator bool() const { return success; }
+};
+
+/**
  * @brief TorrentEngine coordinates directory chunking, seeding, DHT announces,
  * peer discovery, and BitTorrent-style piece downloading.
  */
@@ -172,6 +184,13 @@ public:
     std::pair<TorrentManifest, std::string> ExportDirectory(const std::filesystem::path& dir_path,
                                                           size_t chunk_size_bytes,
                                                           ProgressCallback progress_cb = nullptr) {
+        if (!std::filesystem::exists(dir_path)) {
+            throw std::runtime_error("Directory does not exist: " + dir_path.string());
+        }
+        if (!std::filesystem::is_directory(dir_path)) {
+            throw std::runtime_error("Path is not a directory: " + dir_path.string());
+        }
+
         TorrentManifest manifest;
         manifest.name = dir_path.filename().empty() ? "shared_folder" : dir_path.filename().string();
         manifest.chunk_size_bytes = chunk_size_bytes;
@@ -182,11 +201,19 @@ public:
         // First pass: collect files and calculate total bytes
         std::vector<std::filesystem::path> all_files;
         uint64_t total_dir_bytes = 0;
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(dir_path)) {
-            if (entry.is_regular_file()) {
-                all_files.push_back(entry.path());
-                total_dir_bytes += entry.file_size();
+        try {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(dir_path)) {
+                if (entry.is_regular_file()) {
+                    all_files.push_back(entry.path());
+                    total_dir_bytes += entry.file_size();
+                }
             }
+        } catch (const std::exception& ex) {
+            throw std::runtime_error(std::string("Filesystem read error scanning ") + dir_path.string() + ": " + ex.what());
+        }
+
+        if (all_files.empty()) {
+            throw std::runtime_error("Directory contains no regular files to share: " + dir_path.string());
         }
 
         manifest.total_bytes = total_dir_bytes;
@@ -201,7 +228,9 @@ public:
             file_info.size_bytes = std::filesystem::file_size(file_path);
 
             std::ifstream ifs(file_path, std::ios::binary);
-            if (!ifs) continue;
+            if (!ifs) {
+                throw std::runtime_error("Failed to open file for reading: " + file_path.string());
+            }
 
             while (ifs) {
                 ifs.read(buffer.data(), buffer.size());
@@ -249,9 +278,9 @@ public:
      * @brief Downloads a directory given its info-hash, reconstructs all files,
      * and announces them to become a seeder.
      */
-    bool DownloadTorrent(const std::string& info_hash,
-                         const std::filesystem::path& dest_parent_dir,
-                         ProgressCallback progress_cb = nullptr) {
+    DownloadResult DownloadTorrent(const std::string& info_hash,
+                                  const std::filesystem::path& dest_parent_dir,
+                                  ProgressCallback progress_cb = nullptr) {
         if (progress_cb) {
             progress_cb(0.02f, "Querying DHT for manifest: " + info_hash.substr(0, 16) + "...", 0, 1);
         }
@@ -270,23 +299,43 @@ public:
         }
 
         if (manifest_json.empty()) {
+            std::string err = "Manifest " + info_hash.substr(0, 16) + "... not found in DHT swarm (no seeders reachable)";
             if (progress_cb) {
-                progress_cb(0.0f, "Error: Manifest not found in DHT swarm", 0, 0);
+                progress_cb(0.0f, "Error: " + err, 0, 0);
             }
-            return false;
+            return {false, err, 0, 0};
         }
 
         auto manifest_opt = TorrentManifest::Deserialize(manifest_json);
         if (!manifest_opt) {
+            std::string err = "Corrupted or malformed manifest JSON for hash " + info_hash;
             if (progress_cb) {
-                progress_cb(0.0f, "Error: Corrupt manifest JSON", 0, 0);
+                progress_cb(0.0f, "Error: " + err, 0, 0);
             }
-            return false;
+            return {false, err, 0, 0};
         }
 
         const auto& manifest = *manifest_opt;
         std::filesystem::path target_dir = dest_parent_dir / manifest.name;
-        std::filesystem::create_directories(target_dir);
+
+        try {
+            std::filesystem::create_directories(target_dir);
+        } catch (const std::exception& ex) {
+            std::string err = "Failed to create destination directory " + target_dir.string() + ": " + ex.what();
+            if (progress_cb) progress_cb(0.0f, "Error: " + err, 0, 0);
+            return {false, err, 0, 0};
+        }
+
+        // Check available disk space
+        try {
+            auto space_info = std::filesystem::space(dest_parent_dir);
+            if (space_info.available < manifest.total_bytes) {
+                std::string err = "Insufficient disk space: need " + std::to_string(manifest.total_bytes / 1024) +
+                                  " KB, but only " + std::to_string(space_info.available / 1024) + " KB available";
+                if (progress_cb) progress_cb(0.0f, "Error: " + err, 0, 0);
+                return {false, err, 0, 0};
+            }
+        } catch (...) {}
 
         uint64_t total_bytes = manifest.total_bytes;
         uint64_t downloaded_bytes = 0;
@@ -294,14 +343,21 @@ public:
         // Step 2: Download files and chunks
         for (const auto& file : manifest.files) {
             auto out_path = target_dir / file.relative_path;
-            std::filesystem::create_directories(out_path.parent_path());
+            try {
+                std::filesystem::create_directories(out_path.parent_path());
+            } catch (const std::exception& ex) {
+                std::string err = "Failed to create directory " + out_path.parent_path().string() + ": " + ex.what();
+                if (progress_cb) progress_cb(0.0f, "Error: " + err, downloaded_bytes, total_bytes);
+                return {false, err, downloaded_bytes, total_bytes};
+            }
 
             std::ofstream ofs(out_path, std::ios::binary | std::ios::trunc);
             if (!ofs) {
+                std::string err = "Failed to open output file: " + out_path.string();
                 if (progress_cb) {
-                    progress_cb(0.0f, "Error: Failed to create " + file.relative_path, downloaded_bytes, total_bytes);
+                    progress_cb(0.0f, "Error: " + err, downloaded_bytes, total_bytes);
                 }
-                return false;
+                return {false, err, downloaded_bytes, total_bytes};
             }
 
             for (size_t ch_idx = 0; ch_idx < file.chunk_hashes.size(); ++ch_idx) {
@@ -315,14 +371,20 @@ public:
 
                 auto chunk_res = chunk_fetcher_->FetchChunk(ch_hash);
                 if (!chunk_res.success) {
+                    std::string err = "Chunk " + ch_hash.substr(0, 16) + "... for file '" + file.relative_path + "' failed to fetch from any DHT provider";
                     if (progress_cb) {
-                        progress_cb(0.0f, "Error: Failed to fetch chunk " + ch_hash.substr(0, 12),
-                                    downloaded_bytes, total_bytes);
+                        progress_cb(0.0f, "Error: " + err, downloaded_bytes, total_bytes);
                     }
-                    return false;
+                    return {false, err, downloaded_bytes, total_bytes};
                 }
 
                 ofs.write(chunk_res.data.data(), chunk_res.data.size());
+                if (ofs.bad() || ofs.fail()) {
+                    std::string err = "Disk write failure while writing chunk to " + out_path.string();
+                    if (progress_cb) progress_cb(0.0f, "Error: " + err, downloaded_bytes, total_bytes);
+                    return {false, err, downloaded_bytes, total_bytes};
+                }
+
                 downloaded_bytes += chunk_res.data.size();
                 total_bytes_downloaded_ += chunk_res.data.size();
             }
@@ -341,7 +403,7 @@ public:
             progress_cb(1.0f, "Download Complete! Now seeding: " + manifest.name, total_bytes, total_bytes);
         }
 
-        return true;
+        return {true, "", downloaded_bytes, total_bytes};
     }
 
 private:

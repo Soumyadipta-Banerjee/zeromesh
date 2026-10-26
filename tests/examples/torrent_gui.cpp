@@ -3,9 +3,11 @@
 
 #include <gtk/gtk.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -19,7 +21,88 @@
 using namespace zeromesh::examples;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GUI State & Context
+// Logging Subsystem
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum class LogLevel {
+    Info,
+    Success,
+    Warn,
+    Error
+};
+
+struct LogEntry {
+    std::string timestamp;
+    LogLevel level;
+    std::string component;
+    std::string message;
+};
+
+class GuiLogger {
+public:
+    static GuiLogger& Instance() {
+        static GuiLogger instance;
+        return instance;
+    }
+
+    void Init(const std::filesystem::path& log_file_path) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        log_file_path_ = log_file_path;
+        std::filesystem::create_directories(log_file_path.parent_path());
+        log_file_.open(log_file_path, std::ios::app);
+        if (log_file_) {
+            log_file_ << "\n=== ZeroMesh Torrent Swarm GUI Session Started: "
+                      << CurrentIsoTimestamp() << " ===\n" << std::flush;
+        }
+    }
+
+    void Log(LogLevel level, const std::string& component, const std::string& msg);
+
+    [[nodiscard]] uint32_t GetErrorCount() const { return error_count_.load(); }
+    [[nodiscard]] uint32_t GetWarnCount() const { return warn_count_.load(); }
+    [[nodiscard]] std::filesystem::path GetLogFilePath() const { return log_file_path_; }
+
+    void ClearMemoryLogs() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_.clear();
+        error_count_.store(0);
+        warn_count_.store(0);
+    }
+
+    std::vector<LogEntry> GetEntries() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return entries_;
+    }
+
+private:
+    GuiLogger() = default;
+
+    static std::string CurrentTimeStr() {
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&in_time_t), "%H:%M:%S");
+        return ss.str();
+    }
+
+    static std::string CurrentIsoTimestamp() {
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d %H:%M:%S");
+        return ss.str();
+    }
+
+    std::mutex mutex_;
+    std::filesystem::path log_file_path_;
+    std::ofstream log_file_;
+    std::vector<LogEntry> entries_;
+    std::atomic<uint32_t> error_count_{0};
+    std::atomic<uint32_t> warn_count_{0};
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GUI Context
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct AppContext {
@@ -28,11 +111,17 @@ struct AppContext {
     uint16_t chunk_port{8984};
     std::unique_ptr<TorrentEngine> engine;
 
-    // GTK Widgets
+    // Window & Navigation
     GtkWidget* window{nullptr};
+    GtkWidget* notebook{nullptr};
+
+    // Header & Alert Banner
     GtkWidget* status_label{nullptr};
     GtkWidget* peers_label{nullptr};
     GtkWidget* ports_label{nullptr};
+    GtkWidget* error_badge_label{nullptr};
+    GtkWidget* error_banner_box{nullptr};
+    GtkWidget* error_banner_label{nullptr};
 
     // Export Tab
     GtkWidget* export_dir_label{nullptr};
@@ -57,14 +146,180 @@ struct AppContext {
     GtkWidget* node_id_label{nullptr};
     GtkWidget* seeded_bytes_label{nullptr};
     GtkWidget* downloaded_bytes_label{nullptr};
-    GtkWidget* telemetry_log_view{nullptr};
-    GtkTextBuffer* telemetry_log_buf{nullptr};
+
+    // System & Error Logs Tab
+    GtkWidget* log_tab_label{nullptr};
+    GtkWidget* system_log_view{nullptr};
+    GtkTextBuffer* system_log_buf{nullptr};
+    GtkWidget* log_filter_combo{nullptr};
+    GtkWidget* log_search_entry{nullptr};
+    GtkWidget* clear_logs_btn{nullptr};
+    GtkWidget* copy_logs_btn{nullptr};
+    GtkWidget* open_log_file_btn{nullptr};
+    int current_log_filter{0}; // 0 = All, 1 = Errors Only, 2 = Warnings & Errors
 };
 
 static AppContext g_app;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UI Helpers (Marshaled onto the GTK Main Thread via g_idle_add)
+// UI Dispatch Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct LogDispatchPayload {
+    LogEntry entry;
+};
+
+static void AppendFormattedLogToBuffer(GtkTextBuffer* buf, const LogEntry& entry) {
+    if (!buf) return;
+
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(buf, &end);
+
+    // 1. Timestamp in muted gray
+    std::string time_str = "[" + entry.timestamp + "] ";
+    gtk_text_buffer_insert_with_tags_by_name(buf, &end, time_str.c_str(), -1, "time_tag", NULL);
+
+    // 2. Level tag in colored badge
+    const char* tag_name = "info_tag";
+    const char* level_text = "[INFO] ";
+    switch (entry.level) {
+        case LogLevel::Info:
+            tag_name = "info_tag";
+            level_text = "[INFO] ";
+            break;
+        case LogLevel::Success:
+            tag_name = "success_tag";
+            level_text = "[OK]   ";
+            break;
+        case LogLevel::Warn:
+            tag_name = "warn_tag";
+            level_text = "[WARN] ";
+            break;
+        case LogLevel::Error:
+            tag_name = "error_tag";
+            level_text = "[ERR]  ";
+            break;
+    }
+    gtk_text_buffer_insert_with_tags_by_name(buf, &end, level_text, -1, tag_name, NULL);
+
+    // 3. Component in lavender
+    if (!entry.component.empty()) {
+        std::string comp = "[" + entry.component + "] ";
+        gtk_text_buffer_insert_with_tags_by_name(buf, &end, comp.c_str(), -1, "comp_tag", NULL);
+    }
+
+    // 4. Message text
+    std::string msg = entry.message + "\n";
+    if (entry.level == LogLevel::Error) {
+        gtk_text_buffer_insert_with_tags_by_name(buf, &end, msg.c_str(), -1, "error_msg_tag", NULL);
+    } else {
+        gtk_text_buffer_insert(buf, &end, msg.c_str(), -1);
+    }
+}
+
+static void ShowErrorBanner(const std::string& err_msg) {
+    if (g_app.error_banner_box && g_app.error_banner_label) {
+        std::string banner_text = "🚨 " + err_msg;
+        gtk_label_set_text(GTK_LABEL(g_app.error_banner_label), banner_text.c_str());
+        gtk_widget_set_visible(g_app.error_banner_box, TRUE);
+    }
+}
+
+static void HideErrorBanner() {
+    if (g_app.error_banner_box) {
+        gtk_widget_set_visible(g_app.error_banner_box, FALSE);
+    }
+}
+
+static gboolean OnLogDispatchIdle(gpointer data) {
+    auto* p = static_cast<LogDispatchPayload*>(data);
+    const auto& entry = p->entry;
+
+    // Check filter criteria for the system log tab
+    bool show_in_system_log = true;
+    if (g_app.current_log_filter == 1 && entry.level != LogLevel::Error) {
+        show_in_system_log = false;
+    } else if (g_app.current_log_filter == 2 && entry.level != LogLevel::Error && entry.level != LogLevel::Warn) {
+        show_in_system_log = false;
+    }
+
+    if (show_in_system_log && g_app.system_log_buf) {
+        AppendFormattedLogToBuffer(g_app.system_log_buf, entry);
+    }
+
+    // Also forward to contextual buffers
+    if (entry.component == "EXPORT" && g_app.seeded_files_buf) {
+        AppendFormattedLogToBuffer(g_app.seeded_files_buf, entry);
+    } else if (entry.component == "DOWNLOAD" && g_app.download_log_buf) {
+        AppendFormattedLogToBuffer(g_app.download_log_buf, entry);
+    }
+
+    // Update error badge in header
+    uint32_t errs = GuiLogger::Instance().GetErrorCount();
+    uint32_t warns = GuiLogger::Instance().GetWarnCount();
+    if (g_app.error_badge_label) {
+        if (errs > 0) {
+            std::string text = "🚨 " + std::to_string(errs) + " Error" + (errs > 1 ? "s" : "");
+            if (warns > 0) text += " | ⚠️ " + std::to_string(warns);
+            gtk_label_set_text(GTK_LABEL(g_app.error_badge_label), text.c_str());
+            gtk_widget_set_visible(g_app.error_badge_label, TRUE);
+        } else if (warns > 0) {
+            std::string text = "⚠️ " + std::to_string(warns) + " Warning" + (warns > 1 ? "s" : "");
+            gtk_label_set_text(GTK_LABEL(g_app.error_badge_label), text.c_str());
+            gtk_widget_set_visible(g_app.error_badge_label, TRUE);
+        } else {
+            gtk_label_set_text(GTK_LABEL(g_app.error_badge_label), "✓ 0 Errors");
+            gtk_widget_set_visible(g_app.error_badge_label, TRUE);
+        }
+    }
+
+    // Update Logs Tab label counter
+    if (g_app.log_tab_label) {
+        if (errs > 0) {
+            std::string t = "📋 Logs (" + std::to_string(errs) + " Err)";
+            gtk_label_set_text(GTK_LABEL(g_app.log_tab_label), t.c_str());
+        } else {
+            gtk_label_set_text(GTK_LABEL(g_app.log_tab_label), "📋 System Logs");
+        }
+    }
+
+    // If an error occurred, show the prominent error banner
+    if (entry.level == LogLevel::Error) {
+        ShowErrorBanner(entry.message);
+    }
+
+    delete p;
+    return G_SOURCE_REMOVE;
+}
+
+void GuiLogger::Log(LogLevel level, const std::string& component, const std::string& msg) {
+    LogEntry entry{CurrentTimeStr(), level, component, msg};
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (level == LogLevel::Error) error_count_++;
+        if (level == LogLevel::Warn) warn_count_++;
+        entries_.push_back(entry);
+
+        // Persistent file write
+        if (log_file_) {
+            const char* tag = "INFO";
+            if (level == LogLevel::Success) tag = "OK";
+            if (level == LogLevel::Warn) tag = "WARN";
+            if (level == LogLevel::Error) tag = "ERROR";
+
+            log_file_ << "[" << CurrentIsoTimestamp() << "] [" << tag << "] ["
+                      << component << "] " << msg << "\n" << std::flush;
+        }
+    }
+
+    // Dispatch to GTK main thread
+    auto* payload = new LogDispatchPayload{std::move(entry)};
+    g_idle_add(OnLogDispatchIdle, payload);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Progress UI Dispatch
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct ProgressPayload {
@@ -103,28 +358,6 @@ static gboolean OnProgressIdle(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-struct LogPayload {
-    GtkTextBuffer* buffer;
-    std::string message;
-};
-
-static gboolean OnAppendLogIdle(gpointer data) {
-    auto* p = static_cast<LogPayload*>(data);
-    if (p->buffer) {
-        GtkTextIter end;
-        gtk_text_buffer_get_end_iter(p->buffer, &end);
-        std::string line = p->message + "\n";
-        gtk_text_buffer_insert(p->buffer, &end, line.c_str(), -1);
-    }
-    delete p;
-    return G_SOURCE_REMOVE;
-}
-
-static void AppendLog(GtkTextBuffer* buf, const std::string& msg) {
-    auto* p = new LogPayload{buf, msg};
-    g_idle_add(OnAppendLogIdle, p);
-}
-
 // Periodic Telemetry Timer
 static gboolean OnTelemetryTimer(gpointer) {
     if (!g_app.engine) return G_SOURCE_CONTINUE;
@@ -150,13 +383,15 @@ static gboolean OnTelemetryTimer(gpointer) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void OnExportClicked(GtkWidget*, gpointer) {
+    HideErrorBanner();
     gtk_widget_set_sensitive(g_app.export_btn, FALSE);
     gtk_label_set_text(GTK_LABEL(g_app.export_status_label), "Scanning directory & chunking files...");
 
+    GuiLogger::Instance().Log(LogLevel::Info, "EXPORT",
+                              "Initiating directory export on path: " + g_app.current_dir.string());
+
     std::thread([dir = g_app.current_dir]() {
         try {
-            AppendLog(g_app.seeded_files_buf, "[zm-torrent] Scanning directory: " + dir.string());
-
             auto [manifest, info_hash] = g_app.engine->ExportDirectory(
                 dir, 256 * 1024,
                 [](float frac, const std::string& status, uint64_t done, uint64_t total) {
@@ -166,7 +401,11 @@ static void OnExportClicked(GtkWidget*, gpointer) {
 
             std::string magnet = TorrentManifest::MakeMagnetUri(info_hash, manifest.name, manifest.total_bytes);
 
-            // Update Magnet Entry on GTK thread
+            GuiLogger::Instance().Log(LogLevel::Success, "EXPORT",
+                                      "Export succeeded. InfoHash: " + info_hash + " (" +
+                                      std::to_string(manifest.files.size()) + " files, " +
+                                      std::to_string(manifest.total_bytes / 1024) + " KB)");
+
             struct FinishExportPayload {
                 std::string magnet;
                 std::string info_hash;
@@ -185,19 +424,17 @@ static void OnExportClicked(GtkWidget*, gpointer) {
                 ss << "Seeding Active! (" << f->file_count << " files, " << (f->total_bytes / 1024) << " KB)";
                 gtk_label_set_text(GTK_LABEL(g_app.export_status_label), ss.str().c_str());
 
-                AppendLog(g_app.seeded_files_buf, "✓ Published InfoHash: " + f->info_hash);
-                AppendLog(g_app.seeded_files_buf, "✓ Magnet Link Ready: " + f->magnet);
-                AppendLog(g_app.seeded_files_buf, "✓ DHT ANNOUNCE broadcasted to mesh swarm. Seeding chunks...");
-
                 delete f;
                 return G_SOURCE_REMOVE;
             }, fin);
 
         } catch (const std::exception& ex) {
-            AppendLog(g_app.seeded_files_buf, std::string("Error during export: ") + ex.what());
+            std::string err = std::string("Export failed: ") + ex.what();
+            GuiLogger::Instance().Log(LogLevel::Error, "EXPORT", err);
+
             g_idle_add([](gpointer) -> gboolean {
                 gtk_widget_set_sensitive(g_app.export_btn, TRUE);
-                gtk_label_set_text(GTK_LABEL(g_app.export_status_label), "Export failed. Check logs.");
+                gtk_label_set_text(GTK_LABEL(g_app.export_status_label), "Export failed. See Error Logs.");
                 return G_SOURCE_REMOVE;
             }, nullptr);
         }
@@ -212,57 +449,173 @@ static void OnCopyMagnetClicked(GtkWidget*, gpointer) {
             GdkClipboard* clipboard = gdk_display_get_clipboard(display);
             gdk_clipboard_set_text(clipboard, text);
             gtk_label_set_text(GTK_LABEL(g_app.export_status_label), "✓ Magnet Link Copied to Clipboard!");
+            GuiLogger::Instance().Log(LogLevel::Info, "EXPORT", "Magnet URI copied to system clipboard");
         }
     }
 }
 
 static void OnDownloadClicked(GtkWidget*, gpointer) {
+    HideErrorBanner();
     const char* raw_input = gtk_editable_get_text(GTK_EDITABLE(g_app.import_magnet_entry));
     if (!raw_input || std::strlen(raw_input) == 0) {
-        gtk_label_set_text(GTK_LABEL(g_app.download_status_label), "Please paste a Magnet URI or 64-char InfoHash.");
+        std::string err = "Please paste a Magnet URI or 64-char InfoHash before clicking Download.";
+        gtk_label_set_text(GTK_LABEL(g_app.download_status_label), err.c_str());
+        GuiLogger::Instance().Log(LogLevel::Warn, "DOWNLOAD", err);
         return;
     }
 
     auto hash_opt = TorrentManifest::ExtractHash(raw_input);
     if (!hash_opt) {
-        gtk_label_set_text(GTK_LABEL(g_app.download_status_label), "Invalid Magnet URI or InfoHash.");
+        std::string err = "Invalid Magnet URI or InfoHash: input must contain a valid 64-character SHA-256 hash";
+        gtk_label_set_text(GTK_LABEL(g_app.download_status_label), err.c_str());
+        GuiLogger::Instance().Log(LogLevel::Error, "DOWNLOAD", err);
         return;
     }
 
     std::string info_hash = *hash_opt;
     gtk_widget_set_sensitive(g_app.download_btn, FALSE);
     gtk_label_set_text(GTK_LABEL(g_app.download_status_label), "Resolving manifest in DHT swarm...");
-    AppendLog(g_app.download_log_buf, "[zm-torrent] Resolving InfoHash: " + info_hash);
+
+    GuiLogger::Instance().Log(LogLevel::Info, "DOWNLOAD", "Resolving torrent InfoHash: " + info_hash);
 
     std::thread([info_hash, dest_dir = g_app.current_dir]() {
-        bool ok = g_app.engine->DownloadTorrent(
+        auto res = g_app.engine->DownloadTorrent(
             info_hash, dest_dir,
             [](float frac, const std::string& status, uint64_t done, uint64_t total) {
                 auto* p = new ProgressPayload{frac, status, done, total, true};
                 g_idle_add(OnProgressIdle, p);
-                AppendLog(g_app.download_log_buf, status);
             });
 
+        if (res.success) {
+            GuiLogger::Instance().Log(LogLevel::Success, "DOWNLOAD",
+                                      "Torrent download completed successfully (" +
+                                      std::to_string(res.bytes_downloaded / 1024) + " KB). Now seeding to mesh.");
+        } else {
+            GuiLogger::Instance().Log(LogLevel::Error, "DOWNLOAD", res.error_message);
+        }
+
+        struct FinishDownloadPayload {
+            bool success;
+            std::string error_message;
+        };
+
+        auto* fin = new FinishDownloadPayload{res.success, res.error_message};
         g_idle_add([](gpointer d) -> gboolean {
-            bool success = static_cast<bool>(reinterpret_cast<uintptr_t>(d));
+            auto* f = static_cast<FinishDownloadPayload*>(d);
             gtk_widget_set_sensitive(g_app.download_btn, TRUE);
-            if (success) {
+            if (f->success) {
                 gtk_label_set_text(GTK_LABEL(g_app.download_status_label),
                                    "✓ Download Finished! Files verified & now seeding to mesh.");
-                AppendLog(g_app.download_log_buf, "✓ Directory completely reconstructed in current working path.");
-                AppendLog(g_app.download_log_buf, "✓ Re-announced all chunks to DHT. Swarm health +1 seeder.");
             } else {
                 gtk_label_set_text(GTK_LABEL(g_app.download_status_label),
-                                   "Download failed or timed out. Ensure seeding peer is running.");
+                                   ("Download failed: " + f->error_message).c_str());
             }
+            delete f;
             return G_SOURCE_REMOVE;
-        }, reinterpret_cast<gpointer>(static_cast<uintptr_t>(ok)));
+        }, fin);
     }).detach();
 }
 
+static void OnDismissErrorBannerClicked(GtkWidget*, gpointer) {
+    HideErrorBanner();
+}
+
+static void OnViewLogsFromBannerClicked(GtkWidget*, gpointer) {
+    HideErrorBanner();
+    if (g_app.notebook) {
+        // Switch to the Logs tab (page 3)
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(g_app.notebook), 3);
+    }
+}
+
+static void OnClearLogsClicked(GtkWidget*, gpointer) {
+    GuiLogger::Instance().ClearMemoryLogs();
+    if (g_app.system_log_buf) {
+        gtk_text_buffer_set_text(g_app.system_log_buf, "", 0);
+    }
+    if (g_app.error_badge_label) {
+        gtk_label_set_text(GTK_LABEL(g_app.error_badge_label), "✓ 0 Errors");
+    }
+    if (g_app.log_tab_label) {
+        gtk_label_set_text(GTK_LABEL(g_app.log_tab_label), "📋 System Logs");
+    }
+    HideErrorBanner();
+}
+
+static void OnCopyAllLogsClicked(GtkWidget*, gpointer) {
+    if (!g_app.system_log_buf) return;
+
+    GtkTextIter start, end;
+    gtk_text_buffer_get_start_iter(g_app.system_log_buf, &start);
+    gtk_text_buffer_get_end_iter(g_app.system_log_buf, &end);
+    char* text = gtk_text_buffer_get_text(g_app.system_log_buf, &start, &end, FALSE);
+
+    if (text) {
+        GdkDisplay* display = gdk_display_get_default();
+        if (display) {
+            GdkClipboard* cb = gdk_display_get_clipboard(display);
+            gdk_clipboard_set_text(cb, text);
+            GuiLogger::Instance().Log(LogLevel::Info, "SYSTEM", "Entire log buffer copied to clipboard");
+        }
+        g_free(text);
+    }
+}
+
+static void OnLogFilterChanged(GObject* object, GParamSpec*, gpointer) {
+    guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(object));
+    g_app.current_log_filter = static_cast<int>(selected);
+
+    // Refresh view from GuiLogger memory buffer
+    if (g_app.system_log_buf) {
+        gtk_text_buffer_set_text(g_app.system_log_buf, "", 0);
+        auto entries = GuiLogger::Instance().GetEntries();
+        for (const auto& e : entries) {
+            if (g_app.current_log_filter == 1 && e.level != LogLevel::Error) continue;
+            if (g_app.current_log_filter == 2 && e.level != LogLevel::Error && e.level != LogLevel::Warn) continue;
+            AppendFormattedLogToBuffer(g_app.system_log_buf, e);
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// GTK4 CSS Styling
+// GTK4 CSS Styling with Tag Colors & Alert Banners
 // ─────────────────────────────────────────────────────────────────────────────
+
+static void SetupTextBufferTags(GtkTextBuffer* buf) {
+    gtk_text_buffer_create_tag(buf, "time_tag",
+                               "foreground", "#6c7086",
+                               "font", "Monospace 11",
+                               NULL);
+    gtk_text_buffer_create_tag(buf, "comp_tag",
+                               "foreground", "#b4befe",
+                               "weight", PANGO_WEIGHT_BOLD,
+                               "font", "Monospace 11",
+                               NULL);
+    gtk_text_buffer_create_tag(buf, "info_tag",
+                               "foreground", "#89dceb",
+                               "weight", PANGO_WEIGHT_BOLD,
+                               "font", "Monospace 11",
+                               NULL);
+    gtk_text_buffer_create_tag(buf, "success_tag",
+                               "foreground", "#a6e3a1",
+                               "weight", PANGO_WEIGHT_BOLD,
+                               "font", "Monospace 11",
+                               NULL);
+    gtk_text_buffer_create_tag(buf, "warn_tag",
+                               "foreground", "#f9e2af",
+                               "weight", PANGO_WEIGHT_BOLD,
+                               "font", "Monospace 11",
+                               NULL);
+    gtk_text_buffer_create_tag(buf, "error_tag",
+                               "foreground", "#f38ba8",
+                               "weight", PANGO_WEIGHT_BOLD,
+                               "font", "Monospace 11",
+                               NULL);
+    gtk_text_buffer_create_tag(buf, "error_msg_tag",
+                               "foreground", "#f38ba8",
+                               "font", "Monospace 11",
+                               NULL);
+}
 
 static void ApplyModernCss() {
     const char* css = R"(
@@ -276,7 +629,7 @@ static void ApplyModernCss() {
         .header-box {
             background: linear-gradient(135deg, #24273a, #181926);
             border-bottom: 2px solid #89b4fa;
-            padding: 16px;
+            padding: 14px 18px;
         }
 
         .title-label {
@@ -288,6 +641,29 @@ static void ApplyModernCss() {
         .subtitle-label {
             font-size: 13px;
             color: #a6adc8;
+        }
+
+        .error-badge {
+            background-color: #313244;
+            color: #f38ba8;
+            font-weight: bold;
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            border: 1px solid #f38ba8;
+        }
+
+        .error-banner {
+            background: linear-gradient(90deg, #451b24, #311822);
+            border-left: 5px solid #f38ba8;
+            border-bottom: 1px solid #f38ba8;
+            padding: 10px 16px;
+        }
+
+        .error-banner-label {
+            color: #f5c2e7;
+            font-weight: bold;
+            font-size: 13px;
         }
 
         .card {
@@ -323,7 +699,7 @@ static void ApplyModernCss() {
             color: #6c7086;
         }
 
-        button.copy-btn {
+        button.tool-btn {
             background-color: #313244;
             color: #cdd6f4;
             border-radius: 6px;
@@ -331,7 +707,7 @@ static void ApplyModernCss() {
             padding: 6px 12px;
         }
 
-        button.copy-btn:hover {
+        button.tool-btn:hover {
             background-color: #45475a;
             color: #f5e0dc;
         }
@@ -362,10 +738,10 @@ static void ApplyModernCss() {
 
         textview text {
             background-color: #11111b;
-            color: #a6e3a1;
-            font-family: monospace;
+            color: #cdd6f4;
+            font-family: 'JetBrains Mono', 'Fira Code', 'DejaVu Sans Mono', monospace;
             font-size: 12px;
-            padding: 8px;
+            padding: 10px;
         }
 
         notebook header {
@@ -404,10 +780,18 @@ static GtkWidget* BuildHeaderBar() {
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     gtk_widget_add_css_class(box, "header-box");
 
+    GtkWidget* top_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     GtkWidget* title = gtk_label_new("⚡ ZeroMesh BitTorrent P2P Directory Swarm");
     gtk_widget_add_css_class(title, "title-label");
     gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-    gtk_box_append(GTK_BOX(box), title);
+    gtk_widget_set_hexpand(title, TRUE);
+    gtk_box_append(GTK_BOX(top_row), title);
+
+    g_app.error_badge_label = gtk_label_new("✓ 0 Errors");
+    gtk_widget_add_css_class(g_app.error_badge_label, "error-badge");
+    gtk_box_append(GTK_BOX(top_row), g_app.error_badge_label);
+
+    gtk_box_append(GTK_BOX(box), top_row);
 
     std::string sub = "Working Directory: " + g_app.current_dir.string();
     GtkWidget* subtitle = gtk_label_new(sub.c_str());
@@ -426,6 +810,29 @@ static GtkWidget* BuildHeaderBar() {
     gtk_box_append(GTK_BOX(h_stats), g_app.ports_label);
 
     gtk_box_append(GTK_BOX(box), h_stats);
+
+    // Error Alert Banner (Hidden by default, revealed on error)
+    g_app.error_banner_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_add_css_class(g_app.error_banner_box, "error-banner");
+    gtk_widget_set_visible(g_app.error_banner_box, FALSE);
+
+    g_app.error_banner_label = gtk_label_new("No active errors.");
+    gtk_widget_add_css_class(g_app.error_banner_label, "error-banner-label");
+    gtk_label_set_xalign(GTK_LABEL(g_app.error_banner_label), 0.0f);
+    gtk_widget_set_hexpand(g_app.error_banner_label, TRUE);
+    gtk_box_append(GTK_BOX(g_app.error_banner_box), g_app.error_banner_label);
+
+    GtkWidget* view_logs_btn = gtk_button_new_with_label("🔍 Inspect Logs");
+    gtk_widget_add_css_class(view_logs_btn, "tool-btn");
+    g_signal_connect(view_logs_btn, "clicked", G_CALLBACK(OnViewLogsFromBannerClicked), nullptr);
+    gtk_box_append(GTK_BOX(g_app.error_banner_box), view_logs_btn);
+
+    GtkWidget* dismiss_banner_btn = gtk_button_new_with_label("✕ Dismiss");
+    gtk_widget_add_css_class(dismiss_banner_btn, "tool-btn");
+    g_signal_connect(dismiss_banner_btn, "clicked", G_CALLBACK(OnDismissErrorBannerClicked), nullptr);
+    gtk_box_append(GTK_BOX(g_app.error_banner_box), dismiss_banner_btn);
+
+    gtk_box_append(GTK_BOX(box), g_app.error_banner_box);
     return box;
 }
 
@@ -482,7 +889,7 @@ static GtkWidget* BuildExportTab() {
     gtk_box_append(GTK_BOX(magnet_box), g_app.magnet_entry);
 
     g_app.copy_magnet_btn = gtk_button_new_with_label("📋 Copy Magnet");
-    gtk_widget_add_css_class(g_app.copy_magnet_btn, "copy-btn");
+    gtk_widget_add_css_class(g_app.copy_magnet_btn, "tool-btn");
     gtk_widget_set_sensitive(g_app.copy_magnet_btn, FALSE);
     g_signal_connect(g_app.copy_magnet_btn, "clicked", G_CALLBACK(OnCopyMagnetClicked), nullptr);
     gtk_box_append(GTK_BOX(magnet_box), g_app.copy_magnet_btn);
@@ -505,6 +912,7 @@ static GtkWidget* BuildExportTab() {
     g_app.seeded_files_view = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(g_app.seeded_files_view), FALSE);
     g_app.seeded_files_buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_app.seeded_files_view));
+    SetupTextBufferTags(g_app.seeded_files_buf);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), g_app.seeded_files_view);
     gtk_box_append(GTK_BOX(card3), sw);
 
@@ -542,7 +950,7 @@ static GtkWidget* BuildDownloadTab() {
 
     gtk_box_append(GTK_BOX(card1), input_box);
 
-    std::string target_msg = "Download target: " + g_app.current_dir.string() + "/<torrent_name>";
+    std::string target_msg = "Download destination: " + g_app.current_dir.string() + "/<torrent_name>";
     g_app.dest_dir_label = gtk_label_new(target_msg.c_str());
     gtk_label_set_xalign(GTK_LABEL(g_app.dest_dir_label), 0.0f);
     gtk_box_append(GTK_BOX(card1), g_app.dest_dir_label);
@@ -563,7 +971,7 @@ static GtkWidget* BuildDownloadTab() {
     gtk_widget_add_css_class(card2, "card");
     gtk_widget_set_vexpand(card2, TRUE);
 
-    GtkWidget* c2_title = gtk_label_new("Live Download & Piece Verification Log");
+    GtkWidget* c2_title = gtk_label_new("Download & Verification Progress");
     gtk_widget_add_css_class(c2_title, "card-title");
     gtk_label_set_xalign(GTK_LABEL(c2_title), 0.0f);
     gtk_box_append(GTK_BOX(card2), c2_title);
@@ -573,6 +981,7 @@ static GtkWidget* BuildDownloadTab() {
     g_app.download_log_view = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(g_app.download_log_view), FALSE);
     g_app.download_log_buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_app.download_log_view));
+    SetupTextBufferTags(g_app.download_log_buf);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), g_app.download_log_view);
     gtk_box_append(GTK_BOX(card2), sw);
 
@@ -609,7 +1018,68 @@ static GtkWidget* BuildTelemetryTab() {
     gtk_label_set_xalign(GTK_LABEL(g_app.downloaded_bytes_label), 0.0f);
     gtk_box_append(GTK_BOX(card), g_app.downloaded_bytes_label);
 
+    std::string log_file_info = "Error Log Path: " + GuiLogger::Instance().GetLogFilePath().string();
+    GtkWidget* path_lbl = gtk_label_new(log_file_info.c_str());
+    gtk_label_set_xalign(GTK_LABEL(path_lbl), 0.0f);
+    gtk_box_append(GTK_BOX(card), path_lbl);
+
     gtk_box_append(GTK_BOX(root), card);
+    return root;
+}
+
+static GtkWidget* BuildSystemLogsTab() {
+    GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(root, 12);
+    gtk_widget_set_margin_end(root, 12);
+    gtk_widget_set_margin_top(root, 12);
+    gtk_widget_set_margin_bottom(root, 12);
+
+    // Filter and Tool Bar
+    GtkWidget* toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_add_css_class(toolbar, "card");
+
+    GtkWidget* filter_label = gtk_label_new("Filter:");
+    gtk_box_append(GTK_BOX(toolbar), filter_label);
+
+    const char* filter_items[] = {"All Logs (Verbose)", "🚨 Errors Only", "⚠️ Warnings & Errors", NULL};
+    g_app.log_filter_combo = gtk_drop_down_new_from_strings(filter_items);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(g_app.log_filter_combo), 0);
+    g_signal_connect(g_app.log_filter_combo, "notify::selected", G_CALLBACK(OnLogFilterChanged), nullptr);
+    gtk_box_append(GTK_BOX(toolbar), g_app.log_filter_combo);
+
+    GtkWidget* sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_hexpand(sep, TRUE);
+    gtk_box_append(GTK_BOX(toolbar), sep);
+
+    g_app.copy_logs_btn = gtk_button_new_with_label("📋 Copy All");
+    gtk_widget_add_css_class(g_app.copy_logs_btn, "tool-btn");
+    g_signal_connect(g_app.copy_logs_btn, "clicked", G_CALLBACK(OnCopyAllLogsClicked), nullptr);
+    gtk_box_append(GTK_BOX(toolbar), g_app.copy_logs_btn);
+
+    g_app.clear_logs_btn = gtk_button_new_with_label("🗑️ Clear View");
+    gtk_widget_add_css_class(g_app.clear_logs_btn, "tool-btn");
+    g_signal_connect(g_app.clear_logs_btn, "clicked", G_CALLBACK(OnClearLogsClicked), nullptr);
+    gtk_box_append(GTK_BOX(toolbar), g_app.clear_logs_btn);
+
+    gtk_box_append(GTK_BOX(root), toolbar);
+
+    // Scrolled Console View
+    GtkWidget* card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_add_css_class(card, "card");
+    gtk_widget_set_vexpand(card, TRUE);
+
+    GtkWidget* sw = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(sw, TRUE);
+
+    g_app.system_log_view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(g_app.system_log_view), FALSE);
+    g_app.system_log_buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(g_app.system_log_view));
+    SetupTextBufferTags(g_app.system_log_buf);
+
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), g_app.system_log_view);
+    gtk_box_append(GTK_BOX(card), sw);
+    gtk_box_append(GTK_BOX(root), card);
+
     return root;
 }
 
@@ -622,24 +1092,34 @@ static void OnAppActivate(GtkApplication* app, gpointer) {
 
     g_app.window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(g_app.window), "ZeroMesh P2P Directory Torrent Swarm");
-    gtk_window_set_default_size(GTK_WINDOW(g_app.window), 780, 580);
+    gtk_window_set_default_size(GTK_WINDOW(g_app.window), 820, 620);
 
     GtkWidget* main_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
-    // 1. Header
+    // 1. Header with Error Alert Bar
     gtk_box_append(GTK_BOX(main_vbox), BuildHeaderBar());
 
     // 2. Notebook (Tabs)
-    GtkWidget* notebook = gtk_notebook_new();
-    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), BuildExportTab(), gtk_label_new("📤 Export & Seed"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), BuildDownloadTab(), gtk_label_new("📥 Download & Reconstruct"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), BuildTelemetryTab(), gtk_label_new("🌐 Mesh Telemetry"));
+    g_app.notebook = gtk_notebook_new();
+    gtk_notebook_append_page(GTK_NOTEBOOK(g_app.notebook), BuildExportTab(), gtk_label_new("📤 Export & Seed"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(g_app.notebook), BuildDownloadTab(), gtk_label_new("📥 Download & Reconstruct"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(g_app.notebook), BuildTelemetryTab(), gtk_label_new("🌐 Mesh Telemetry"));
 
-    gtk_widget_set_vexpand(notebook, TRUE);
-    gtk_box_append(GTK_BOX(main_vbox), notebook);
+    g_app.log_tab_label = gtk_label_new("📋 System Logs");
+    gtk_notebook_append_page(GTK_NOTEBOOK(g_app.notebook), BuildSystemLogsTab(), g_app.log_tab_label);
+
+    gtk_widget_set_vexpand(g_app.notebook, TRUE);
+    gtk_box_append(GTK_BOX(main_vbox), g_app.notebook);
 
     gtk_window_set_child(GTK_WINDOW(g_app.window), main_vbox);
     gtk_window_present(GTK_WINDOW(g_app.window));
+
+    // Initial system greeting in log
+    GuiLogger::Instance().Log(LogLevel::Info, "SYSTEM",
+                              "ZeroMesh Torrent GUI ready. Active directory: " + g_app.current_dir.string());
+    GuiLogger::Instance().Log(LogLevel::Info, "NETWORK",
+                              "Kademlia DHT listening on UDP :" + std::to_string(g_app.dht_port) +
+                              ", TCP Chunk Server on :" + std::to_string(g_app.chunk_port));
 
     // Start periodic 1-second telemetry timer
     g_timeout_add_seconds(1, OnTelemetryTimer, nullptr);
@@ -661,15 +1141,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Storage for CAS, ChunkCache, and Error Logs under ~/.zeromesh/torrent_<port>
+    auto home = std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : ".");
+    auto storage = home / ".zeromesh" / ("torrent_" + std::to_string(g_app.dht_port));
+    std::filesystem::create_directories(storage);
+
+    // Initialize GuiLogger to write persistent log file
+    auto log_file = storage / "gui_errors.log";
+    GuiLogger::Instance().Init(log_file);
+
     std::cout << "[zm-torrent-gui] Starting ZeroMesh Torrent App\n"
               << "  Directory:  " << g_app.current_dir << "\n"
               << "  DHT Port:   " << g_app.dht_port << "\n"
               << "  Chunk Port: " << g_app.chunk_port << "\n"
+              << "  Log File:   " << log_file << "\n"
               << std::endl;
 
-    // Storage for CAS and ChunkCache under ~/.zeromesh/torrent_<port>
-    auto home = std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : ".");
-    auto storage = home / ".zeromesh" / ("torrent_" + std::to_string(g_app.dht_port));
     g_app.engine = std::make_unique<TorrentEngine>(storage, g_app.dht_port, g_app.chunk_port);
     g_app.engine->Start();
 

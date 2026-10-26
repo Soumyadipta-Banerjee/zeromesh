@@ -60,6 +60,12 @@ An example application located in `tests/examples/` demonstrating how to export 
    - Active mesh peer count via mDNS and DHT routing table.
    - Total bytes seeded and downloaded.
    - Real-time chunking and download progress bars with speed and status logs.
+5. **Comprehensive Error Logging & Diagnostics**:
+   - **Visual Alert Banner**: Instant alert bar that appears on errors with a 1-click **Inspect Logs** shortcut.
+   - **System & Error Logs Console**: Dedicated GUI tab with real-time color-coded tags (`[ERROR]`, `[WARN]`, `[OK]`, `[INFO]`).
+   - **Severity Filtering**: Live dropdown filter to isolate `🚨 Errors Only`, `⚠️ Warnings & Errors`, or `All Logs`.
+   - **Persistent Disk Logging**: All errors and events are automatically appended to `~/.zeromesh/torrent_<port>/gui_errors.log` with ISO timestamps.
+   - **Tool Actions**: 1-click **Copy All Logs** to clipboard and **Clear View** buttons.
 
 ---
 
