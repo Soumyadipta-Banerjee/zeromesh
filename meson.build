@@ -141,6 +141,8 @@ env_host_module = shared_module('zm_env_host',
   files('plugins/env-host/env_host.cpp', 'plugins/env-host/entry.cpp'),
   include_directories: inc, name_prefix: 'lib')
 
+# Optional loadable .so (daemon also registers mirror statically). Avoid linking
+# static abseil from common_deps into a shared object (needs -fPIC).
 env_mirror_module = shared_module('zm_env_mirror',
   files('plugins/env-mirror/deny_list.cpp',
         'plugins/env-mirror/mirror_cache.cpp',
@@ -148,11 +150,13 @@ env_mirror_module = shared_module('zm_env_mirror',
         'plugins/env-mirror/env_mirror.cpp',
         'plugins/env-mirror/entry.cpp'),
   include_directories: inc,
-  dependencies: common_deps,
-  name_prefix: 'lib')
+  link_with: zm_core,
+  dependencies: [threads_dep, fuse3_dep],
+  name_prefix: 'lib',
+  build_by_default: false)
 
 test('all_unit_tests', test_bin,
-  depends: [fake_env, fake_env_badabi, env_host_module, env_mirror_module],
+  depends: [fake_env, fake_env_badabi, env_host_module],
   env: {'ZM_TEST_PLUGIN_DIR': meson.current_build_dir()},
 )
 
@@ -196,7 +200,7 @@ test('integration_mirror', python3,
     'ZM_BUILD_DIR': meson.current_build_dir(),
     'PYTHONPATH': meson.current_build_dir() / 'proto',
   },
-  depends: [zmd_bin, zm_bin, env_mirror_module] + zm_proto_py,
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
   timeout: 180,
   is_parallel: false,
 )
