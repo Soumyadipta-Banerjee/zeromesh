@@ -80,10 +80,22 @@ std::shared_ptr<grpc::ChannelCredentials> ClientCreds(const Identity& self,
 }
 
 std::shared_ptr<grpc::Channel> PeerChannel(const std::string& address,
-                                           std::shared_ptr<grpc::ChannelCredentials> creds) {
+                                           std::shared_ptr<grpc::ChannelCredentials> creds, bool keepalive) {
     grpc::ChannelArguments args;
     args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
+    if (keepalive) {
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, kKeepaliveTimeMs);
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, kKeepaliveTimeoutMs);
+        args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
+        args.SetInt(GRPC_ARG_HTTP2_MAX_PINGS_WITHOUT_DATA, 0);
+    }
     return grpc::CreateCustomChannel(address, std::move(creds), args);
+}
+
+void AllowKeepalivePings(grpc::ServerBuilder& builder) {
+    builder.AddChannelArgument(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
+    builder.AddChannelArgument(GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS, kKeepaliveTimeMs / 2);
+    builder.AddChannelArgument(GRPC_ARG_HTTP2_MAX_PING_STRIKES, 0);
 }
 
 std::string PeerFingerprint(const grpc::ServerContext& ctx) {
