@@ -12,7 +12,7 @@ put your name next to it in the table below (via a PR), and start.
 | Stream | Owner | Size |
 |---|---|---|
 | [M4: fan-out + resilience](#m4-fan-out--resilience-core) | core maintainer | L |
-| [M5a: Python SDK](#m5a-python-sdk-sdkpython) | _open_ | M |
+| [M5a: Python SDK](#m5a-python-sdk-sdkpython) | Soumya | M |
 | [M5b: zm-render](#m5b-zm-render-appszm-render) | _open_ | M |
 | [M5c: env-mirror](#m5c-env-mirror-pluginsenv-mirror) | Shravan (suggested) | L |
 | [M6: frontend-reapi](#m6-frontend-reapi-pluginsfrontend-reapi) | _open_ | L |
@@ -141,7 +141,7 @@ procfs/sysfs, failure testing.
 
 ## M5a: Python SDK (`sdk/python`)
 
-**Owner:** _open_. **Size:** M. **Branch:** `stream/m5a-sdk`.
+**Owner:** Soumya. **Size:** M. **Branch:** `stream/m5a-sdk`.
 
 **Goal.** Ship a `zeromesh` Python package that lets anyone write an app in a few lines:
 connect, upload, submit or map, wait, fetch. It talks to the local `zmd` over `ClientApi`
