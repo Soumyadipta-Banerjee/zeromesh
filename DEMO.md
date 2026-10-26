@@ -30,20 +30,25 @@ pip install -e ./sdk/python -e ./apps/zm-render pytest grpcio
 Ubuntu sandbox tip: `sudo sysctl kernel.apparmor_restrict_userns=0`  
 (or `kernel.apparmor_restrict_unprivileged_userns=0`).
 
-## Offload from this laptop
+## Offload demo (two roles)
 
-After a build + `pip install -e ./apps/zm-render` once:
+**On each donor (other machines):**
+
+```bash
+./scripts/setup_donor.sh
+# first time / new team: ./scripts/setup_donor.sh --join 'ZM-XXXX-…-XXC'
+```
+
+Checks Blender, starts `zmd`, opens `zm monitor`. Leave it running.
+
+**On this laptop (requester):**
 
 ```bash
 ./scripts/setup_offload.sh
 # optional: ./scripts/setup_offload.sh --frames 1-240 --chunk 16
-# setup only:   ./scripts/setup_offload.sh --setup-only
 ```
 
-Starts `zmd` if needed, submits `spin_cube.blend` with **`--remote-only`** (work leaves this
-laptop), then opens `zm monitor`. Logs: `/tmp/zeromesh-offload-*.log`.
-
-On each donor: `source scripts/demo_env.sh && zmd`, same team (`zm team join '…'`), `blender` on PATH.
+Submits `spin_cube.blend` with `--remote-only`, then opens `zm monitor`.
 
 ## Demo script (manual)
 
