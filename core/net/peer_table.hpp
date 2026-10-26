@@ -91,12 +91,17 @@ public:
     /**
      * @brief Returns a snapshot of all active peers (excluding draining ones).
      */
-    [[nodiscard]] std::vector<Peer> ListActive(std::chrono::milliseconds max_age = std::chrono::seconds(15)) const;
+    [[nodiscard]] std::vector<Peer> ListActive(std::chrono::milliseconds max_age = std::chrono::seconds(10)) const;
 
     /**
      * @brief Removes peers whose last heartbeat exceeded the timeout window.
      */
     size_t PruneStale(std::chrono::milliseconds max_age = std::chrono::seconds(30));
+
+    /**
+     * @brief Forgets every peer (e.g. after leaving or switching teams).
+     */
+    void Clear();
 
     /**
      * @brief Total registered peer count.
