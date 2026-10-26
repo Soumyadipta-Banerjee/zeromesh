@@ -129,8 +129,9 @@ message ActiveTask {
   TaskState state = 3;
   string role = 4;            // "submitted" | "executing"
   repeated string argv = 5;
-  string detail = 6;          // executed_by, placer note, etc.
+  string detail = 6;          // error or status note; not the worker id
   int32 cores = 7;
+  string worker_id = 8;       // node running or that ran this task (empty until placed)
 }
 
 message PeerInfo {

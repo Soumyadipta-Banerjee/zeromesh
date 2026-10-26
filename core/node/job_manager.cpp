@@ -7,6 +7,7 @@
 
 #include <exception>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -105,6 +106,7 @@ struct TaskRun {
     bool executing{false};  // handed to the executor
     std::string task_id;
     std::string task_key;
+    std::string worker_id;  // set at PLACED, before the task finishes
     v1::TaskResult result;
     bool has_result{false};
 };
@@ -370,6 +372,11 @@ void JobManager::Impl::OnState(const JobPtr& job, size_t i, v1::TaskState state,
     std::lock_guard lock(mu_);
     TaskRun& t = job->tasks[i];
     if (IsTerminal(t.state)) return;
+    // Placer reports placement as "node <id>" (see sched::Placer).
+    constexpr std::string_view kNode = "node ";
+    if (detail.rfind(kNode, 0) == 0 && detail.size() > kNode.size()) {
+        t.worker_id = detail.substr(kNode.size());
+    }
     t.state = state;
     v1::JobEvent ev;
     ev.set_task_name(t.spec.name());
@@ -402,6 +409,7 @@ void JobManager::Impl::Finish(Job& job, size_t i, v1::TaskState state, const std
     TaskRun& t = job.tasks[i];
     if (IsTerminal(t.state)) return;
     t.state = state;
+    if (t.worker_id.empty()) t.worker_id = result.executed_by();
     t.result = std::move(result);
     t.has_result = true;
     v1::JobEvent ev;
@@ -513,7 +521,8 @@ std::vector<v1::ActiveTask> JobManager::Impl::ListActive() const {
             a.set_role("submitted");
             for (const auto& arg : t.spec.argv()) a.add_argv(arg);
             a.set_cores(t.spec.resources().cores() > 0 ? t.spec.resources().cores() : 1);
-            if (t.has_result && !t.result.executed_by().empty()) a.set_detail(t.result.executed_by());
+            a.set_worker_id(t.worker_id);
+            if (t.has_result && !t.result.error().empty()) a.set_detail(t.result.error());
             out.push_back(std::move(a));
         }
     };
