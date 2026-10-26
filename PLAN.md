@@ -92,30 +92,30 @@ ZeroMesh operates as a single binary daemon (`zmd` / `zm`) installed on each mac
 ### Phase 1: Foundations & REAPI Skeleton
 - [x] Create project layout and C++20 / Meson build configuration (`meson.build`)
 - [x] Specify official REAPI v2 Protobuf definitions (`proto/remote_execution.proto`)
-- [ ] Implement local gRPC server listening on `127.0.0.1:8980`
-- [ ] Implement baseline in-memory and local disk CAS blob store with SHA-256 verification
-- [ ] Implement Action Cache (AC) for storing and looking up previous action digests
-- [ ] Support `recc` compiler launcher by answering basic `FindMissingBlobs` and `BatchUpdateBlobs`
+- [x] Implement local gRPC server listening on `127.0.0.1:8980`
+- [x] Implement baseline in-memory and local disk CAS blob store with SHA-256 verification
+- [x] Implement Action Cache (AC) for storing and looking up previous action digests
+- [x] Support `recc` compiler launcher by answering basic `FindMissingBlobs` and `BatchUpdateBlobs`
 
 ### Phase 2: Hermetic Execution & Sandboxing
-- [ ] Implement Bubblewrap (`bwrap`) wrapper with `--ro-bind` for system toolchains and `--unshare-all`
-- [ ] Implement Landlock sandbox ruleset (`SYS_landlock_create_ruleset`, `SYS_landlock_restrict_self`)
-- [ ] Implement `SCHED_IDLE` (or `nice 19`) task scheduling to prevent donor machine stutter
-- [ ] Add thermal and battery guard checks (suspend donor execution if battery < 20% or discharging)
+- [x] Implement Bubblewrap (`bwrap`) wrapper with `--ro-bind` for system toolchains and `--unshare-all`
+- [x] Implement Landlock sandbox ruleset (`SYS_landlock_create_ruleset`, `SYS_landlock_restrict_self`)
+- [x] Implement `SCHED_IDLE` (or `nice 19`) task scheduling to prevent donor machine stutter
+- [x] Add thermal and battery guard checks (suspend donor execution if battery < 20% or discharging)
 
 ### Phase 3: P2P Mesh & Blob Transfer
 - [ ] Implement mDNS publisher and subscriber (`_zeromesh._tcp`) for zero-configuration subnet discovery
-- [ ] Implement PeerTable with automatic stale node eviction and heartbeat gossiping
+- [x] Implement PeerTable with automatic stale node eviction and heartbeat gossiping
 - [ ] Implement P2P missing blob syncer to stream input trees between nodes over LAN
-- [ ] Add team-wide Action Cache lookups across peers to avoid duplicate compilation
+- [x] Add team-wide Action Cache lookups across peers to avoid duplicate compilation
 
 ### Phase 4: Locality-Aware Scheduler
-- [ ] Implement cost heuristics comparing network round-trip + transfer time against local compilation cost
-- [ ] Implement critical path detection to pin linker tasks (`ld`, `lld`, `ar`) locally
+- [x] Implement cost heuristics comparing network round-trip + transfer time against local compilation cost
+- [x] Implement critical path detection to pin linker tasks (`ld`, `lld`, `ar`) locally
 - [ ] Implement worker timeout, node health degradation, and automatic job re-dispatch
 
 ### Phase 5: Ergonomics & Observability
-- [ ] Provide one-touch daemon management (`zm up`, `zm down`, `zm status`)
+- [x] Provide one-touch daemon management (`zm up`, `zm down`, `zm status`)
 - [ ] Provide terminal TUI monitor (`zm monitor`) showing cluster nodes, live core loads, and transfer speeds
 - [ ] Provide compiler integration script (`scripts/install_recc.sh`) for CMake, Make, and Meson builds
 
@@ -144,9 +144,9 @@ ZeroMesh operates as a single binary daemon (`zmd` / `zm`) installed on each mac
 - [ ] Dynamic bandwidth-throttling gate evaluating FLOP/byte density before offloading.
 
 ### Phase 10: Zero-Trust Security & Byzantine Spot-Check Quorums
-- [ ] Hardware-backed Ed25519 signing using Linux TPM 2.0 and Apple Secure Enclave.
-- [ ] Randomized 2% shadow re-execution of completed background tasks on independent peers.
-- [ ] Automatic cryptographic digest cross-validation and rogue peer quarantine.
+- [x] Hardware-backed Ed25519 signing using Linux TPM 2.0 and Apple Secure Enclave.
+- [x] Randomized 2% shadow re-execution of completed background tasks on independent peers.
+- [x] Automatic cryptographic digest cross-validation and rogue peer quarantine.
 
 ---
 
