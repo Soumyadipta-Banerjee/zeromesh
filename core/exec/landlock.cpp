@@ -1,4 +1,4 @@
-#include "executor/landlock.hpp"
+#include "exec/landlock.hpp"
 
 #include <fcntl.h>
 #include <linux/landlock.h>
@@ -22,7 +22,7 @@
 #define LANDLOCK_CREATE_RULESET_VERSION (1U << 0)
 #endif
 
-namespace zeromesh::executor {
+namespace zeromesh::exec {
 
 bool LandlockSandbox::IsSupported() {
     long abi = syscall(__NR_landlock_create_ruleset, nullptr, 0, LANDLOCK_CREATE_RULESET_VERSION);
@@ -113,4 +113,4 @@ bool LandlockSandbox::RestrictCurrentProcess() {
     return true;
 }
 
-} // namespace zeromesh::executor
+} // namespace zeromesh::exec
