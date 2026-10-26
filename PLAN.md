@@ -55,7 +55,7 @@ Each milestone is done **only** when its acceptance test passes.
   *Acceptance:* a Python script submits a 3-task job and receives results and events.
 - [x] **M2: Core relocation.** Keep modules moved into `core/`. Real telemetry. Persistent node IDs. `zmd` runs as a long-lived daemon with a real `ClientApi` and local execution.
   *Acceptance:* `zm run -- echo hi` prints `hi` with exit 0. Two runs with different commands give two real results, with no false cache hits. Killing `zmd` and restarting it keeps the node ID.
-- [ ] **M3: Remote execution + security.** Team create/join, admission, mTLS, `NodeApi`, blob transfer, `env-host` plugin, placement.
+- [ ] **M3: Remote execution + security.** *(Building blocks done and unit-tested: plan Tasks 12–16. Daemon wiring, Task 17, still to do; see [docs/HANDOFF.md](docs/HANDOFF.md).)* Team create/join, admission, mTLS, `NodeApi`, blob transfer, `env-host` plugin, placement.
   *Acceptance:* **Two machines:** on A, `zm run --remote-only -- sh -c 'hostname > out.txt'` with output `out.txt` produces a file containing **B's** hostname. A third machine not in the team never appears in `zm status` and can't call `NodeApi`.
 - [ ] **M4: Fan-out + resilience.** `zm run --each`, job DAGs, retries, drain/loss re-dispatch, donor policy file.
   *Acceptance:* `zm run --each 'cases/*' -- ./sim {}` with 20 CPU-bound cases (each ~30 s single-threaded, inputs under 10 MB) on 3 machines completes in under 45% of the single-machine time. Killing one donor's `zmd` mid-job still completes all 20 correctly.

@@ -10,7 +10,7 @@ runner are built on top as apps.
 
 ZeroMesh is moving to a **core + plugin architecture**. See the
 [design](docs/superpowers/specs/2026-10-26-core-plugin-architecture-design.md) and
-[PLAN.md](PLAN.md) for milestones and what is ticked.
+[PLAN.md](PLAN.md) for milestones and what is ticked. Continuing the work? Start with [docs/HANDOFF.md](docs/HANDOFF.md).
 Teammates picking up work after M3: see the stream breakdown in [docs/team/TASKS.md](docs/team/TASKS.md).
 
 **What works today:**
