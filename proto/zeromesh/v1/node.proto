@@ -1,0 +1,222 @@
+syntax = "proto3";
+
+package zeromesh.v1;
+
+import "zeromesh/v1/common.proto";
+import "zeromesh/v1/run.proto";
+
+message AdmitHello {
+  string node_id = 1;
+  bytes nonce = 2;
+}
+message AdmitChallenge {
+  string node_id = 1;
+  bytes nonce = 2;
+  bytes mac = 3;
+}
+message AdmitProof { bytes mac = 1; }
+
+// ---- Batches: the unit one daemon asks another to run ----------------------------------------
+
+// An item as the donor sees it.
+message BatchItem {
+  string id = 1;
+  repeated string argv = 2;
+  map<string, string> env = 3;
+  string cwd = 4;                        // relative to /work
+  repeated string outputs = 5;           // relative to cwd; missing ones fail the item
+  repeated string optional_outputs = 6;
+  bool capture_changed = 7;
+  string depfile = 8;
+  int64 seq = 9;
+  Digest checkpoint = 10;                // restored into /checkpoint
+}
+
+message BatchSpec {
+  string name = 1;           // "<run>/<batch>", for logs and the monitor
+  Digest input_root = 2;
+  Env env = 3;               // exact programs carry the requester's digest
+  // Per item process. mem_bytes is the memory reserved to pack batches onto a node: mem_need plus a
+  // margin, never more than the node's budget (a batch reserving more runs alone).
+  Resources resources = 4;
+  repeated BatchItem items = 5;
+  Combine combine = 6;       // set: one process runs every item
+  string kind = 7;
+  bool warm = 8;
+  bool network = 9;
+  int32 timeout_s = 10;      // per item
+  int32 hung_after_s = 11;
+  bool preemptible = 12;
+  bool stream_logs = 13;
+  string requester = 14;     // node id of the requester; a tree environment is fetched from it
+  Where where = 15;          // for the requester's placer
+  int64 mem_limit = 16;      // hard memory cap per process (cgroup memory.max); 0 = none
+  int64 mem_need = 17;       // memory its items are known to need at least; a node that lets work use less cannot run it
+  bool alone = 18;           // no other batch beside it on the node: an item ran out of memory sharing one
+}
+
+message Offer {
+  string batch_id = 1;
+  BatchSpec spec = 2;
+  repeated Digest needed = 3;  // every blob the batch reads
+  bool cached_input = 4;       // input_root must already be materialized; omit needed
+}
+
+enum RejectKind {
+  REJECT_UNSPECIFIED = 0;
+  REJECT_DRAINING = 1;     // the donor is leaving; look again after retry_after_ms
+  REJECT_BUSY = 2;         // cores, memory or GPUs taken, owner busy, fair share; retry_after_ms
+  REJECT_UNSUPPORTED = 3;  // policy: needs network or more than the donor gives
+  REJECT_ENV = 4;          // a program is missing or its version does not satisfy the constraint
+  REJECT_TOOLCHAIN = 5;    // the program is there, but not the requester's exact build
+  REJECT_INPUT_MISSING = 6; // cached input was pruned or the donor restarted; offer the digests now
+}
+
+message OfferReply {
+  bool accepted = 1;
+  string reason = 2;
+  repeated Digest missing = 3;
+  uint32 comfort_level = 4;               // owner-comfort ladder step (0..4)
+  optional double hazard_per_hour = 5;    // the donor's own departure hazard, when it has a record
+  RejectKind reject_kind = 6;
+  uint32 retry_after_ms = 7;
+  reserved 8; // core_limit: donors announce work_cores instead
+  optional bool input_cached = 9; // present: supports cached_input; true: offer holds a materialized tree
+}
+
+message RunRequest {
+  string batch_id = 1;
+}
+message BatchRef { string batch_id = 1; }
+
+// What a donor reports about one item.
+message ItemOutcome {
+  string id = 1;
+  int32 exit_code = 2;
+  FailureKind failure = 3;
+  string message = 4;
+  repeated OutputFile outputs = 5;
+  Digest stdout = 6;
+  Digest stderr = 7;
+  bytes stdout_tail = 8;
+  bytes stderr_tail = 9;
+  int64 wall_ms = 10;
+  int64 cpu_ms = 11;
+  int64 peak_mem = 12;             // the most its processes held together, from its cgroup
+  repeated string footprint = 13;  // workspace-relative paths its depfile names
+  // FAILURE_OOM: the batch's own memory limit was hit. Otherwise the node's budget for all work ran
+  // out with other work beside it, and peak_mem is a lower bound of what the item needs.
+  bool oom_at_limit = 14;
+  int64 budget = 15;  // FAILURE_OOM not at the limit: what all work on that node may use together
+}
+
+message CheckpointSaved {
+  string item = 1;
+  Digest tree = 2;
+}
+
+message BatchFinished {
+  string error = 1;      // the batch could not run at all
+  bool cancelled = 2;    // stopped before every item finished
+}
+
+message BatchEvent {
+  oneof event {
+    string started = 1;            // an item started
+    ItemLog log = 2;
+    ItemOutcome done = 3;
+    CheckpointSaved checkpoint = 4;
+    BatchFinished finished = 5;    // the last event
+  }
+}
+
+// ---- Team-wide item cache ---------------------------------------------------------------------
+
+// The files one earlier run of a command read, with their digests then.
+message FootprintFile {
+  string path = 1;
+  string hash = 2;   // "" = absent
+}
+message Footprint {
+  repeated FootprintFile files = 1;
+  repeated FootprintFile listings = 2;  // directory paths with a digest of their name list
+}
+
+message CachedItem {
+  repeated OutputFile outputs = 1;
+  Digest stdout = 2;
+  Digest stderr = 3;
+  int64 wall_ms = 4;
+  int64 peak_mem = 5;
+  string node = 6;      // where it ran
+  repeated string footprint = 7;
+}
+
+message CacheLookup {
+  repeated string keys = 1;    // full keys: the results stored under them
+  repeated string weaks = 2;   // command keys: the footprints recorded for them
+}
+message KeyedItem {
+  string key = 1;
+  CachedItem item = 2;
+}
+message WeakFootprints {
+  string weak = 1;
+  repeated Footprint footprints = 2;
+}
+message CacheLookupReply {
+  repeated KeyedItem hits = 1;
+  repeated WeakFootprints footprints = 2;
+}
+message CacheForget {
+  repeated string keys = 1;
+  bool all = 2;
+}
+
+// ---- Departure --------------------------------------------------------------------------------
+
+enum DepartureReason {
+  DEPARTURE_UNSPECIFIED = 0;
+  DEPARTURE_UNPLUG = 1;
+  DEPARTURE_BATTERY = 2;
+  DEPARTURE_LID = 3;
+  DEPARTURE_OWNER = 4;
+  DEPARTURE_SUSPEND = 5;
+}
+
+// Why a donor is leaving. With ttl_ms > 0 the departure is freeze-first: running batches are
+// paused, not killed, and only killed (and re-dispatched) if the donor is not back after ttl_ms.
+message DrainNotice {
+  string node_id = 1;
+  string reason = 2;
+  DepartureReason code = 3;
+  uint32 ttl_ms = 4;
+  uint32 grace_ms = 5;  // batches expected to finish within this window keep running
+}
+
+// Peer seeding: asks the callee to fetch `digests` from another team peer instead of receiving
+// them from the caller.
+message SeedRequest {
+  string source_hint = 1;
+  repeated Digest digests = 2;
+}
+message SeedReply {
+  repeated Digest fetched = 1;
+  string error = 2;
+}
+
+// Served by zmd on TCP 8981 over mTLS; only pinned team peers may call anything but Admit*.
+service NodeApi {
+  rpc Admit(AdmitHello) returns (AdmitChallenge);
+  rpc AdmitConfirm(AdmitProof) returns (Empty);
+  rpc Ping(Empty) returns (PeerInfo);
+  rpc OfferBatch(Offer) returns (OfferReply);
+  rpc PushBlobs(stream Chunk) returns (Empty);
+  rpc PullBlobs(Digests) returns (stream Chunk);
+  rpc SeedBlobs(SeedRequest) returns (SeedReply);
+  rpc RunBatch(RunRequest) returns (stream BatchEvent);
+  rpc CancelBatch(BatchRef) returns (Empty);
+  rpc Drain(DrainNotice) returns (Empty);
+  rpc LookupCache(CacheLookup) returns (CacheLookupReply);
+  rpc ForgetCache(CacheForget) returns (Empty);
+}

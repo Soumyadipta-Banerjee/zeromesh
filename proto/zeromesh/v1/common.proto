@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package zeromesh.v1;
+
+// Content address: lowercase hex SHA-256 of the bytes, plus their length.
+message Digest {
+  string hash = 1;
+  int64 size_bytes = 2;
+}
+
+message Digests {
+  repeated Digest digests = 1;
+}
+
+// One chunk of a streamed object. A run of chunks ending with last=true is one object.
+message Chunk {
+  Digest digest = 1;  // set on the first chunk of each object
+  bytes data = 2;
+  bool last = 3;
+}
+
+// Recorded read order of a tree environment: which chunk of which file a batch touched, first
+// touch first. Stored beside the CAS under the environment's root hash and used to prefetch.
+message ProfileEntry {
+  string blob = 1;    // file digest (SHA-256 hex)
+  uint32 chunk = 2;   // 1 MiB piece of the blob
+  uint64 offset = 3;  // first byte read within the blob
+}
+message EnvProfile {
+  string root_hash = 1;
+  repeated ProfileEntry entries = 2;
+}
+
+message PeerInfo {
+  string node_id = 1;
+  string hostname = 2;
+  string address = 3;
+  int32 node_port = 4;
+  string arch = 5;
+  int32 cores_total = 6;
+  int32 cores_free = 7;
+  int64 mem_available = 8;
+  double cpu_load_pct = 9;
+  int32 battery_pct = 10;  // -1 when the node has no battery
+  bool on_ac = 11;
+  string state = 12;       // "active" | "draining" | "offline"
+  bool is_self = 13;
+  bool admitted = 14;      // true when this peer's cert is pinned (team member)
+  int64 mem_total = 15;
+  int32 gpus = 16;
+  int64 work_mem = 17;     // bytes all work there may use together (its donor policy's budget); 0: none
+  int32 work_cores = 18;   // cores the work of other nodes may hold there; 0: it runs no work
+}
+
+message Empty {}
