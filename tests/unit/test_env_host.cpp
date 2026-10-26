@@ -71,3 +71,9 @@ TEST(EnvHostLoadsAsPlugin) {
     ASSERT_TRUE(env != nullptr);
     ASSERT_TRUE(env->Check(Argv("sh")).ok);
 }
+
+TEST(EnvHostAbsolutePathInMountedDir) {
+    auto env = zeromesh::envhost::Make();
+    ASSERT_TRUE(env->Check({.params = {}, .argv = {"/usr/bin/env"}}).ok);
+    ASSERT_FALSE(env->Check({.params = {}, .argv = {"/home/nobody/tool"}}).ok);
+}

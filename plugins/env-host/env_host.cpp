@@ -49,6 +49,10 @@ public:
         if (cmd.find('/') != std::string::npos) {
             // A relative path lives in the input tree and is checked when it runs.
             if (cmd.front() != '/') return {.ok = true, .reason = {}};
+            // An absolute path is fine when it is an executable inside a directory we mount.
+            for (const char* root : {"/usr/", "/bin/", "/sbin/", "/lib/", "/lib32/", "/lib64/"}) {
+                if (cmd.rfind(root, 0) == 0 && IsExecutableFile(cmd)) return {.ok = true, .reason = {}};
+            }
         } else if (OnPath(cmd, path_env_)) {
             return {.ok = true, .reason = {}};
         }
