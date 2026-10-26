@@ -120,16 +120,16 @@ ZeroMesh operates as a single binary daemon (`zmd` / `zm`) installed on each mac
 - [x] Provide compiler integration script (`scripts/install_recc.sh`) for CMake, Make, and Meson builds
 
 ### Phase 6: BitTorrent-Style Kademlia DHT Engine
-- [ ] 256-bit BLAKE3 key space and $k$-bucket routing table ($k=8$).
-- [ ] Implement `ANNOUNCE_CHUNK` and `GET_PROVIDERS` RPCs for trackerless CAS chunk location.
-- [ ] Distributed Action Cache storage and lookup over encrypted UDP datagrams.
-- [ ] 1-hop LAN shortcut routing table initialization via mDNS discovery.
+- [x] 256-bit BLAKE3 key space and $k$-bucket routing table ($k=8$).
+- [x] Implement `ANNOUNCE_CHUNK` and `GET_PROVIDERS` RPCs for trackerless CAS chunk location.
+- [x] Distributed Action Cache storage and lookup over encrypted UDP datagrams.
+- [x] 1-hop LAN shortcut routing table initialization via mDNS discovery.
 
 ### Phase 7: Distributed Secure FUSE Filesystem (`zm-fs`)
-- [ ] Implement user-space filesystem driver via `fuse3` (`src/vfs/fuse_fs.hpp`).
-- [ ] Lazy block faulting: pull only requested 512 KB chunks on `read()` syscalls via DHT providers.
-- [ ] Authenticated at-rest and in-transit chunk encryption via ChaCha20-Poly1305.
-- [ ] Local NVMe/SSD LRU chunk cache for offline read resilience.
+- [x] Implement user-space filesystem driver via `fuse3` (`src/vfs/fuse_fs.hpp`).
+- [x] Lazy block faulting: pull only requested 512 KB chunks on `read()` syscalls via DHT providers.
+- [x] Authenticated at-rest and in-transit chunk encryption via ChaCha20-Poly1305.
+- [x] Local NVMe/SSD LRU chunk cache for offline read resilience.
 
 ### Phase 8: Network Distributed Shared Memory (DSM) C Library (`libzmdsm`)
 - [x] Implement public C library interface (`include/zmdsm.h`).

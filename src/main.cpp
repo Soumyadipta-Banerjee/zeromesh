@@ -1,5 +1,6 @@
 #include "cas/merkle.hpp"
 #include "cas/store.hpp"
+#include "dht/kademlia.hpp"
 #include "discovery/mdns.hpp"
 #include "discovery/peer_table.hpp"
 #include "executor/host_guard.hpp"
@@ -11,10 +12,13 @@
 #include "scheduler/heuristics.hpp"
 #include "scheduler/scheduler.hpp"
 #include "ui/tui.hpp"
+#include "vfs/fuse_fs.hpp"
 
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 void PrintBanner() {
@@ -35,6 +39,8 @@ void PrintUsage(const char* prog) {
               << "Commands:\n"
               << "  up       Start the ZeroMesh background daemon (zmd) on 127.0.0.1:8980\n"
               << "  run      Execute a command via the local REAPI cluster\n"
+              << "  mount    Mount the DHT-backed distributed VFS (e.g. 'zm mount /mnt/zm')\n"
+              << "  publish  Publish file or dir to distributed VFS (e.g. 'zm publish ./src /src')\n"
               << "  status   Display active cluster peers and hardware telemetry\n"
               << "  monitor  Open the live interactive terminal dashboard\n"
               << "  version  Show version and kernel Landlock / bwrap capability\n"
@@ -140,6 +146,57 @@ int main(int argc, char** argv) {
         std::cout << "Execution completed. Exit code: " << res.exit_code 
                   << " (Worker: " << res.worker_id << ")\n";
         return res.exit_code;
+    }
+
+    if (command == "mount") {
+        if (argc < 3) {
+            std::cerr << "Usage: " << argv[0] << " mount <mountpoint>\n";
+            return 1;
+        }
+        std::string mount_point = argv[2];
+        zeromesh::dht::NodeId self_id{};
+        self_id.fill(0x42);
+        auto dht = std::make_shared<zeromesh::dht::KademliaDht>(self_id, 8982);
+        dht->Start();
+
+        zeromesh::vfs::FuseConfig cfg;
+        cfg.mount_point = mount_point;
+        auto fs = std::make_unique<zeromesh::vfs::FuseFileSystem>(cfg, dht, cas_store);
+        std::cout << "[+] Mounting ZeroMesh DHT VFS at " << mount_point << "...\n";
+        if (!fs->Mount()) {
+            std::cerr << "Failed to mount filesystem.\n";
+            return 1;
+        }
+        std::cout << "[+] Mounted successfully. Press Ctrl+C to unmount.\n";
+        while (fs->IsMounted()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        return 0;
+    }
+
+    if (command == "publish") {
+        if (argc < 4) {
+            std::cerr << "Usage: " << argv[0] << " publish <local_path> <virtual_path>\n";
+            return 1;
+        }
+        std::filesystem::path local_path = argv[2];
+        std::string vpath = argv[3];
+
+        zeromesh::dht::NodeId self_id{};
+        self_id.fill(0x42);
+        auto dht = std::make_shared<zeromesh::dht::KademliaDht>(self_id, 8982);
+        dht->Start();
+
+        zeromesh::vfs::FuseConfig cfg;
+        auto fs = std::make_unique<zeromesh::vfs::FuseFileSystem>(cfg, dht, cas_store);
+        if (std::filesystem::is_directory(local_path)) {
+            size_t count = fs->PublishDirectory(local_path, vpath);
+            std::cout << "[+] Published " << count << " files to " << vpath << "\n";
+        } else {
+            std::string hash = fs->PublishFile(local_path, vpath);
+            std::cout << "[+] Published file to " << vpath << " (manifest: " << hash << ")\n";
+        }
+        return 0;
     }
 
     PrintUsage(argv[0]);
