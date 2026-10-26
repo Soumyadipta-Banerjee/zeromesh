@@ -47,6 +47,7 @@ core_sources = files(
   'src/executor/landlock.cpp',
   'src/ui/tui.cpp',
   'core/plugin/loader.cpp',
+  'core/node/task_key.cpp',
 )
 
 zm_core = static_library('zm_core', core_sources,
@@ -73,6 +74,7 @@ test_bin = executable('unit_tests',
     'tests/unit/test_tui.cpp',
     'tests/unit/test_proto.cpp',
     'tests/unit/test_plugin.cpp',
+    'tests/unit/test_task_key.cpp',
   ),
   include_directories: inc,
   link_with: zm_core,
