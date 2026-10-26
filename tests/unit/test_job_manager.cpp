@@ -312,7 +312,8 @@ TEST(JobRealLocalExecutor) {
     auto runner = std::make_shared<zeromesh::exec::SandboxRunner>(f.cas, f.merkle, f.dir / "scratch");
     auto registry = std::make_shared<zeromesh::plugin::Registry>();
     registry->RegisterEnv(std::make_unique<TestHostEnv>());
-    auto local = std::make_shared<zeromesh::node::LocalExecutor>(runner, registry, "node-1", 2);
+    auto local = std::make_shared<zeromesh::node::LocalExecutor>(runner, registry, "node-1", 2, f.dir / "scratch",
+                                                                 f.cas, zeromesh::node::NodeClientFactory{});
     JobManager jm{f.cas, f.merkle, f.cache, local};
 
     v1::TaskSpec t;

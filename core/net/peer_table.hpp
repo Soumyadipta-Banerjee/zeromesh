@@ -69,6 +69,11 @@ public:
     void Upsert(Peer peer);
 
     /**
+     * @brief Records a measured round-trip time sample (EWMA). Discovery upserts do not overwrite this.
+     */
+    void RecordMeasuredLatency(const std::string& id, std::chrono::milliseconds sample_rtt);
+
+    /**
      * @brief Immediately marks a peer as draining and triggers fast preemption callbacks (< 500ms).
      */
     void MarkDraining(const std::string& id, const std::string& reason);

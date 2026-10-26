@@ -21,6 +21,9 @@ public:
 
     void Put(const std::string& task_key, const v1::TaskResult& result);
 
+    // Removes on-disk cache entries that fail Get() (missing output blobs, etc.).
+    void PruneStale();
+
 private:
     std::shared_ptr<store::CasStore> cas_;
 };

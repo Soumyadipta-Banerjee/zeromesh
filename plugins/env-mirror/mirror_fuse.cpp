@@ -215,25 +215,20 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
     size = std::min(size, available);
     if (size == 0) return 0;
 
-    std::optional<std::string> file_data;
     if (impl->cache) {
-        file_data = impl->cache->Get(node->digest_hash);
-    }
-    if (!file_data && impl->chunk_source) {
-        file_data = impl->chunk_source->FetchChunk(node->digest_hash);
-        if (file_data && impl->cache) {
-            impl->cache->Put(node->digest_hash, *file_data);
+        if (auto n = impl->cache->ReadRange(node->digest_hash, offset, buf, size)) {
+            return static_cast<int>(*n);
         }
     }
+    if (!impl->chunk_source) return -EIO;
 
-    if (!file_data) {
-        return -EIO;
-    }
+    std::optional<std::string> file_data = impl->chunk_source->FetchChunk(node->digest_hash);
+    if (!file_data) return -EIO;
+    if (impl->cache) impl->cache->Put(node->digest_hash, *file_data);
 
-    if (static_cast<size_t>(offset) + size > file_data->size()) {
-        size = file_data->size() > static_cast<size_t>(offset) ? file_data->size() - offset : 0;
-    }
-
+    if (static_cast<size_t>(offset) >= file_data->size()) return 0;
+    size_t tail = file_data->size() - static_cast<size_t>(offset);
+    size = std::min(size, tail);
     std::memcpy(buf, file_data->data() + offset, size);
     return static_cast<int>(size);
 }

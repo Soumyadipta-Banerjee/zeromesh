@@ -32,6 +32,26 @@ TEST(PeerTable_UpsertAndRetrieve) {
     ASSERT_FALSE(table.Get("node-alpha").has_value());
 }
 
+TEST(PeerTable_MeasuredLatencySurvivesUpsert) {
+    zeromesh::net::PeerTable table;
+    zeromesh::net::Peer p{
+        .id = "node-beta",
+        .hostname = "laptop-2",
+        .ip_address = "192.168.1.51",
+        .grpc_port = 8980,
+        .latency = std::chrono::milliseconds(0),
+    };
+    table.Upsert(p);
+    table.RecordMeasuredLatency("node-beta", std::chrono::milliseconds(42));
+    ASSERT_EQ(table.Get("node-beta")->latency, std::chrono::milliseconds(42));
+
+    p.latency = std::chrono::milliseconds(1);  // discovery placeholder
+    p.cores = 16;
+    table.Upsert(p);
+    ASSERT_EQ(table.Get("node-beta")->latency, std::chrono::milliseconds(42));
+    ASSERT_EQ(table.Get("node-beta")->cores, 16);
+}
+
 TEST(PeerTable_FastPreemptionSignal) {
     zeromesh::net::PeerTable table;
 

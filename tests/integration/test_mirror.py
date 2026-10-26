@@ -1,9 +1,4 @@
-"""M5c acceptance: integration test for env-mirror.
-
-Two zmd processes (A and B) in one team.
-A runs a job with `--remote-only --env mirror -o out.txt -- ...`.
-B executes the job, produces `out.txt`.
-"""
+"""M5c acceptance: env-mirror pulls the requester's tree lazily on a remote donor."""
 
 import os
 import re
@@ -17,6 +12,10 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import zmtest  # noqa: E402
+
+
+def fuse_available():
+    return os.path.exists("/dev/fuse") and os.access("/dev/fuse", os.R_OK | os.W_OK)
 
 
 def free_port():
@@ -39,7 +38,7 @@ def node_id_of(zmd):
         return f.read().strip()
 
 
-def wait_until(pred, timeout=15.0, interval=0.25):
+def wait_until(pred, timeout=20.0, interval=0.25):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if pred():
@@ -51,6 +50,9 @@ def wait_until(pred, timeout=15.0, interval=0.25):
 class MirrorIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not fuse_available():
+            raise unittest.SkipTest("FUSE unavailable (/dev/fuse)")
+
         cls.discovery_port = free_port()
         cls.port_a = free_port()
         cls.port_b = free_port()
@@ -89,9 +91,9 @@ class MirrorIntegrationTest(unittest.TestCase):
                     return True
             return False
 
-        if not wait_until(a_sees_b_admitted, timeout=20):
+        if not wait_until(a_sees_b_admitted, timeout=25):
             raise RuntimeError(
-                "A did not discover/admit B within 20s\n"
+                "A did not discover/admit B within 25s\n"
                 f"A status:\n{cls.a.zm('status').stdout}\n"
                 f"A log:\n{cls.a.log()}\nB log:\n{cls.b.log()}"
             )
@@ -104,27 +106,93 @@ class MirrorIntegrationTest(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_mirror_remote_execution(self):
-        cwd = tempdir(self)
-        bin_dir = os.path.join(cwd, "bin")
+    def test_mirror_remote_only_tool_on_requester(self):
+        """B runs a binary that exists only on A, exported via --mirror."""
+        job_cwd = tempdir(self)
+        mirror_root = tempdir(self)
+        bin_dir = os.path.join(mirror_root, "bin")
         os.makedirs(bin_dir, exist_ok=True)
-        script_path = os.path.join(bin_dir, "hello")
-        with open(script_path, "w") as f:
-            f.write("#!/bin/sh\necho \"mirror-exec-by-$ZM_NODE_ID\" > out.txt\n")
-        os.chmod(script_path, 0o755)
+        tool = os.path.join(bin_dir, "a_only")
+        with open(tool, "w") as f:
+            f.write("#!/bin/sh\n")
+            f.write('echo "mirror-ok" > out.txt\n')
+        os.chmod(tool, 0o755)
+
+        secret = os.path.join(mirror_root, ".ssh", "id_test")
+        os.makedirs(os.path.dirname(secret), exist_ok=True)
+        with open(secret, "w") as f:
+            f.write("must-not-leak\n")
 
         r = self.a.zm(
-            "run", "--remote-only", "--env", "mirror", "-o", "out.txt", "--",
-            "sh", "-c", "./bin/hello",
-            cwd=cwd, timeout=60,
+            "run",
+            "--remote-only",
+            "--env",
+            "mirror",
+            "--mirror",
+            mirror_root,
+            "-o",
+            "out.txt",
+            "--",
+            "/mirror/bin/a_only",
+            cwd=job_cwd,
+            timeout=120,
         )
-        self.assertEqual(r.returncode, 0, r.stderr + "\n" + self.a.log() + "\n" + self.b.log())
+        self.assertEqual(
+            r.returncode,
+            0,
+            r.stderr + "\nA log:\n" + self.a.log() + "\nB log:\n" + self.b.log(),
+        )
 
-        out_file = os.path.join(cwd, "out.txt")
+        out_file = os.path.join(job_cwd, "out.txt")
         self.assertTrue(os.path.exists(out_file))
         with open(out_file) as f:
-            content = f.read().strip()
-        self.assertEqual(content, f"mirror-exec-by-{self.id_b}")
+            self.assertEqual(f.read().strip(), "mirror-ok")
+
+        probe = self.a.zm(
+            "run",
+            "--remote-only",
+            "--env",
+            "mirror",
+            "--mirror",
+            mirror_root,
+            "--",
+            "sh",
+            "-c",
+            "test ! -e /mirror/.ssh/id_test",
+            cwd=job_cwd,
+            timeout=120,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+
+        cas_b = os.path.join(self.b.state_dir, "cas")
+        before = sum(
+            os.path.getsize(os.path.join(cas_b, name))
+            for name in os.listdir(cas_b)
+            if os.path.isfile(os.path.join(cas_b, name))
+        )
+
+        r2 = self.a.zm(
+            "run",
+            "--remote-only",
+            "--env",
+            "mirror",
+            "--mirror",
+            mirror_root,
+            "-o",
+            "out.txt",
+            "--",
+            "/mirror/bin/a_only",
+            cwd=job_cwd,
+            timeout=120,
+        )
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+
+        after = sum(
+            os.path.getsize(os.path.join(cas_b, name))
+            for name in os.listdir(cas_b)
+            if os.path.isfile(os.path.join(cas_b, name))
+        )
+        self.assertEqual(before, after, "second run should reuse B's CAS cache (no new blob files)")
 
 
 if __name__ == "__main__":

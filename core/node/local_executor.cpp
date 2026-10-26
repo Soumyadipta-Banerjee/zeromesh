@@ -1,9 +1,11 @@
 #include "node/local_executor.hpp"
 
 #include "node/convert.hpp"
+#include "node/requester_blob_source.hpp"
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
 
 namespace zeromesh::node {
 
@@ -55,10 +57,27 @@ v1::TaskState StateFromResult(const v1::TaskResult& r) {
 
 } // namespace
 
+namespace {
+
+std::string RequesterFromTaskId(const std::string& task_id) {
+    const size_t slash = task_id.find('/');
+    if (slash == std::string::npos) return {};
+    return task_id.substr(0, slash);
+}
+
+} // namespace
+
 LocalExecutor::LocalExecutor(std::shared_ptr<exec::SandboxRunner> runner, std::shared_ptr<plugin::Registry> registry,
-                             std::string node_id, int slots)
-    : runner_(std::move(runner)), registry_(std::move(registry)), node_id_(std::move(node_id)) {
-    int n = std::max(1, slots);
+                             std::string node_id, int slots, std::filesystem::path scratch_root,
+                             std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory)
+    : runner_(std::move(runner)),
+      registry_(std::move(registry)),
+      node_id_(std::move(node_id)),
+      scratch_root_(std::move(scratch_root)),
+      cas_(std::move(cas)),
+      client_factory_(std::move(client_factory)) {
+    core_capacity_ = std::max(1, slots);
+    int n = core_capacity_;
     workers_.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
         workers_.emplace_back([this](std::stop_token st) { Worker(st); });
@@ -136,23 +155,41 @@ std::vector<LocalExecutor::ActiveItem> LocalExecutor::ListActive() const {
     return out;
 }
 
+int LocalExecutor::CoresInUse() const {
+    std::lock_guard lock(mu_);
+    return cores_in_use_;
+}
+
 void LocalExecutor::Worker(std::stop_token st) {
     for (;;) {
         std::shared_ptr<Item> item;
         {
             std::unique_lock lock(mu_);
-            if (!cv_.wait(lock, st, [this] { return !queue_.empty(); })) return;
+            if (!cv_.wait(lock, st, [this] {
+                    if (queue_.empty()) return false;
+                    int need = std::max(queue_.front()->spec.resources().cores(), 1);
+                    if (need > core_capacity_) need = core_capacity_;
+                    return cores_in_use_ + need <= core_capacity_;
+                })) {
+                return;
+            }
             item = queue_.front();
             queue_.pop_front();
+            int need = std::max(item->spec.resources().cores(), 1);
+            if (need > core_capacity_) need = core_capacity_;
+            item->cores_held = need;
+            cores_in_use_ += need;
             item->started = true;
         }
         v1::TaskResult result = Run(*item);
         const v1::TaskState state = StateFromResult(result);
         {
             std::lock_guard lock(mu_);
+            cores_in_use_ -= item->cores_held;
             auto it = items_.find(item->task_id);
             if (it != items_.end() && it->second == item) items_.erase(it);
         }
+        cv_.notify_all();
         RememberFinished(item->task_id, item->spec, state);
         if (item->cb.on_done) item->cb.on_done(std::move(result));
     }
@@ -171,6 +208,32 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
     ctx.task_id = item.task_id;
     ctx.env.params.insert(spec.env_spec().params().begin(), spec.env_spec().params().end());
     ctx.env.argv.assign(spec.argv().begin(), spec.argv().end());
+
+    const std::string requester = RequesterFromTaskId(item.task_id);
+    ctx.requester_node_id = requester.empty() ? node_id_ : requester;
+
+    std::error_code ec;
+    const auto scratch =
+        scratch_root_ / store::CasStore::ComputeDigest(item.task_id).hash;
+    std::filesystem::create_directories(scratch, ec);
+    ctx.scratch_dir = scratch;
+
+    std::unique_ptr<plugin::IBlobSource> blob_source;
+    if (env_name == "mirror") {
+        if (ctx.requester_node_id == node_id_ || requester.empty()) {
+            blob_source = std::make_unique<LocalCasBlobSource>(cas_);
+        } else {
+            if (!client_factory_) {
+                return Failed(node_id_, "mirror env: no peer client factory configured");
+            }
+            auto client = client_factory_(ctx.requester_node_id);
+            if (!client) {
+                return Failed(node_id_, "mirror env: requester " + ctx.requester_node_id + " is not reachable");
+            }
+            blob_source = std::make_unique<RequesterBlobSource>(cas_, std::move(client));
+        }
+        ctx.blob_source = blob_source.get();
+    }
 
     try {
         plugin::Availability avail = env->Check(ctx.env);
@@ -197,6 +260,10 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
         rs.allow_network = spec.policy().allow_network();
         rs.sandbox_env = std::move(*prepared.value);
         rs.node_id = node_id_;
+        rs.cores = spec.resources().cores();
+        if (spec.resources().mem_bytes() > 0) {
+            rs.mem_bytes = static_cast<uint64_t>(spec.resources().mem_bytes());
+        }
 
         exec::LogSink sink;
         if (item.cb.on_log) sink = [&item](int fd, std::string_view chunk) { item.cb.on_log(fd, chunk); };
@@ -209,8 +276,10 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
             return Failed(node_id_, std::string("sandbox: ") + e.what());
         }
         env->Release(ctx);
+        std::filesystem::remove_all(scratch, ec);
         return ToProto(rr, node_id_);
     } catch (const std::exception& e) {
+        std::filesystem::remove_all(scratch, ec);
         return Failed(node_id_, std::string("env provider '") + env_name + "': " + e.what());
     }
 }

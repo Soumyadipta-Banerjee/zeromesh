@@ -58,6 +58,9 @@ public:
 
     std::optional<v1::PeerInfo> Ping(std::string* error = nullptr);
 
+    // Round-trip time of a Ping RPC (wall clock), or nullopt on failure.
+    std::optional<std::chrono::milliseconds> PingRtt(std::string* error = nullptr);
+
     // Offers a task; `needed` lists every blob the run reads (the input tree's blobs).
     // nullopt (with *error) when the call itself failed.
     std::optional<v1::OfferReply> Offer(const std::string& task_id, const v1::TaskSpec& spec,

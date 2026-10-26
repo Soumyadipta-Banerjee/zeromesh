@@ -5,6 +5,7 @@
 #include "store/store.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -29,6 +30,8 @@ struct RunSpec {
     bool allow_network{false};
     plugin::SandboxEnv sandbox_env;    // from the task's environment provider
     std::string node_id;               // exported as ZM_NODE_ID
+    int cores{0};                      // 0 means 1 when applying a CPU cgroup quota
+    uint64_t mem_bytes{0};             // 0 means no memory cap
 };
 
 struct OutputEntry {
@@ -51,7 +54,18 @@ struct RunResult {
     std::vector<OutputEntry> outputs;
     std::chrono::milliseconds duration{0};
     std::string error;                 // set when the sandbox itself could not run
+    bool memory_enforced{false};
+    bool cpu_enforced{false};
+    std::string resource_note;         // e.g. CPU not capped without cgroups
 };
+
+// Whether this process can create per-task cgroups (walks up from /proc/self/cgroup).
+struct ResourceEnforcementStatus {
+    bool cgroup_memory{false};
+    bool cgroup_cpu{false};
+    bool rlimit_memory{true};
+};
+[[nodiscard]] ResourceEnforcementStatus ProbeSandboxResourceEnforcement();
 
 // fd is 1 (stdout) or 2 (stderr). May be empty.
 using LogSink = std::function<void(int fd, std::string_view chunk)>;

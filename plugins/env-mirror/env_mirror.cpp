@@ -1,7 +1,9 @@
 #include "plugins/env-mirror/env_mirror.hpp"
+
 #include "store/store.hpp"
 
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 
@@ -15,23 +17,27 @@ bool SafeTaskIdForPath(const std::string& task_id) {
     return !task_id.empty();
 }
 
-// Task ids come from peers and contain '/' (job/task); never use them as path components.
 fs::path MirrorScratchBase(const plugin::TaskContext& ctx) {
     if (!ctx.scratch_dir.empty()) return ctx.scratch_dir;
     return fs::temp_directory_path() / ("zm-mirror-" + store::CasStore::ComputeDigest(ctx.task_id).hash);
 }
 
+std::string RootDigestFromParams(const std::map<std::string, std::string>& params) {
+    auto it = params.find("root_digest");
+    if (it != params.end() && !it->second.empty()) return it->second;
+    auto it2 = params.find("manifest_digest");
+    if (it2 != params.end() && !it2->second.empty()) return it2->second;
+    return {};
+}
+
+std::string RootDigest(const plugin::TaskContext& ctx) { return RootDigestFromParams(ctx.env.params); }
+
 class MirrorEnv final : public plugin::IEnvProvider {
 public:
-    explicit MirrorEnv(std::shared_ptr<IChunkSource> fallback_source)
-        : fallback_source_(std::move(fallback_source)) {}
-
     ~MirrorEnv() override {
         std::lock_guard<std::mutex> lock(mu_);
         for (auto& [task_id, fuse_inst] : active_mounts_) {
-            if (fuse_inst) {
-                fuse_inst->Unmount();
-            }
+            if (fuse_inst) fuse_inst->Unmount();
         }
         active_mounts_.clear();
     }
@@ -52,6 +58,10 @@ public:
             return {.ok = false, .reason = "requester is not reachable"};
         }
 
+        if (RootDigestFromParams(params.params).empty()) {
+            return {.ok = false, .reason = "mirror env has no root_digest (build a manifest on the requester)"};
+        }
+
         return {.ok = true, .reason = {}};
     }
 
@@ -63,6 +73,15 @@ public:
             return {.value = std::nullopt, .error = "invalid task_id for mirror scratch path"};
         }
 
+        const std::string root_digest = RootDigest(ctx);
+        if (root_digest.empty()) {
+            return {.value = std::nullopt, .error = "mirror env has no root_digest"};
+        }
+        if (!ctx.blob_source) {
+            return {.value = std::nullopt,
+                    .error = "mirror env has no blob source to fetch files from the requester"};
+        }
+
         fs::path base_scratch = MirrorScratchBase(ctx);
         fs::path mount_dir = base_scratch / "mirror";
         fs::path cache_dir = base_scratch / "mirror_cache";
@@ -70,42 +89,11 @@ public:
         fs::create_directories(mount_dir, ec);
         fs::create_directories(cache_dir, ec);
 
-        std::shared_ptr<IChunkSource> chunk_source;
-        if (ctx.blob_source) {
-            chunk_source = std::make_shared<BlobSourceChunkSource>(ctx.blob_source);
-        } else if (fallback_source_) {
-            chunk_source = fallback_source_;
-        } else {
-            // Default to local CAS store if available
-            auto cas = std::make_shared<store::CasStore>();
-            chunk_source = std::make_shared<CasChunkSource>(cas);
-        }
-
+        auto chunk_source = std::make_shared<BlobSourceChunkSource>(ctx.blob_source);
         auto cache = std::make_shared<MirrorCache>(cache_dir, 512 * 1024 * 1024);
         auto fuse_inst = std::make_shared<MirrorFuse>(mount_dir, chunk_source, cache);
 
-        std::string root_digest;
-        auto it = ctx.env.params.find("root_digest");
-        if (it != ctx.env.params.end()) {
-            root_digest = it->second;
-        } else {
-            auto it2 = ctx.env.params.find("manifest_digest");
-            if (it2 != ctx.env.params.end()) {
-                root_digest = it2->second;
-            }
-        }
-
-        bool mounted = false;
-        if (!root_digest.empty()) {
-            mounted = fuse_inst->Mount(root_digest);
-        } else {
-            auto empty_root = std::make_shared<VirtualNode>();
-            empty_root->name = "";
-            empty_root->is_directory = true;
-            mounted = fuse_inst->MountWithRoot(std::move(empty_root));
-        }
-
-        if (!mounted) {
+        if (!fuse_inst->Mount(root_digest)) {
             return {.value = std::nullopt, .error = "failed to mount FUSE mirror filesystem"};
         }
 
@@ -115,21 +103,12 @@ public:
         }
 
         plugin::SandboxEnv env;
-        // Bind the entire mirror tree into the sandbox read-only
-        env.binds.push_back({
-            .host = mount_dir.string(),
-            .sandbox = mount_dir.string(),
-            .read_only = true,
-        });
-
-        // Also bind to /mirror convenience path
         env.binds.push_back({
             .host = mount_dir.string(),
             .sandbox = "/mirror",
             .read_only = true,
         });
 
-        // If the mirror exported /usr or /opt, bind them directly; otherwise fallback to donor /usr
         if (fs::exists(mount_dir / "usr", ec)) {
             env.binds.push_back({
                 .host = (mount_dir / "usr").string(),
@@ -152,7 +131,6 @@ public:
             });
         }
 
-        // usr-merge layout
         for (const char* p : {"/bin", "/sbin", "/lib", "/lib32", "/lib64"}) {
             if (fs::is_symlink(p, ec)) {
                 fs::path target = fs::read_symlink(p, ec);
@@ -186,23 +164,24 @@ public:
 
         if (!SafeTaskIdForPath(ctx.task_id)) return;
 
-        fs::path mount_dir = MirrorScratchBase(ctx) / "mirror";
+        fs::path base_scratch = MirrorScratchBase(ctx);
+        fs::path mount_dir = base_scratch / "mirror";
         if (MirrorFuse::IsPathMounted(mount_dir)) {
             MirrorFuse::FusermountUnmountLazy(mount_dir);
         }
+        std::error_code ec;
+        fs::remove_all(base_scratch, ec);
     }
 
 private:
-    std::shared_ptr<IChunkSource> fallback_source_;
     std::mutex mu_;
     std::unordered_map<std::string, std::shared_ptr<MirrorFuse>> active_mounts_;
 };
 
 } // namespace
 
-std::unique_ptr<plugin::IEnvProvider> MakeMirrorEnv(
-    std::shared_ptr<IChunkSource> fallback_chunk_source) {
-    return std::make_unique<MirrorEnv>(std::move(fallback_chunk_source));
+std::unique_ptr<plugin::IEnvProvider> MakeMirrorEnv() {
+    return std::make_unique<MirrorEnv>();
 }
 
 } // namespace zeromesh::mirror

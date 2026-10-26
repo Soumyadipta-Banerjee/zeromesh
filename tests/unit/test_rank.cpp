@@ -34,8 +34,9 @@ std::vector<std::string> Ids(const std::vector<Candidate>& cs) {
 
 TEST(RankPrefersFewerMissingBytes) {
     zeromesh::v1::TaskSpec spec;
-    // Same free slots → missing_bytes breaks the tie.
-    auto ranked = Rank(spec, {Node("unknown", -1), Node("big", 5000), Node("small", 10), Node("zero", 0)});
+    // Same free slots → missing_bytes breaks the tie (-1 ranks as worst-case input size).
+    constexpr int64_t kInput = 10000;
+    auto ranked = Rank(spec, {Node("unknown", -1), Node("big", 5000), Node("small", 10), Node("zero", 0)}, kInput);
     ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"zero", "small", "big", "unknown"}));
 
     Candidate busy = Node("busy", -1), battery = Node("battery", -1), far = Node("far", -1);
@@ -57,10 +58,31 @@ TEST(RankPrefersMoreFreeSlots) {
     peer.cores_free = 20;
     peer.in_flight = 0;
     // Peer has more free slots despite unknown missing_bytes — do not pack local first.
-    ASSERT_EQ(Ids(Rank(spec, {local, peer})), (std::vector<std::string>{"peer", "local"}));
+    ASSERT_EQ(Ids(Rank(spec, {local, peer}, 1'000'000)), (std::vector<std::string>{"peer", "local"}));
 
     peer.in_flight = 10;  // 10 slots left on peer, 12 on local
-    ASSERT_EQ(Ids(Rank(spec, {local, peer})), (std::vector<std::string>{"local", "peer"}));
+    ASSERT_EQ(Ids(Rank(spec, {local, peer}, 1'000'000)), (std::vector<std::string>{"local", "peer"}));
+}
+
+TEST(RankIdleRemoteBeatsBusyLocalOnSmallInput) {
+    zeromesh::v1::TaskSpec spec;
+    Candidate local = Node("local", 0, true);
+    local.cores_total = 8;
+    local.in_flight = 7;  // one slot left
+    Candidate remote = Node("remote", -1);
+    remote.cores_total = 8;
+    remote.in_flight = 0;  // eight slots
+    ASSERT_EQ(Ids(Rank(spec, {local, remote}, 512)), (std::vector<std::string>{"remote", "local"}));
+}
+
+TEST(RankHugeInputPrefersNodeWithInputs) {
+    zeromesh::v1::TaskSpec spec;
+    constexpr int64_t kHuge = 50'000'000'000LL;
+    Candidate local = Node("local", 0, true);
+    Candidate cold = Node("cold", -1);
+    Candidate warm = Node("warm", 0);
+    // Equal capacity; huge worst-case transfer cost should not beat a peer that already has the tree.
+    ASSERT_EQ(Ids(Rank(spec, {local, cold, warm}, kHuge)), (std::vector<std::string>{"local", "warm", "cold"}));
 }
 
 TEST(RankIgnoresLiveCoresFreeWhenBusy) {
