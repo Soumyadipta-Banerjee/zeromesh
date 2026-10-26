@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <unistd.h>
 
 namespace zeromesh::store {
 
@@ -135,6 +136,14 @@ CasStore::CasStore(std::filesystem::path base_path) {
     std::filesystem::create_directories(ac_dir_);
 }
 
+bool CasStore::IsValidHash(std::string_view hash) {
+    if (hash.size() != 64) return false;
+    for (char c : hash) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
 Digest CasStore::ComputeDigest(std::string_view data) {
     Sha256Engine ctx;
     ctx.Update(reinterpret_cast<const uint8_t*>(data.data()), data.size());
@@ -188,16 +197,23 @@ Digest CasStore::PutBlob(std::string_view data) {
 
 Digest CasStore::PutBlobFile(const std::filesystem::path& src_file) {
     Digest digest = ComputeFileDigest(src_file);
+    if (digest.hash.empty()) {
+        return digest;
+    }
     auto target = blobs_dir_ / digest.hash;
     if (std::filesystem::exists(target)) {
         return digest;
     }
 
-    std::filesystem::copy_file(src_file, target, std::filesystem::copy_options::overwrite_existing);
+    // Copy then rename, so a concurrent reader never sees a partial blob.
+    auto tmp_target = blobs_dir_ / ("upload-" + digest.hash + "-" + std::to_string(::getpid()) + ".tmp");
+    std::filesystem::copy_file(src_file, tmp_target, std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::rename(tmp_target, target);
     return digest;
 }
 
 std::optional<std::string> CasStore::GetBlob(const std::string& hash) const {
+    if (!IsValidHash(hash)) return std::nullopt;
     {
         std::lock_guard<std::mutex> lock(mem_cache_mutex_);
         auto it = mem_cache_.find(hash);
@@ -218,6 +234,7 @@ std::optional<std::string> CasStore::GetBlob(const std::string& hash) const {
 }
 
 bool CasStore::HasBlob(const std::string& hash) const {
+    if (!IsValidHash(hash)) return false;
     {
         std::lock_guard<std::mutex> lock(mem_cache_mutex_);
         if (mem_cache_.contains(hash)) return true;
@@ -226,10 +243,12 @@ bool CasStore::HasBlob(const std::string& hash) const {
 }
 
 std::filesystem::path CasStore::GetBlobPath(const std::string& hash) const {
+    if (!IsValidHash(hash)) return {};
     return blobs_dir_ / hash;
 }
 
 bool CasStore::PutActionResult(const std::string& action_hash, std::string_view serialized_result) {
+    if (!IsValidHash(action_hash)) return false;
     auto target = ac_dir_ / action_hash;
     std::ofstream out(target, std::ios::binary);
     if (!out.is_open()) return false;
@@ -238,6 +257,7 @@ bool CasStore::PutActionResult(const std::string& action_hash, std::string_view 
 }
 
 std::optional<std::string> CasStore::GetActionResult(const std::string& action_hash) const {
+    if (!IsValidHash(action_hash)) return std::nullopt;
     auto target = ac_dir_ / action_hash;
     if (!std::filesystem::exists(target)) {
         return std::nullopt;
