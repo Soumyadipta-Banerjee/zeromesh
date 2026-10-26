@@ -1,6 +1,5 @@
 #include "tests/test_framework.hpp"
 #include "discovery/peer_table.hpp"
-#include "scheduler/scheduler.hpp"
 #include "ui/tui.hpp"
 
 #include <iostream>
@@ -8,7 +7,6 @@
 
 TEST(TerminalUI_PrintStatusSnapshotWithPeers) {
     using namespace zeromesh::discovery;
-    using namespace zeromesh::scheduler;
     using namespace zeromesh::ui;
 
     auto peer_table = std::make_shared<PeerTable>();
@@ -39,8 +37,7 @@ TEST(TerminalUI_PrintStatusSnapshotWithPeers) {
         .draining_reason = "Low battery"
     });
 
-    auto scheduler = std::make_shared<Scheduler>(peer_table);
-    TerminalUI tui(peer_table, scheduler);
+    TerminalUI tui(peer_table);
 
     // Capture standard output
     std::stringstream buffer;
@@ -60,12 +57,10 @@ TEST(TerminalUI_PrintStatusSnapshotWithPeers) {
 
 TEST(TerminalUI_EmptyClusterHandling) {
     using namespace zeromesh::discovery;
-    using namespace zeromesh::scheduler;
     using namespace zeromesh::ui;
 
     auto peer_table = std::make_shared<PeerTable>();
-    auto scheduler = std::make_shared<Scheduler>(peer_table);
-    TerminalUI tui(peer_table, scheduler);
+    TerminalUI tui(peer_table);
 
     std::stringstream buffer;
     std::streambuf* prev_cout = std::cout.rdbuf(buffer.rdbuf());
@@ -76,5 +71,5 @@ TEST(TerminalUI_EmptyClusterHandling) {
     std::string out = buffer.str();
 
     ASSERT_TRUE(out.find("No remote peer nodes discovered yet") != std::string::npos);
-    ASSERT_TRUE(out.find("239.255.42.99:8982") != std::string::npos);
+    ASSERT_TRUE(out.find("239.255.42.99:8988") != std::string::npos);
 }
