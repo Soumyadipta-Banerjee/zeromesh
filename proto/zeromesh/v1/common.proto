@@ -121,6 +121,17 @@ message JobStatus {
   bool done = 5;
 }
 
+// Live task row for ClientApi.ListActivity / zm monitor.
+message ActiveTask {
+  string job_id = 1;          // requester-side job id (empty for donor-only view)
+  string task_name = 2;
+  TaskState state = 3;
+  string role = 4;            // "submitted" | "executing"
+  repeated string argv = 5;
+  string detail = 6;          // executed_by, placer note, etc.
+  int32 cores = 7;
+}
+
 message PeerInfo {
   string node_id = 1;
   string hostname = 2;

@@ -111,6 +111,16 @@ void LocalExecutor::Cancel(const std::string& task_id) {
     if (dequeued->cb.on_done) dequeued->cb.on_done(Cancelled(node_id_));
 }
 
+std::vector<LocalExecutor::ActiveItem> LocalExecutor::ListActive() const {
+    std::lock_guard lock(mu_);
+    std::vector<ActiveItem> out;
+    out.reserve(items_.size());
+    for (const auto& [id, item] : items_) {
+        out.push_back(ActiveItem{item->task_id, item->spec, item->started});
+    }
+    return out;
+}
+
 void LocalExecutor::Worker(std::stop_token st) {
     for (;;) {
         std::shared_ptr<Item> item;

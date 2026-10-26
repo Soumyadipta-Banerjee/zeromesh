@@ -23,6 +23,12 @@ grpc::Status ListPeers(Client& client, v1::PeerList* out) {
     return client.stub().ListPeers(&ctx, v1::Empty{}, out);
 }
 
+grpc::Status ListActivity(Client& client, v1::ActivitySnapshot* out) {
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    return client.stub().ListActivity(&ctx, v1::Empty{}, out);
+}
+
 } // namespace
 
 int StatusCommand(Client& client) {
@@ -30,12 +36,19 @@ int StatusCommand(Client& client) {
     grpc::Status s = ListPeers(client, &peers);
     if (!s.ok()) return ReportRpcError("cannot list peers", s);
     RenderStatus(peers, std::cout, isatty(STDOUT_FILENO) != 0);
+
+    v1::ActivitySnapshot activity;
+    s = ListActivity(client, &activity);
+    if (s.ok()) {
+        RenderActivity(activity, std::cout, isatty(STDOUT_FILENO) != 0);
+    }
+    // Older daemons without ListActivity: peers-only status still succeeds.
     return 0;
 }
 
 int MonitorCommand(Client& client) {
     struct sigaction sa {};
-    sa.sa_handler = OnInterrupt;  // no SA_RESTART: poll() returns EINTR at once
+    sa.sa_handler = OnInterrupt;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
@@ -47,6 +60,16 @@ int MonitorCommand(Client& client) {
             if (s.ok()) return peers;
             *unavailable = s.error_code() == grpc::StatusCode::UNAVAILABLE;
             *error = s.error_message();
+            return std::nullopt;
+        },
+        [&client](std::string* error, bool* unavailable) -> std::optional<v1::ActivitySnapshot> {
+            v1::ActivitySnapshot activity;
+            grpc::Status s = ListActivity(client, &activity);
+            if (s.ok()) return activity;
+            *unavailable = s.error_code() == grpc::StatusCode::UNAVAILABLE;
+            *error = s.error_message();
+            // UNIMPLEMENTED on old daemon → empty activity, keep monitor alive.
+            if (s.error_code() == grpc::StatusCode::UNIMPLEMENTED) return v1::ActivitySnapshot{};
             return std::nullopt;
         },
         g_stop);
