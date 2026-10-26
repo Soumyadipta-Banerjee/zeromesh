@@ -35,11 +35,12 @@ small core, with features attached through narrow plugin interfaces.
 
 | Module | Status |
 |---|---|
-| CAS store + Merkle | Real; moving to `core/store` |
-| Sandbox executor (bwrap, SCHED_IDLE) | Real; moving to `core/exec` |
-| LAN discovery + peer table | Real but unauthenticated; moving to `core/net` |
-| TUI | Real; becomes a ClientApi client |
-| Daemon, ClientApi, NodeApi, placement, team security | **Not built yet** (M2–M3) |
+| CAS store + Merkle | Real (`core/store`) |
+| Sandbox executor (bwrap, SCHED_IDLE) | Real (`core/exec`) |
+| LAN discovery + peer table | Real but unauthenticated (`core/net`); not started by `zmd` until M3 |
+| `zm` CLI + TUI (`cli/`) | Real; a ClientApi client (`run`, `status`, `monitor`, `version`) |
+| `zmd` daemon, ClientApi, job manager, local execution | Real (`core/node`, `zmd/`); tests in `tests/integration/test_local_daemon.py` |
+| NodeApi, placement, team security | **Not built yet** (M3) |
 | FUSE filesystem | Frozen until M5 (`env-mirror` plugin) |
 | REAPI front-end | Frozen until M6 (it was a print-only stub) |
 | DHT, DSM, GPU, Byzantine/TPM, torrent GUI | Frozen; see [`frozen/README.md`](frozen/README.md) |
@@ -50,9 +51,9 @@ Each milestone is done **only** when its acceptance test passes.
 
 - [ ] **M0: Honesty pass.** *(Local build and tests green; tick once CI passes on GitHub.)* Rewrite PLAN.md and README.md to match the audit and the design. Move frozen modules out of the build. Make CI install gRPC and run the tests.
   *Acceptance:* CI green on a clean Ubuntu runner. PLAN.md has no `[x]` on unimplemented work. README describes only what works.
-- [ ] **M1: Contracts.** v1 protos, plugin interfaces, generated C++ and Python stubs.
+- [x] **M1: Contracts.** v1 protos, plugin interfaces, generated C++ and Python stubs.
   *Acceptance:* a Python script submits a 3-task job and receives results and events.
-- [ ] **M2: Core relocation.** Keep modules moved into `core/`. Real telemetry. Persistent node IDs. `zmd` runs as a long-lived daemon with a real `ClientApi` and local execution.
+- [x] **M2: Core relocation.** Keep modules moved into `core/`. Real telemetry. Persistent node IDs. `zmd` runs as a long-lived daemon with a real `ClientApi` and local execution.
   *Acceptance:* `zm run -- echo hi` prints `hi` with exit 0. Two runs with different commands give two real results, with no false cache hits. Killing `zmd` and restarting it keeps the node ID.
 - [ ] **M3: Remote execution + security.** Team create/join, admission, mTLS, `NodeApi`, blob transfer, `env-host` plugin, placement.
   *Acceptance:* **Two machines:** on A, `zm run --remote-only -- sh -c 'hostname > out.txt'` with output `out.txt` produces a file containing **B's** hostname. A third machine not in the team never appears in `zm status` and can't call `NodeApi`.

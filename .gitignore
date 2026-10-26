@@ -20,3 +20,6 @@ subprojects/packagecache/
 
 # ZeroMesh local runtime cache
 .zeromesh/
+
+# Python
+__pycache__/
