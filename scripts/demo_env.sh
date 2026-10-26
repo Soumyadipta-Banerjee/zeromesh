@@ -44,8 +44,14 @@ _path_extra=""
 if [ -d "$DEPS/usr/bin" ]; then
   _path_extra="$DEPS/usr/bin:"
 fi
-export PATH="/usr/bin:/bin:${_path_extra}$ROOT/build:$PATH"
-export ZM_BUILD_DIR="$ROOT/build"
+_build_dir="$ROOT/build"
+if [ -x "$ROOT/build-verify/zm" ]; then
+  _build_dir="$ROOT/build-verify"
+elif [ ! -x "$ROOT/build/zm" ] && [ -x "$ROOT/build-verify/zm" ]; then
+  _build_dir="$ROOT/build-verify"
+fi
+export PATH="/usr/bin:/bin:${_path_extra}${_build_dir}:$PATH"
+export ZM_BUILD_DIR="$_build_dir"
 if [ -f "$ROOT/.venv/bin/activate" ]; then
   # shellcheck disable=SC1091
   source "$ROOT/.venv/bin/activate"
