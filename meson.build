@@ -15,6 +15,7 @@ openssl_dep = dependency('openssl')
 protobuf_dep = dependency('protobuf')
 grpc_dep = dependency('grpc++')
 sodium_dep = dependency('libsodium')
+fuse3_dep = dependency('fuse3')
 
 protoc = find_program('protoc')
 grpc_cpp_plugin = find_program('grpc_cpp_plugin')
@@ -35,7 +36,7 @@ zm_proto_dep = declare_dependency(
   dependencies: [protobuf_dep, grpc_dep],
 )
 
-common_deps = [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep, sodium_dep, zm_proto_dep]
+common_deps = [threads_dep, dl_dep, openssl_dep, protobuf_dep, grpc_dep, sodium_dep, fuse3_dep, zm_proto_dep]
 
 core_sources = files(
   'core/store/store.cpp',
@@ -63,6 +64,10 @@ core_sources = files(
   'core/sched/rank.cpp',
   'core/sched/placer.cpp',
   'plugins/env-host/env_host.cpp',
+  'plugins/env-mirror/deny_list.cpp',
+  'plugins/env-mirror/mirror_cache.cpp',
+  'plugins/env-mirror/mirror_fuse.cpp',
+  'plugins/env-mirror/env_mirror.cpp',
   'core/node/action_cache.cpp',
   'core/node/local_executor.cpp',
   'core/node/job_manager.cpp',
@@ -120,6 +125,7 @@ test_bin = executable('unit_tests',
     'tests/unit/test_node_api.cpp',
     'tests/unit/test_rank.cpp',
     'tests/unit/test_placer.cpp',
+    'tests/unit/test_env_mirror.cpp',
   ),
   include_directories: inc,
   link_with: [zm_cli, zm_core],
@@ -135,8 +141,18 @@ env_host_module = shared_module('zm_env_host',
   files('plugins/env-host/env_host.cpp', 'plugins/env-host/entry.cpp'),
   include_directories: inc, name_prefix: 'lib')
 
+env_mirror_module = shared_module('zm_env_mirror',
+  files('plugins/env-mirror/deny_list.cpp',
+        'plugins/env-mirror/mirror_cache.cpp',
+        'plugins/env-mirror/mirror_fuse.cpp',
+        'plugins/env-mirror/env_mirror.cpp',
+        'plugins/env-mirror/entry.cpp'),
+  include_directories: inc,
+  dependencies: common_deps,
+  name_prefix: 'lib')
+
 test('all_unit_tests', test_bin,
-  depends: [fake_env, fake_env_badabi, env_host_module],
+  depends: [fake_env, fake_env_badabi, env_host_module, env_mirror_module],
   env: {'ZM_TEST_PLUGIN_DIR': meson.current_build_dir()},
 )
 
@@ -171,6 +187,28 @@ test('sdk_python', python3,
   },
   depends: [zmd_bin, zm_bin] + zm_proto_py,
   timeout: 120,
+  is_parallel: false,
+)
+
+test('integration_mirror', python3,
+  args: [files('tests/integration/test_mirror.py')],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.current_build_dir() / 'proto',
+  },
+  depends: [zmd_bin, zm_bin, env_mirror_module] + zm_proto_py,
+  timeout: 180,
+  is_parallel: false,
+)
+
+test('app_zm_render', python3,
+  args: ['-m', 'pytest', '-v', meson.project_source_root() / 'apps/zm-render/tests'],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.project_source_root() / 'apps/zm-render' + ':' + meson.project_source_root() / 'sdk/python' + ':' + meson.project_source_root() / 'tests/integration',
+  },
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 180,
   is_parallel: false,
 )
 

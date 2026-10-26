@@ -15,6 +15,7 @@ class IgnoreRules {
 public:
     static IgnoreRules ForRoot(const std::filesystem::path& root);
     static IgnoreRules None();
+    static IgnoreRules FromLines(const std::vector<std::string>& lines);
 
     // rel_path uses '/' separators and is relative to the root.
     [[nodiscard]] bool Ignored(std::string_view rel_path, bool is_dir) const;
