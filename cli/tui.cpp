@@ -31,6 +31,27 @@ std::string Power(const v1::PeerInfo& p) {
 
 std::string Clip(const std::string& s, size_t n) { return s.size() > n ? s.substr(0, n - 3) + "..." : s; }
 
+const char* StateName(v1::TaskState s) {
+    switch (s) {
+        case v1::QUEUED: return "QUEUED";
+        case v1::PLACED: return "PLACED";
+        case v1::RUNNING: return "RUNNING";
+        case v1::SUCCEEDED: return "DONE";
+        case v1::FAILED: return "FAILED";
+        case v1::CANCELLED: return "CANCEL";
+        default: return "?";
+    }
+}
+
+std::string ArgvJoin(const v1::ActiveTask& t, size_t max_len = 72) {
+    std::ostringstream ss;
+    for (int i = 0; i < t.argv_size(); ++i) {
+        if (i) ss << ' ';
+        ss << t.argv(i);
+    }
+    return Clip(ss.str(), max_len);
+}
+
 } // namespace
 
 void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color) {
@@ -72,7 +93,6 @@ void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color) {
         std::string host = p.hostname() + " (" + p.address() + ":" + std::to_string(p.node_port()) + ")";
         std::string cores = std::to_string(p.cores_free()) + "/" + std::to_string(p.cores_total());
         const char* state_color = p.state() == "active" ? green : yellow;
-        // First 8 chars of the node id, per the plan's status layout.
         std::string id8 = p.node_id().size() <= 8 ? p.node_id() : p.node_id().substr(0, 8);
         os << "  " << std::left << std::setw(10) << id8 << "  " << std::setw(24) << Clip(host, 24)
            << "  " << std::right << std::setw(9) << cores << "  " << std::setw(9) << Gib(p.mem_available()) << "  "
@@ -81,24 +101,74 @@ void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color) {
     }
 }
 
-int RunMonitor(const PeerFetcher& fetch, const std::atomic<bool>& stop) {
+void RenderActivity(const v1::ActivitySnapshot& activity, std::ostream& os, bool color) {
+    const char* bold = color ? "\033[1m" : "";
+    const char* dim = color ? "\033[90m" : "";
+    const char* cyan = color ? "\033[36m" : "";
+    const char* green = color ? "\033[32m" : "";
+    const char* reset = color ? "\033[0m" : "";
+
+    os << "\n" << bold << "Live tasks" << reset << "\n";
+    if (activity.tasks_size() == 0) {
+        os << "  " << dim << "(idle — no submitted or executing tasks)" << reset << "\n";
+        return;
+    }
+
+    os << "  " << std::left << std::setw(10) << "ROLE" << "  " << std::setw(8) << "STATE" << "  "
+       << std::setw(18) << "TASK" << "  " << std::setw(5) << "CORES" << "  COMMAND\n";
+
+    for (const auto& t : activity.tasks()) {
+        const char* role_color = t.role() == "executing" ? green : cyan;
+        std::string job = t.job_id().empty() ? "-" : (t.job_id().size() <= 8 ? t.job_id() : t.job_id().substr(0, 8));
+        std::string name = t.task_name();
+        if (name.size() > 18) name = name.substr(0, 15) + "...";
+        os << "  " << role_color << std::left << std::setw(10) << t.role() << reset << "  "
+           << std::setw(8) << StateName(t.state()) << "  " << std::setw(18) << name << "  " << std::right
+           << std::setw(5) << t.cores() << "  " << ArgvJoin(t) << "\n";
+        if (!t.detail().empty() || !t.job_id().empty()) {
+            os << "             " << dim;
+            if (!t.job_id().empty()) os << "job=" << job << "  ";
+            if (!t.detail().empty()) os << t.detail();
+            os << reset << "\n";
+        }
+    }
+}
+
+void RenderMonitor(const v1::PeerList& peers, const v1::ActivitySnapshot& activity, std::ostream& os, bool color) {
+    RenderStatus(peers, os, color);
+    RenderActivity(activity, os, color);
+}
+
+int RunMonitor(const PeerFetcher& fetch_peers, const ActivityFetcher& fetch_activity,
+               const std::atomic<bool>& stop) {
     const bool tty = isatty(STDOUT_FILENO) != 0;
     bool read_stdin = true;
     int rc = 0;
-    std::cout << "\033[?25l\033[2J" << std::flush;  // hide the cursor, clear the screen
+    std::cout << "\033[?25l\033[2J" << std::flush;
 
     while (!stop.load()) {
         std::string error;
         bool unavailable = false;
-        auto peers = fetch(&error, &unavailable);
+        auto peers = fetch_peers(&error, &unavailable);
         if (!peers && unavailable) {
             rc = 2;
             break;
         }
+        v1::ActivitySnapshot activity;
+        if (peers) {
+            auto act = fetch_activity(&error, &unavailable);
+            if (!act && unavailable) {
+                rc = 2;
+                break;
+            }
+            if (act) activity = *act;
+        }
+
         std::ostringstream frame;
-        if (peers) RenderStatus(*peers, frame, tty);
+        if (peers) RenderMonitor(*peers, activity, frame, tty);
         else frame << "error: " << error << "\n";
-        frame << "\n" << (tty ? "\033[90m" : "") << "Press q or Ctrl-C to exit" << (tty ? "\033[0m" : "");
+        frame << "\n" << (tty ? "\033[90m" : "") << "Press q or Ctrl-C to exit · refresh 1s"
+              << (tty ? "\033[0m" : "");
         std::cout << "\033[H\033[J" << frame.str() << std::flush;
 
         pollfd pfd{STDIN_FILENO, POLLIN, 0};
@@ -107,11 +177,11 @@ int RunMonitor(const PeerFetcher& fetch, const std::atomic<bool>& stop) {
         if (ret > 0 && (pfd.revents & (POLLIN | POLLHUP))) {
             char ch = 0;
             ssize_t n = read(STDIN_FILENO, &ch, 1);
-            if (n <= 0) read_stdin = false;  // EOF: stop watching stdin, keep refreshing
+            if (n <= 0) read_stdin = false;
             else if (ch == 'q' || ch == 'Q' || ch == 27) break;
         }
     }
-    std::cout << "\033[?25h\n" << std::flush;  // restore the cursor
+    std::cout << "\033[?25h\n" << std::flush;
     return rc;
 }
 
