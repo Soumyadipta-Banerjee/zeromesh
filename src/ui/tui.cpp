@@ -1,5 +1,4 @@
 #include "ui/tui.hpp"
-#include "executor/host_guard.hpp"
 
 #include <chrono>
 #include <iomanip>
@@ -14,22 +13,6 @@ namespace zeromesh::ui {
 TerminalUI::TerminalUI(std::shared_ptr<discovery::PeerTable> peer_table)
     : peer_table_(std::move(peer_table)) {}
 
-static std::string RenderProgressBar(double pct, int width = 20) {
-    if (pct < 0.0) pct = 0.0;
-    if (pct > 100.0) pct = 100.0;
-
-    int filled = static_cast<int>((pct / 100.0) * width);
-    std::string bar = "[";
-    for (int i = 0; i < filled; ++i) bar += "█";
-    for (int i = filled; i < width; ++i) bar += "░";
-    bar += "] ";
-
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(1) << pct << "%";
-    bar += ss.str();
-    return bar;
-}
-
 void TerminalUI::PrintStatusSnapshot() const {
     std::cout << "\033[1;36m"
               << "================================================================================\n"
@@ -37,14 +20,6 @@ void TerminalUI::PrintStatusSnapshot() const {
               << "================================================================================\033[0m\n";
 
     // 1. Host Machine Telemetry
-    double local_load = executor::HostGuard::GetLocalCpuLoadPct();
-    int battery = executor::HostGuard::GetBatteryPercent();
-    bool ac = executor::HostGuard::IsAcConnected();
-
-    std::cout << "\033[1;33m[ Local Host Status ]\033[0m\n"
-              << "  CPU Load:  " << RenderProgressBar(local_load, 24) << "\n"
-              << "  Power:     " << (ac ? "\033[32m⚡ AC Connected\033[0m" : "\033[33m🔋 On Battery\033[0m")
-              << " (" << battery << "%)\n\n";
 
 
     // 3. Cluster Peer Nodes Table

@@ -1,85 +1,66 @@
 #include "tests/unit/test_framework.hpp"
-#include "executor/bwrap.hpp"
+#include "exec/bwrap.hpp"
 
 #include <algorithm>
 
-TEST(BwrapBuilder_DefaultIsolationFlags) {
-    zeromesh::executor::BwrapBuilder builder;
-    auto args = builder.Build({"echo", "hello"});
+namespace {
+using Args = std::vector<std::string>;
 
-    ASSERT_FALSE(args.empty());
-    ASSERT_EQ(args[0], "bwrap");
+bool Has(const Args& a, const std::string& flag) { return std::find(a.begin(), a.end(), flag) != a.end(); }
+size_t Pos(const Args& a, const std::string& flag) {
+    return static_cast<size_t>(std::find(a.begin(), a.end(), flag) - a.begin());
+}
+} // namespace
 
-    // Unprivileged namespaces and parent death signal are mandatory
-    auto it_unshare = std::find(args.begin(), args.end(), "--unshare-all");
-    ASSERT_TRUE(it_unshare != args.end());
-
-    auto it_die = std::find(args.begin(), args.end(), "--die-with-parent");
-    ASSERT_TRUE(it_die != args.end());
-
-    // Separator before command
-    auto it_sep = std::find(args.begin(), args.end(), "--");
-    ASSERT_TRUE(it_sep != args.end());
-
-    // Verify trailing command
-    ASSERT_EQ(*(it_sep + 1), "echo");
-    ASSERT_EQ(*(it_sep + 2), "hello");
+TEST(BwrapDefaultIsolationFlags) {
+    zeromesh::exec::BwrapBuilder b;
+    auto args = b.Build({"echo", "hello"});
+    ASSERT_EQ(args[0], std::string("bwrap"));
+    ASSERT_TRUE(Has(args, "--unshare-all"));
+    ASSERT_TRUE(Has(args, "--die-with-parent"));
+    ASSERT_TRUE(Has(args, "--clearenv"));
+    ASSERT_TRUE(Has(args, "--new-session"));
+    ASSERT_FALSE(Has(args, "--share-net"));
+    auto sep = Pos(args, "--");
+    ASSERT_EQ(args[sep + 1], std::string("echo"));
+    ASSERT_EQ(args[sep + 2], std::string("hello"));
 }
 
-TEST(BwrapBuilder_FullHermeticAssembly) {
-    zeromesh::executor::BwrapBuilder builder;
-    builder.SetCasMaterializedRoot("/cas/sysroot/123")
-           .MountEssentialPseudoDevices()
-           .MountScratchTmpfs("/tmp")
-           .AddReadWriteBind("/host/build", "/workspace")
-           .AddEnv("CC", "/usr/bin/clang")
-           .SetWorkingDirectory("/workspace");
+TEST(BwrapShareNetwork) {
+    zeromesh::exec::BwrapBuilder b;
+    b.ShareNetwork(true);
+    auto args = b.Build({"true"});
+    ASSERT_TRUE(Has(args, "--share-net"));
+    ASSERT_TRUE(Pos(args, "--share-net") > Pos(args, "--unshare-all"));
+}
 
-    auto args = builder.Build({"clang", "-c", "input.c", "-o", "output.o"});
+TEST(BwrapMountOrderPreserved) {
+    zeromesh::exec::BwrapBuilder b;
+    b.AddReadOnlyBind("/usr", "/usr")
+     .AddSymlink("usr/bin", "/bin")
+     .AddTmpfs("/tmp")
+     .AddReadWriteBind("/scratch/work", "/work")
+     .SetBinary("/usr/bin/bwrap");
+    auto args = b.Build({"true"});
+    ASSERT_EQ(args[0], std::string("/usr/bin/bwrap"));
+    auto ro = Pos(args, "--ro-bind");
+    auto sym = Pos(args, "--symlink");
+    auto tmp = Pos(args, "--tmpfs");
+    auto rw = Pos(args, "--bind");
+    ASSERT_TRUE(ro < sym && sym < tmp && tmp < rw);
+    ASSERT_EQ(args[ro + 1], std::string("/usr"));
+    ASSERT_EQ(args[sym + 1], std::string("usr/bin"));
+    ASSERT_EQ(args[sym + 2], std::string("/bin"));
+    ASSERT_EQ(args[rw + 2], std::string("/work"));
+}
 
-    // Check CAS root bind
-    auto it_ro = std::find(args.begin(), args.end(), "--ro-bind");
-    ASSERT_TRUE(it_ro != args.end());
-    ASSERT_EQ(*(it_ro + 1), "/cas/sysroot/123");
-    ASSERT_EQ(*(it_ro + 2), "/");
-
-    // Check /dev and /proc
-    auto it_dev = std::find(args.begin(), args.end(), "--dev");
-    ASSERT_TRUE(it_dev != args.end());
-    ASSERT_EQ(*(it_dev + 1), "/dev");
-
-    auto it_proc = std::find(args.begin(), args.end(), "--proc");
-    ASSERT_TRUE(it_proc != args.end());
-    ASSERT_EQ(*(it_proc + 1), "/proc");
-
-    // Check tmpfs
-    auto it_tmp = std::find(args.begin(), args.end(), "--tmpfs");
-    ASSERT_TRUE(it_tmp != args.end());
-    ASSERT_EQ(*(it_tmp + 1), "/tmp");
-
-    // Check bind
-    auto it_bind = std::find(args.begin(), args.end(), "--bind");
-    ASSERT_TRUE(it_bind != args.end());
-    ASSERT_EQ(*(it_bind + 1), "/host/build");
-    ASSERT_EQ(*(it_bind + 2), "/workspace");
-
-    // Check env
-    auto it_env = std::find(args.begin(), args.end(), "--setenv");
-    ASSERT_TRUE(it_env != args.end());
-    ASSERT_EQ(*(it_env + 1), "CC");
-    ASSERT_EQ(*(it_env + 2), "/usr/bin/clang");
-
-    // Check chdir
-    auto it_chdir = std::find(args.begin(), args.end(), "--chdir");
-    ASSERT_TRUE(it_chdir != args.end());
-    ASSERT_EQ(*(it_chdir + 1), "/workspace");
-
-    // Check separator and command
-    auto it_sep = std::find(args.begin(), args.end(), "--");
-    ASSERT_TRUE(it_sep != args.end());
-    ASSERT_EQ(*(it_sep + 1), "clang");
-    ASSERT_EQ(*(it_sep + 2), "-c");
-    ASSERT_EQ(*(it_sep + 3), "input.c");
-    ASSERT_EQ(*(it_sep + 4), "-o");
-    ASSERT_EQ(*(it_sep + 5), "output.o");
+TEST(BwrapEnvAndChdir) {
+    zeromesh::exec::BwrapBuilder b;
+    b.AddEnv("ZM_NODE_ID", "abc").SetWorkingDirectory("/work/sub");
+    auto args = b.Build({"true"});
+    auto env = Pos(args, "--setenv");
+    ASSERT_EQ(args[env + 1], std::string("ZM_NODE_ID"));
+    ASSERT_EQ(args[env + 2], std::string("abc"));
+    ASSERT_EQ(args[Pos(args, "--chdir") + 1], std::string("/work/sub"));
+    ASSERT_TRUE(Pos(args, "--chdir") < Pos(args, "--"));
 }
