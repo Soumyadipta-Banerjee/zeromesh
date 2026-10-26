@@ -36,9 +36,9 @@ std::string Clip(const std::string& s, size_t n) { return s.size() > n ? s.subst
 
 const char* StateName(v1::TaskState s) {
     switch (s) {
-        case v1::QUEUED:
-        case v1::PLACED:
-        case v1::RUNNING: return "WORKING";
+        case v1::QUEUED: return "QUEUED";
+        case v1::PLACED: return "PLACED";
+        case v1::RUNNING: return "RUNNING";
         case v1::SUCCEEDED: return "DONE";
         case v1::FAILED: return "FAILED";
         case v1::CANCELLED: return "CANCEL";
@@ -59,11 +59,11 @@ std::string ArgvJoin(const v1::ActiveTask& t, size_t max_len = 48) {
     return Clip(ss.str(), max_len);
 }
 
-// executed_by is a node id. Show the peer hostname so both machines are obvious.
+// worker_id is the node that is running (or ran) the task. Resolve it to a hostname.
 std::string Where(const v1::ActiveTask& t, const v1::PeerList* peers) {
     if (t.role() == "executing") return "here";
-    const std::string& id = t.detail();
-    if (id.empty()) return IsWorking(t.state()) ? "placing" : "-";
+    const std::string& id = t.worker_id();
+    if (id.empty()) return "-";
     if (peers != nullptr) {
         for (const auto& p : peers->peers()) {
             if (p.node_id() == id) return p.is_self() ? "here" : p.hostname();
@@ -228,7 +228,7 @@ void RenderActivity(const v1::ActivitySnapshot& activity, std::ostream& os, bool
 
     os << bold << "Tasks" << reset;
     if (activity.tasks_size() > 0) {
-        os << "  " << dim << working << " working · " << done << " done";
+        os << "  " << dim << working << " in flight · " << done << " done";
         if (failed > 0) os << " · " << failed << " failed";
         os << reset;
     }
