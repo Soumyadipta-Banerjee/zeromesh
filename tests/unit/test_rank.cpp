@@ -103,3 +103,50 @@ TEST(RankFiltersArchAndRemoteOnly) {
     spec.mutable_resources()->set_cores(5);
     ASSERT_TRUE(Rank(spec, all).empty());
 }
+
+TEST(RankInFlightCapUsesCoresTotal) {
+    // At most cores_total / task.cores tasks in flight per node.
+    zeromesh::v1::TaskSpec spec;
+    spec.mutable_resources()->set_cores(2);
+    Candidate n;
+    n.node_id = "n";
+    n.cores_total = 4;
+    n.cores_free = 4;
+    n.mem_available = 1ull << 30;
+    n.arch = "x86_64";
+    n.on_ac = true;
+    n.in_flight = 1;  // 4 - 1*2 = 2 >= 2: still room
+    ASSERT_EQ(Rank(spec, {n}).size(), 1u);
+    n.in_flight = 2;  // 4 - 2*2 = 0 < 2: full
+    ASSERT_TRUE(Rank(spec, {n}).empty());
+}
+
+
+TEST(RankCapacityIgnoresLoadDerivedCoresFree) {
+    // Root cause of flaky local multi-task jobs: cores_free = round(cores_total*(1-load))
+    // can be 0 under brief 100% load. That must not make a node ineligible — idle is a
+    // ranking signal (cpu_load_pct), capacity is cores_total.
+    zeromesh::v1::TaskSpec spec;
+    Candidate hot;
+    hot.node_id = "hot";
+    hot.cores_total = 8;
+    hot.cores_free = 0;  // fully loaded by telemetry
+    hot.cpu_load_pct = 100;
+    hot.mem_available = 1ull << 30;
+    hot.arch = "x86_64";
+    hot.on_ac = true;
+    hot.in_flight = 0;
+    ASSERT_EQ(Rank(spec, {hot}).size(), 1u);
+
+    hot.in_flight = 8;  // saturated on hardware capacity
+    ASSERT_TRUE(Rank(spec, {hot}).empty());
+
+    Candidate idle = hot;
+    idle.node_id = "idle";
+    idle.cores_free = 8;
+    idle.cpu_load_pct = 5;
+    idle.in_flight = 0;
+    hot.in_flight = 0;
+    // Both eligible; idle ranks first.
+    ASSERT_EQ(Ids(Rank(spec, {hot, idle})), (std::vector<std::string>{"idle", "hot"}));
+}

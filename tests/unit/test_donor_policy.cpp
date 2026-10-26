@@ -3,6 +3,7 @@
 
 #include "node/donor_policy.hpp"
 
+#include <chrono>
 #include <sstream>
 
 using zeromesh::node::DonorPolicy;
@@ -86,4 +87,67 @@ TEST(DonorPolicyParse) {
     ASSERT_TRUE(w.find("donor.toml:1: unknown key 'colour'") != std::string::npos);
     ASSERT_TRUE(w.find("donor.toml:2: bad value") != std::string::npos);
     ASSERT_TRUE(w.find("donor.toml:3:") != std::string::npos);
+}
+
+TEST(DonorPolicyParseM4Keys) {
+    std::ostringstream warn;
+    DonorPolicy p = DonorPolicy::Parse(
+        "drain_on_user_activity = false\n"
+        "drain_hold_s = 60\n",
+        warn);
+    ASSERT_FALSE(p.drain_on_user_activity);
+    ASSERT_EQ(p.drain_hold_s, 60);
+    ASSERT_TRUE(warn.str().empty());
+    auto active = Laptop(80, true);
+    active.user_active = true;
+    ASSERT_FALSE(p.DrainCondition(active));
+    p.drain_on_user_activity = true;
+    ASSERT_TRUE(p.DrainCondition(active));
+}
+
+TEST(DrainControllerHysteresis) {
+    using zeromesh::node::DrainController;
+    DonorPolicy p;
+    p.drain_below_battery = 20;
+    p.drain_hold_s = 300;
+    p.drain_on_user_activity = false;
+    DrainController ctl(p);
+
+    const auto t0 = DrainController::Clock::now();
+    auto low = Laptop(10, false);
+    auto up = ctl.Tick(low, t0);
+    ASSERT_TRUE(up.draining);
+    ASSERT_TRUE(up.entered);
+    ASSERT_FALSE(up.left);
+
+    // Battery recovers; hold starts from this sample (clear_since).
+    auto recovered = Laptop(80, true);
+    const auto cleared_at = t0 + std::chrono::seconds(60);
+    auto mid = ctl.Tick(recovered, cleared_at);
+    ASSERT_TRUE(mid.draining);
+    ASSERT_FALSE(mid.entered);
+    ASSERT_FALSE(mid.left);
+
+    // Still inside the hold window (299 s after clear).
+    auto still = ctl.Tick(recovered, cleared_at + std::chrono::seconds(299));
+    ASSERT_TRUE(still.draining);
+
+    // Hold elapsed (300 s after clear).
+    auto done = ctl.Tick(recovered, cleared_at + std::chrono::seconds(300));
+    ASSERT_FALSE(done.draining);
+    ASSERT_TRUE(done.left);
+
+    // User activity with the flag on.
+    p.drain_on_user_activity = true;
+    p.drain_hold_s = 5;
+    ctl.SetPolicy(p);
+    auto active = Laptop(80, true);
+    active.user_active = true;
+    auto u = ctl.Tick(active, t0);
+    ASSERT_TRUE(u.draining);
+    ASSERT_TRUE(u.reason.find("user activity") != std::string::npos);
+    active.user_active = false;
+    const auto idle_at = t0 + std::chrono::seconds(1);
+    ASSERT_TRUE(ctl.Tick(active, idle_at).draining);
+    ASSERT_TRUE(ctl.Tick(active, idle_at + std::chrono::seconds(5)).left);
 }
