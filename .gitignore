@@ -1,0 +1,48 @@
+# Build output
+build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+
+# Editor and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Meson
+subprojects/packagecache/
+.ninja_log
+.ninja_deps
+
+# ZeroMesh local runtime cache
+.zeromesh/
+
+# Local build deps / venvs (not for the tree)
+.deps/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+*.egg
+cscope.out*
+.claude/
+zm-objs/
+
+# Local tooling, scratch and generated output
+.claude/
+.freebuff/
+.superpowers/
+.cache/
+.repo-map.json
+build*/
+dist/
+reports/
+research_notes/
+zm-objs/
