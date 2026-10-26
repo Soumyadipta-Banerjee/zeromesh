@@ -30,7 +30,22 @@ pip install -e ./sdk/python -e ./apps/zm-render pytest grpcio
 Ubuntu sandbox tip: `sudo sysctl kernel.apparmor_restrict_userns=0`  
 (or `kernel.apparmor_restrict_unprivileged_userns=0`).
 
-## Demo script
+## Quick demo (one command)
+
+On the requester (after a build + `pip install -e ./apps/zm-render` once):
+
+```bash
+./scripts/demo_blender.sh
+# optional: ./scripts/demo_blender.sh --frames 1-240 --chunk 16 --remote-only
+```
+
+Starts `zmd` if needed, kicks off `zm-render` on `spin_cube.blend` in the background,
+then drops you into `zm monitor` (q / Ctrl-C to leave). Render log: `/tmp/zeromesh-demo-render.log`.
+
+Friend machine: `source scripts/demo_env.sh && ./build-verify/zmd` (or `./build/zmd`), then
+`./build-verify/zm team join '…'` if you are not already on the same team.
+
+## Demo script (manual)
 
 ### 1. Start daemons (both machines)
 
