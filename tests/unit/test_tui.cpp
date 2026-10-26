@@ -1,12 +1,12 @@
 #include "tests/unit/test_framework.hpp"
-#include "discovery/peer_table.hpp"
+#include "net/peer_table.hpp"
 #include "ui/tui.hpp"
 
 #include <iostream>
 #include <sstream>
 
 TEST(TerminalUI_PrintStatusSnapshotWithPeers) {
-    using namespace zeromesh::discovery;
+    using namespace zeromesh::net;
     using namespace zeromesh::ui;
 
     auto peer_table = std::make_shared<PeerTable>();
@@ -55,7 +55,7 @@ TEST(TerminalUI_PrintStatusSnapshotWithPeers) {
 }
 
 TEST(TerminalUI_EmptyClusterHandling) {
-    using namespace zeromesh::discovery;
+    using namespace zeromesh::net;
     using namespace zeromesh::ui;
 
     auto peer_table = std::make_shared<PeerTable>();
