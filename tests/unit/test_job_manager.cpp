@@ -117,6 +117,43 @@ TEST(JobRunsDagInOrder) {
     ASSERT_EQ(st->results().size(), static_cast<size_t>(3));
 }
 
+// Holds the task after reporting placement, so ListActive can be observed mid-run.
+class HoldExecutor : public zeromesh::node::Executor {
+public:
+    void Execute(const std::string&, const v1::TaskSpec&, zeromesh::node::TaskCallbacks cb) override {
+        cb.on_state(v1::PLACED, "node peer-bb");
+        held = std::move(cb);
+    }
+    void Cancel(const std::string&) override {}
+    zeromesh::node::TaskCallbacks held;
+};
+
+TEST(JobListActiveRecordsWorkerWhilePlaced) {
+    TempDir dir;
+    auto cas = std::make_shared<zeromesh::store::CasStore>(dir / "cas");
+    auto merkle = std::make_shared<zeromesh::store::MerkleBuilder>(cas);
+    auto cache = std::make_shared<zeromesh::node::ActionCache>(cas);
+    auto exec = std::make_shared<HoldExecutor>();
+    JobManager jm{cas, merkle, cache, exec};
+
+    auto id = jm.Submit(Job({Task("a", "a")}));
+    auto rows = jm.ListActive();
+    ASSERT_EQ(rows.size(), static_cast<size_t>(1));
+    ASSERT_EQ(rows[0].state(), v1::PLACED);
+    ASSERT_EQ(rows[0].worker_id(), std::string("peer-bb"));
+    ASSERT_EQ(rows[0].job_id(), id);
+
+    v1::TaskResult r;
+    r.set_exit_code(0);
+    r.set_executed_by("peer-bb");
+    exec->held.on_done(std::move(r));
+    Drain(jm, id);
+    rows = jm.ListActive();
+    ASSERT_EQ(rows.size(), static_cast<size_t>(1));
+    ASSERT_EQ(rows[0].state(), v1::SUCCEEDED);
+    ASSERT_EQ(rows[0].worker_id(), std::string("peer-bb"));
+}
+
 TEST(JobListActiveKeepsFinished) {
     Fixture f;
     auto id = f.jm.Submit(Job({Task("a", "a"), Task("b", "b")}));

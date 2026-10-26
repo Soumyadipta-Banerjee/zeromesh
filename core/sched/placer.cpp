@@ -164,6 +164,7 @@ void Placer::RunLocal(const std::shared_ptr<Task>& task, const v1::TaskSpec& spe
         std::lock_guard lock(task->mu);
         task->is_local = true;
     }
+    if (task->cb.on_state) task->cb.on_state(v1::PLACED, "node " + local_id_);
     shared_->Add(local_id_, 1);
     node::TaskCallbacks cb;
     cb.on_state = task->cb.on_state;

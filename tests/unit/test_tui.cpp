@@ -78,9 +78,9 @@ TEST(Tui_ActivityKeepsWorkingAndDone) {
     zeromesh::cli::RenderActivity(snap, out, false);
     const std::string s = out.str();
 
-    ASSERT_TRUE(s.find("1 working · 1 done · 1 failed") != std::string::npos);
+    ASSERT_TRUE(s.find("1 in flight · 1 done · 1 failed") != std::string::npos);
     ASSERT_TRUE(s.find("WHERE") != std::string::npos);
-    ASSERT_TRUE(s.find("WORKING") != std::string::npos);
+    ASSERT_TRUE(s.find("RUNNING") != std::string::npos);
     ASSERT_TRUE(s.find("DONE") != std::string::npos);
     ASSERT_TRUE(s.find("FAILED") != std::string::npos);
     ASSERT_TRUE(s.find("frames_1_8") != std::string::npos);
@@ -103,10 +103,10 @@ TEST(Tui_WhereNamesThePeer) {
     zeromesh::v1::ActivitySnapshot snap;
     auto* local = snap.add_tasks();
     *local = Act("submitted", "frames_1_8", zeromesh::v1::RUNNING);
-    local->set_detail("cccccccccccccccccccccccccccccccc");
+    local->set_worker_id("cccccccccccccccccccccccccccccccc");
     auto* remote = snap.add_tasks();
-    *remote = Act("submitted", "frames_9_16", zeromesh::v1::RUNNING);
-    remote->set_detail("5768fd74cbf090b439705f55d8552f9d");
+    *remote = Act("submitted", "frames_9_16", zeromesh::v1::PLACED);
+    remote->set_worker_id("5768fd74cbf090b439705f55d8552f9d");
     *snap.add_tasks() = Act("executing", "frames_17_24", zeromesh::v1::RUNNING);
 
     std::ostringstream out;
