@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package zeromesh.v1;
+
+// Content address: lowercase hex SHA-256 of the bytes, plus their length.
+message Digest {
+  string hash = 1;
+  int64 size_bytes = 2;
+}
+
+message Digests {
+  repeated Digest digests = 1;
+}
+
+// One chunk of a streamed object. A run of chunks ending with last=true is one object.
+message Chunk {
+  Digest digest = 1;  // set on the first chunk of each object
+  bytes data = 2;
+  bool last = 3;
+}
+
+// Which environment provider prepares the task's software, e.g. "host" or "mirror".
+message EnvSpec {
+  string name = 1;
+  map<string, string> params = 2;
+}
+
+message Resources {
+  int32 cores = 1;      // 0 means 1
+  int64 mem_bytes = 2;  // 0 means no requirement
+  string arch = 3;      // empty means the submitting node's arch
+}
+
+// Scalars are optional so explicit values (e.g. max_retries = 0) differ from unset.
+// node::Normalize() fills unset fields with the documented defaults.
+message Policy {
+  optional bool may_run_local = 1;   // default true
+  optional bool may_run_remote = 2;  // default true
+  optional int32 max_retries = 3;    // default 3
+  optional int32 timeout_s = 4;      // default 3600
+  optional bool allow_network = 5;   // default false
+  optional bool preemptible = 6;     // default true
+}
+
+// Overlay another task's output into this task's /work at `path`.
+message InputFrom {
+  string task = 1;
+  string path = 2;
+}
+
+message TaskSpec {
+  string name = 1;
+  repeated string argv = 2;
+  map<string, string> env = 3;
+  Digest input_root = 4;
+  string working_dir = 5;
+  repeated string outputs = 6;
+  bool capture_changed = 7;
+  EnvSpec env_spec = 8;
+  Resources resources = 9;
+  Policy policy = 10;
+  repeated string depends_on = 11;
+  repeated InputFrom inputs_from = 12;
+}
+
+message JobSpec {
+  string name = 1;
+  repeated TaskSpec tasks = 2;
+}
+
+message OutputEntry {
+  string path = 1;
+  Digest digest = 2;
+  bool is_dir = 3;
+  bool is_executable = 4;
+  bool is_symlink = 5;
+  string symlink_target = 6;
+}
+
+message TaskResult {
+  string task_key = 1;
+  int32 exit_code = 2;
+  bool timed_out = 3;
+  Digest stdout = 4;
+  Digest stderr = 5;
+  bytes stdout_head = 6;
+  bytes stderr_head = 7;
+  repeated OutputEntry outputs = 8;
+  string executed_by = 9;
+  int64 duration_ms = 10;
+  bool cache_hit = 11;
+  string error = 12;
+  bool cancelled = 13;
+}
+
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0;
+  QUEUED = 1;
+  PLACED = 2;
+  RUNNING = 3;
+  SUCCEEDED = 4;
+  FAILED = 5;
+  CANCELLED = 6;
+}
+
+message JobEvent {
+  string job_id = 1;
+  string task_name = 2;
+  TaskState state = 3;
+  string detail = 4;
+  bytes log_chunk = 5;
+  int32 log_fd = 6;  // 1 = stdout, 2 = stderr; 0 when not a log event
+  TaskResult result = 7;
+}
+
+message JobStatus {
+  string job_id = 1;
+  string name = 2;
+  map<string, TaskState> tasks = 3;
+  map<string, TaskResult> results = 4;
+  bool done = 5;
+}
+
+message PeerInfo {
+  string node_id = 1;
+  string hostname = 2;
+  string address = 3;
+  int32 node_port = 4;
+  string arch = 5;
+  int32 cores_total = 6;
+  int32 cores_free = 7;
+  int64 mem_available = 8;
+  double cpu_load_pct = 9;
+  int32 battery_pct = 10;  // -1 when the node has no battery
+  bool on_ac = 11;
+  string state = 12;       // "active" | "draining" | "offline"
+  bool is_self = 13;
+}
+
+message Empty {}
+
+// Reserved for v2: long-lived stateful processes and message streams.
+message ServiceSpec {}
+message ChannelSpec {}

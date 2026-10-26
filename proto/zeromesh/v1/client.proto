@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package zeromesh.v1;
+
+import "zeromesh/v1/common.proto";
+
+message PutObjectsReply { repeated Digest stored = 1; }
+
+message UploadTreeRequest {
+  string path = 1;        // absolute path on the daemon's machine
+  bool force_large = 2;
+}
+message UploadTreeReply {
+  Digest root = 1;
+  int64 total_bytes = 2;
+}
+
+message SubmitReply { string job_id = 1; }
+message JobRef { string job_id = 1; }
+
+message FetchRequest {
+  string job_id = 1;
+  string task_name = 2;
+  string dest_path = 3;   // absolute
+  bool only_changed = 4;
+}
+message FetchReply { repeated string written = 1; }
+
+message PeerList { repeated PeerInfo peers = 1; }
+
+message TeamSecretReply { string phrase = 1; }
+message TeamJoinRequest { string phrase = 1; }
+message TeamInfoReply {
+  bool in_team = 1;
+  string team_id = 2;
+  int32 peers_pinned = 3;
+}
+
+// Served by zmd on unix://$XDG_RUNTIME_DIR/zeromesh/zmd.sock (mode 0600).
+service ClientApi {
+  rpc PutObjects(stream Chunk) returns (PutObjectsReply);
+  rpc GetObjects(Digests) returns (stream Chunk);
+  rpc FindMissing(Digests) returns (Digests);
+  rpc UploadTree(UploadTreeRequest) returns (UploadTreeReply);
+  rpc SubmitJob(JobSpec) returns (SubmitReply);
+  rpc WatchJob(JobRef) returns (stream JobEvent);
+  rpc GetJob(JobRef) returns (JobStatus);
+  rpc CancelJob(JobRef) returns (Empty);
+  rpc FetchOutputs(FetchRequest) returns (FetchReply);
+  rpc ListPeers(Empty) returns (PeerList);
+  rpc TeamCreate(Empty) returns (TeamSecretReply);
+  rpc TeamJoin(TeamJoinRequest) returns (Empty);
+  rpc TeamLeave(Empty) returns (Empty);
+  rpc TeamInfo(Empty) returns (TeamInfoReply);
+}

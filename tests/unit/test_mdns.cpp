@@ -1,4 +1,4 @@
-#include "tests/test_framework.hpp"
+#include "tests/unit/test_framework.hpp"
 #include "discovery/mdns.hpp"
 #include "discovery/peer_table.hpp"
 
