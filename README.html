@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title></title>
+<meta name="generator" content="md2html">
+<meta charset="UTF-8">
+</head>
+<body>
+<h1>ZeroMesh ⚡</h1>
+<p>A zero-config, peer-to-peer remote execution mesh that aggregates idle developer laptops on a local Wi-Fi or LAN into an elastic compile and compute cluster.</p>
+<p>Built on the <strong>Remote Execution API (REAPI v2)</strong>. Unmodified <strong>CMake</strong>, <strong>Make</strong>, <strong>Ninja</strong>, <strong>Bazel</strong>, and <strong>Buck2</strong> builds offload compilation tasks to nearby machines in seconds without code changes or centralized servers.</p>
+<hr>
+<h2>1. Directory Hierarchy &amp; File Placement Map</h2>
+<pre><code class="language-text">zeromesh/
+├── meson.build                           # Root Meson build configuration (C++20)
+├── subprojects/                          # Dependency fallbacks and wrap specifications
+├── include/
+│   └── zmdsm.h                           # Public C library header for Distributed Shared Memory (DSM)
+├── proto/
+│   └── remote_execution.proto            # Official REAPI v2 protocol definitions
+├── src/
+│   ├── main.cpp                          # Entry point: CLI parsing, daemon lifecycle
+│   ├── discovery/
+│   │   ├── mdns.hpp / .cpp               # mDNS broadcast &amp; listener (_zeromesh._tcp)
+│   │   └── peer_table.hpp / .cpp         # Node telemetry, ping, and peer registry
+│   ├── dht/
+│   │   └── kademlia.hpp / .cpp           # BitTorrent Kademlia DHT (chunk providers, action cache)
+│   ├── vfs/
+│   │   └── fuse_fs.hpp / .cpp            # Distributed Secure FUSE Filesystem (fuse3 / lazy CAS)
+│   ├── dsm/
+│   │   └── dsm_engine.hpp / .cpp         # Network Distributed Shared Memory engine (LRC / page traps)
+│   ├── reapi/
+│   │   ├── server.hpp / .cpp             # gRPC server setup (127.0.0.1:8980)
+│   │   ├── execution_service.hpp / .cpp  # REAPI Execution service implementation
+│   │   ├── cas_service.hpp / .cpp        # ContentAddressableStorage service
+│   │   └── action_cache.hpp / .cpp       # ActionCache get/update
+│   ├── cas/
+│   │   ├── store.hpp / .cpp              # Local content-addressed store (SHA-256 / BLAKE3)
+│   │   ├── merkle.hpp / .cpp             # Directory tree hasher / digest calculator
+│   │   └── p2p_syncer.hpp / .cpp         # Local LAN blob streamer
+│   ├── scheduler/
+│   │   ├── scheduler.hpp / .cpp          # Locality &amp; DAG-aware task assignment
+│   │   └── heuristics.hpp / .cpp         # Bandwidth cost &amp; critical-path evaluation
+│   ├── executor/
+│   │   ├── runner.hpp / .cpp             # Task execution coordinator
+│   │   ├── bwrap.hpp / .cpp              # bubblewrap CLI builder &amp; fork/exec supervisor
+│   │   ├── landlock.hpp / .cpp           # Direct Linux Landlock syscall setup
+│   │   └── host_guard.hpp / .cpp         # sched_setscheduler(SCHED_IDLE) &amp; power monitor
+│   ├── gpu/
+│   │   └── gpu_engine.hpp / .cpp         # Heterogeneous accelerator mesh (wgpu / CUDA)
+│   ├── verify/
+│   │   └── byzantine_spot_checker.hpp    # 2% Byzantine spot-checking &amp; TPM/Enclave signing
+│   └── ui/
+│       └── tui.hpp / .cpp                # Terminal monitor (ftxui / ncurses)
+├── PLAN.md                               # Living architectural state and roadmap
+└── README.md                             # Project overview and code organization guide
+</code></pre>
+<hr>
+<h2>2. Module Responsibilities &amp; Entry-Point Function Map</h2>
+<table>
+<thead>
+<tr>
+<th align="left">Module &amp; Path</th>
+<th align="left">Primary Duty</th>
+<th align="left">Key Classes / Structs</th>
+<th align="left">Primary Entry Functions</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><strong><code>src/main.cpp</code></strong></td>
+<td align="left">CLI dispatcher and daemon coordinator</td>
+<td align="left"><code>DaemonApp</code></td>
+<td align="left"><code>main(int argc, char** argv)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/discovery/mdns.*</code></strong></td>
+<td align="left">Advertises local node on <code>_zeromesh._tcp</code> and listens for LAN peers</td>
+<td align="left"><code>MdnsEngine</code>, <code>MdnsConfig</code></td>
+<td align="left"><code>StartBroadcaster()</code>, <code>StartDiscovery()</code>, <code>Stop()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/discovery/peer_table.*</code></strong></td>
+<td align="left">Tracks active peers, health metrics, and hardware telemetry</td>
+<td align="left"><code>Peer</code>, <code>PeerTable</code></td>
+<td align="left"><code>Upsert(peer)</code>, <code>ListActive()</code>, <code>SelectBestWorker()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/reapi/server.*</code></strong></td>
+<td align="left">Host gRPC server listening on <code>127.0.0.1:8980</code></td>
+<td align="left"><code>ReapiServer</code></td>
+<td align="left"><code>Start(port)</code>, <code>Stop()</code>, <code>Wait()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/reapi/execution_service.*</code></strong></td>
+<td align="left">Implements REAPI <code>Execution::Execute</code></td>
+<td align="left"><code>ExecutionServiceImpl</code></td>
+<td align="left"><code>Execute(context, request, writer)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/reapi/cas_service.*</code></strong></td>
+<td align="left">Implements REAPI <code>ContentAddressableStorage</code></td>
+<td align="left"><code>CasServiceImpl</code></td>
+<td align="left"><code>FindMissingBlobs()</code>, <code>BatchUpdateBlobs()</code>, <code>BatchReadBlobs()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/reapi/action_cache.*</code></strong></td>
+<td align="left">Implements REAPI <code>ActionCache</code></td>
+<td align="left"><code>ActionCacheServiceImpl</code></td>
+<td align="left"><code>GetActionResult()</code>, <code>UpdateActionResult()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/cas/store.*</code></strong></td>
+<td align="left">Local blob store in <code>~/.zeromesh/cas</code> with SHA-256 verification</td>
+<td align="left"><code>CasStore</code>, <code>Digest</code></td>
+<td align="left"><code>PutBlob(data)</code>, <code>GetBlob(hash)</code>, <code>HasBlob(hash)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/cas/merkle.*</code></strong></td>
+<td align="left">Reconstructs and hashes input/output directory trees</td>
+<td align="left"><code>MerkleTreeBuilder</code></td>
+<td align="left"><code>BuildDirectoryTree(path)</code>, <code>MaterializeTree(digest, target)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/cas/p2p_syncer.*</code></strong></td>
+<td align="left">Streams missing CAS chunks between LAN peers</td>
+<td align="left"><code>P2PSyncer</code></td>
+<td align="left"><code>FetchBlob(digest, peers)</code>, <code>BroadcastBlob(digest)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/scheduler/scheduler.*</code></strong></td>
+<td align="left">Dispatches compilation tasks locally or to peers</td>
+<td align="left"><code>Scheduler</code></td>
+<td align="left"><code>ScheduleAction(action)</code>, <code>DispatchRemote(peer, action)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/scheduler/heuristics.*</code></strong></td>
+<td align="left">Cost model evaluating missing transfer bytes vs compute</td>
+<td align="left"><code>SchedulerHeuristics</code></td>
+<td align="left"><code>EstimateCost()</code>, <code>IsCriticalPath(command)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/executor/runner.*</code></strong></td>
+<td align="left">Sandboxed execution lifecycle coordinator</td>
+<td align="left"><code>SandboxRunner</code></td>
+<td align="left"><code>Execute(command, inputRoot, workingDir)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/executor/bwrap.*</code></strong></td>
+<td align="left">Configures unprivileged Bubblewrap isolation boundaries</td>
+<td align="left"><code>BwrapBuilder</code></td>
+<td align="left"><code>BuildArgs()</code>, <code>RunSandboxed()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/executor/landlock.*</code></strong></td>
+<td align="left">Configures in-kernel Landlock filesystem access control</td>
+<td align="left"><code>LandlockSandbox</code></td>
+<td align="left"><code>ApplyRuleset(roPaths, rwPaths)</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/executor/host_guard.*</code></strong></td>
+<td align="left">Enforces <code>SCHED_IDLE</code> and thermal/battery preemption</td>
+<td align="left"><code>HostGuard</code></td>
+<td align="left"><code>EnforceIdlePriority(pid)</code>, <code>IsThrottled()</code>, <code>CheckBattery()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/dht/kademlia.*</code></strong></td>
+<td align="left">BitTorrent Kademlia DHT for trackerless chunk provider discovery &amp; action memoization</td>
+<td align="left"><code>KademliaDht</code>, <code>DhtNode</code></td>
+<td align="left"><code>Start()</code>, <code>AnnounceChunk()</code>, <code>GetChunkProviders()</code>, <code>FindValue()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/vfs/fuse_fs.*</code></strong></td>
+<td align="left">Distributed Secure FUSE-FS (<code>zm-fs</code>) via <code>fuse3</code> with lazy chunk faulting</td>
+<td align="left"><code>FuseFileSystem</code>, <code>FileInode</code></td>
+<td align="left"><code>Mount()</code>, <code>Unmount()</code>, <code>PublishFile()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/dsm/dsm_engine.*</code></strong></td>
+<td align="left">Network Distributed Shared Memory engine; page traps &amp; release consistency</td>
+<td align="left"><code>DsmEngine</code>, <code>DsmRegion</code></td>
+<td align="left"><code>Initialize()</code>, <code>AllocateRegion()</code>, <code>Barrier()</code>, <code>Lock()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>include/zmdsm.h</code></strong></td>
+<td align="left">Public C API for Distributed Shared Memory applications</td>
+<td align="left">C API Functions</td>
+<td align="left"><code>zmdsm_init()</code>, <code>zmdsm_alloc()</code>, <code>zmdsm_barrier()</code>, <code>zmdsm_lock()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/gpu/gpu_engine.*</code></strong></td>
+<td align="left">Heterogeneous accelerator mesh (<code>wgpu</code> / CUDA) with bandwidth gate</td>
+<td align="left"><code>GpuEngine</code>, <code>GpuProfile</code></td>
+<td align="left"><code>ProbeHardware()</code>, <code>ShouldOffload()</code>, <code>ExecuteComputeKernel()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/verify/byzantine_spot_checker.*</code></strong></td>
+<td align="left">2% randomized shadow verification and TPM/Enclave signing</td>
+<td align="left"><code>ByzantineSpotChecker</code></td>
+<td align="left"><code>ShouldSpotCheck()</code>, <code>VerifyResult()</code>, <code>QuarantinePeer()</code></td>
+</tr>
+<tr>
+<td align="left"><strong><code>src/ui/tui.*</code></strong></td>
+<td align="left">Live terminal core and network activity monitor</td>
+<td align="left"><code>TerminalUI</code></td>
+<td align="left"><code>RenderDashboard(peerTable, stats)</code></td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2>3. How It Works</h2>
+<p>ZeroMesh is designed to be completely zero-config and invisible to the user:</p>
+<ol>
+<li><strong>Subnet Discovery:</strong> When <code>zmd</code> (the daemon) launches, it immediately sends multicast DNS packets advertising its presence, core count, and memory.</li>
+<li><strong>REAPI Interception:</strong> Build tools (such as <code>recc</code>, Bazel, or Buck2) send standard REAPI v2 requests to <code>localhost:8980</code>.</li>
+<li><strong>Locality-Aware Scheduling:</strong><ul>
+<li>Small compilation tasks (<code>g++ -c foo.cpp</code>) are scheduled to idle peers with the lowest network cost.</li>
+<li>Heavy linking stages or actions with massive inputs are automatically pinned to the local machine to avoid unnecessary transfer latency.</li>
+</ul>
+</li>
+<li><strong>Hermetic &amp; Safe Sandboxing:</strong><ul>
+<li>Tasks execute inside unprivileged <strong>Bubblewrap</strong> (<code>bwrap</code>) containers.</li>
+<li>Linux <strong>Landlock</strong> locks down filesystem write permissions to the build sandbox only.</li>
+<li>Tasks run under <strong><code>SCHED_IDLE</code></strong> so the host user experiences zero stutter or CPU lag.</li>
+</ul>
+</li>
+</ol>
+<hr>
+<h2>4. Quickstart</h2>
+<h3>Prerequisites</h3>
+<ul>
+<li>Modern Linux system (kernel ≥ 5.13 for Landlock support)</li>
+<li><code>bwrap</code> (Bubblewrap)</li>
+<li>C++20 compiler (<code>gcc</code> ≥ 11 or <code>clang</code> ≥ 13)</li>
+<li><code>meson</code> and <code>ninja</code></li>
+</ul>
+<h3>Building from Source</h3>
+<pre><code class="language-bash"># Setup build directory
+meson setup build
+
+# Compile all targets
+ninja -C build
+
+# Install or run directly
+./build/zm --help
+</code></pre>
+<h3>Starting the Daemon</h3>
+<pre><code class="language-bash"># Start ZeroMesh daemon in background
+./build/zm up
+
+# Inspect active cluster peers and hardware utilization
+./build/zm status
+
+# Launch the live interactive terminal dashboard
+./build/zm monitor
+</code></pre>
+<hr>
+<h2>5. Build Integration</h2>
+<h3>CMake with <code>recc</code></h3>
+<p>Configure CMake to use <code>recc</code> as the compiler launcher:</p>
+<pre><code class="language-bash">export RECC_SERVER=127.0.0.1:8980
+export CMAKE_CXX_COMPILER_LAUNCHER=recc
+export CMAKE_C_COMPILER_LAUNCHER=recc
+
+cmake -B build -S .
+cmake --build build -j$(nproc)
+</code></pre>
+<h3>Bazel</h3>
+<p>Add the local ZeroMesh endpoint to your Bazel build flags:</p>
+<pre><code class="language-bash">bazel build //... \
+  --remote_executor=grpc://127.0.0.1:8980 \
+  --remote_default_exec_properties=OSFamily=Linux
+</code></pre>
+<h3>Direct Run Wrapper</h3>
+<p>You can also run commands through the ZeroMesh launcher:</p>
+<pre><code class="language-bash">zm run -- g++ -c main.cpp -o main.o
+</code></pre>
+<hr>
+<h2>6. Distributed Secure FUSE Filesystem (<code>zm-fs</code>)</h2>
+<p>Mount a virtual, peer-synchronized folder across all paired laptops with zero central storage servers:</p>
+<pre><code class="language-bash"># Mount the distributed mesh filesystem on local mountpoint
+zm fs mount ~/zeromesh-shared
+
+# Files are chunked (512 KB), encrypted with ChaCha20-Poly1305, and cached on local NVMe
+cp my_dataset.tar.zst ~/zeromesh-shared/
+
+# Other nodes in the mesh can read or execute it immediately via lazy on-demand chunk streaming
+ls -lh ~/zeromesh-shared/
+</code></pre>
+<hr>
+<h2>7. Network Distributed Shared Memory (DSM) C Library (<code>libzmdsm</code>)</h2>
+<p>For high-performance simulations, distributed matrix models, or multi-node parallel computing without MPI:</p>
+<pre><code class="language-c">#include &lt;stdio.h&gt;
+#include &quot;zmdsm.h&quot;
+
+int main() {
+    // 1. Join cluster session
+    zmdsm_ctx_t *ctx = zmdsm_init(&quot;mesh_compute_cluster&quot;, -1);
+
+    // 2. Allocate named shared memory segment (synchronized across all nodes)
+    size_t size = 1024 * 1024 * sizeof(double);
+    double *shared_array = (double *)zmdsm_alloc(ctx, &quot;global_array&quot;, size, ZMDSM_READ_WRITE);
+
+    // 3. Coordinate work across nodes with barriers and locks
+    zmdsm_barrier(ctx, &quot;start_sync&quot;);
+
+    int rank = zmdsm_get_node_id(ctx);
+    shared_array[rank * 100] = 42.0 * rank;
+
+    zmdsm_barrier(ctx, &quot;end_sync&quot;);
+
+    // 4. Cleanup
+    zmdsm_free(ctx, shared_array);
+    zmdsm_destroy(ctx);
+    return 0;
+}
+</code></pre>
+<p>Compile directly with <code>-lzmdsm</code>:</p>
+<pre><code class="language-bash">gcc -O3 worker.c -o worker -lzmdsm
+./worker
+</code></pre>
+</body>
+</html>
