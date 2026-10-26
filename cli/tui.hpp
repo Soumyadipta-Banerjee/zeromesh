@@ -14,7 +14,7 @@ namespace zeromesh::cli {
 // `color` adds ANSI colours (use it when writing to a terminal).
 void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color);
 
-// Live task table for ListActivity (submitted jobs + local sandboxes).
+// Task table for ListActivity (submitted + executing; WORKING and DONE stay listed).
 void RenderActivity(const v1::ActivitySnapshot& activity, std::ostream& os, bool color);
 
 // Full monitor frame: peers + activity.

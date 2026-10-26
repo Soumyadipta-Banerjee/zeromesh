@@ -47,6 +47,12 @@ v1::TaskResult ToProto(const exec::RunResult& rr, const std::string& node_id) {
     return r;
 }
 
+v1::TaskState StateFromResult(const v1::TaskResult& r) {
+    if (r.cancelled()) return v1::CANCELLED;
+    if (r.timed_out() || r.exit_code() != 0 || !r.error().empty()) return v1::FAILED;
+    return v1::SUCCEEDED;
+}
+
 } // namespace
 
 LocalExecutor::LocalExecutor(std::shared_ptr<exec::SandboxRunner> runner, std::shared_ptr<plugin::Registry> registry,
@@ -108,16 +114,25 @@ void LocalExecutor::Cancel(const std::string& task_id) {
         items_.erase(it);
         dequeued = std::move(item);
     }
+    RememberFinished(dequeued->task_id, dequeued->spec, v1::CANCELLED);
     if (dequeued->cb.on_done) dequeued->cb.on_done(Cancelled(node_id_));
+}
+
+void LocalExecutor::RememberFinished(std::string task_id, v1::TaskSpec spec, v1::TaskState state) {
+    std::lock_guard lock(mu_);
+    recent_.push_front(ActiveItem{std::move(task_id), std::move(spec), true, state});
+    while (recent_.size() > kRecentLimit) recent_.pop_back();
 }
 
 std::vector<LocalExecutor::ActiveItem> LocalExecutor::ListActive() const {
     std::lock_guard lock(mu_);
     std::vector<ActiveItem> out;
-    out.reserve(items_.size());
+    out.reserve(items_.size() + recent_.size());
     for (const auto& [id, item] : items_) {
-        out.push_back(ActiveItem{item->task_id, item->spec, item->started});
+        out.push_back(ActiveItem{item->task_id, item->spec, item->started,
+                                 item->started ? v1::RUNNING : v1::QUEUED});
     }
+    for (const auto& done : recent_) out.push_back(done);
     return out;
 }
 
@@ -132,11 +147,13 @@ void LocalExecutor::Worker(std::stop_token st) {
             item->started = true;
         }
         v1::TaskResult result = Run(*item);
+        const v1::TaskState state = StateFromResult(result);
         {
             std::lock_guard lock(mu_);
             auto it = items_.find(item->task_id);
             if (it != items_.end() && it->second == item) items_.erase(it);
         }
+        RememberFinished(item->task_id, item->spec, state);
         if (item->cb.on_done) item->cb.on_done(std::move(result));
     }
 }

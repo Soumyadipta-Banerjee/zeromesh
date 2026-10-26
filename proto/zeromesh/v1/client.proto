@@ -52,7 +52,7 @@ service ClientApi {
   rpc CancelJob(JobRef) returns (Empty);
   rpc FetchOutputs(FetchRequest) returns (FetchReply);
   rpc ListPeers(Empty) returns (PeerList);
-  // Live jobs this node submitted + tasks currently executing in the local sandbox.
+  // Submitted jobs + local sandboxes (working and finished rows for zm monitor).
   rpc ListActivity(Empty) returns (ActivitySnapshot);
   rpc TeamCreate(Empty) returns (TeamSecretReply);
   rpc TeamJoin(TeamJoinRequest) returns (Empty);

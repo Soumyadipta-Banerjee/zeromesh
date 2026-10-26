@@ -21,7 +21,7 @@ void PrintUsage(std::ostream& os) {
        << "Commands:\n"
        << "  run [opts] -- CMD...  Run CMD on the mesh with the current directory as input\n"
        << "  status                Show this node and its peers\n"
-       << "  monitor               Live peers + submitted/executing tasks (q / Ctrl-C)\n"
+       << "  monitor               Peers + tasks (WORKING/DONE; q / Ctrl-C)\n"
        << "  team create|join|leave|info\n"
        << "                        Create or join a team (quote the join phrase)\n"
        << "  version               Show the version\n\n"

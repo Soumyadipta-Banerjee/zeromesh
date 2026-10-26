@@ -54,7 +54,7 @@ public:
     std::string Submit(v1::JobSpec spec);
     void Cancel(const std::string& job_id);
     [[nodiscard]] std::optional<v1::JobStatus> Get(const std::string& job_id) const;
-    // Snapshot of incomplete jobs (for zm monitor). Includes task argv + state.
+    // Snapshot of submitted jobs for zm monitor (working + finished tasks stay listed).
     [[nodiscard]] std::vector<v1::ActiveTask> ListActive() const;
     // nullptr for an unknown job.
     std::shared_ptr<EventStream> Watch(const std::string& job_id);
