@@ -1,13 +1,13 @@
 #pragma once
 
-#include "cas/store.hpp"
+#include "store/store.hpp"
 
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace zeromesh::cas {
+namespace zeromesh::store {
 
 struct FileNode {
     std::string name;
@@ -61,4 +61,4 @@ private:
     std::shared_ptr<CasStore> store_;
 };
 
-} // namespace zeromesh::cas
+} // namespace zeromesh::store

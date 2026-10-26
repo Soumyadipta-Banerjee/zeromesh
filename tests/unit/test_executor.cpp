@@ -1,6 +1,6 @@
 #include "tests/unit/test_framework.hpp"
-#include "cas/merkle.hpp"
-#include "cas/store.hpp"
+#include "store/merkle.hpp"
+#include "store/store.hpp"
 #include "executor/landlock.hpp"
 #include "executor/runner.hpp"
 
@@ -14,7 +14,7 @@ TEST(LandlockSandbox_SupportCheck) {
 }
 
 TEST(TaskRunner_SimpleEchoExecution) {
-    using namespace zeromesh::cas;
+    using namespace zeromesh::store;
     using namespace zeromesh::executor;
 
     auto test_cas = std::filesystem::temp_directory_path() / "zm_test_runner_echo_cas";
@@ -48,7 +48,7 @@ TEST(TaskRunner_SimpleEchoExecution) {
 }
 
 TEST(TaskRunner_OutputArtifactHarvesting) {
-    using namespace zeromesh::cas;
+    using namespace zeromesh::store;
     using namespace zeromesh::executor;
 
     auto test_cas = std::filesystem::temp_directory_path() / "zm_test_runner_harvest_cas";
@@ -82,7 +82,7 @@ TEST(TaskRunner_OutputArtifactHarvesting) {
 }
 
 TEST(TaskRunner_FailureExitCodeAndStderrCapture) {
-    using namespace zeromesh::cas;
+    using namespace zeromesh::store;
     using namespace zeromesh::executor;
 
     auto test_cas = std::filesystem::temp_directory_path() / "zm_test_runner_fail_cas";
@@ -115,7 +115,7 @@ TEST(TaskRunner_FailureExitCodeAndStderrCapture) {
 }
 
 TEST(TaskRunner_InputTreeMaterializationAndCompile) {
-    using namespace zeromesh::cas;
+    using namespace zeromesh::store;
     using namespace zeromesh::executor;
 
     auto test_cas = std::filesystem::temp_directory_path() / "zm_test_runner_compile_cas";

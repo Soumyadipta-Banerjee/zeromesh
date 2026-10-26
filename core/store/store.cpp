@@ -1,4 +1,4 @@
-#include "cas/store.hpp"
+#include "store/store.hpp"
 
 #include <array>
 #include <cstdlib>
@@ -7,7 +7,7 @@
 #include <iostream>
 #include <sstream>
 
-namespace zeromesh::cas {
+namespace zeromesh::store {
 
 namespace {
 
@@ -249,4 +249,4 @@ std::optional<std::string> CasStore::GetActionResult(const std::string& action_h
     return ss.str();
 }
 
-} // namespace zeromesh::cas
+} // namespace zeromesh::store
