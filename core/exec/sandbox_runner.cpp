@@ -387,6 +387,12 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         return result;
     }
     fs::create_directories(work / spec.working_dir);
+    // REAPI/compilers often write outputs under working_dir; ensure parents exist.
+    for (const auto& out : spec.outputs) {
+        if (!SafeRelative(out)) continue;
+        std::error_code ec;
+        fs::create_directories((work / spec.working_dir / out).parent_path(), ec);
+    }
 
     Snapshot before;
     if (spec.capture_changed) before = TakeSnapshot(work);
@@ -509,8 +515,15 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     result.stderr_digest = store_->PutBlobFile(scratch / "stderr");
 
     auto capture = [&](const std::string& rel) {
-        if (!SafeOutputPath(work, rel)) return;
-        fs::path p = work / fs::path(rel).lexically_normal();
+        // Prefer work/working_dir/rel (REAPI compilers), fall back to work/rel.
+        const std::string under_wd = (fs::path(spec.working_dir) / rel).lexically_normal().string();
+        const std::string under_work = fs::path(rel).lexically_normal().string();
+        std::error_code ec;
+        std::string use = under_work;
+        if (fs::exists(work / under_wd, ec)) use = under_wd;
+        else if (!fs::exists(work / under_work, ec) && SafeOutputPath(work, under_wd)) use = under_wd;
+        if (!SafeOutputPath(work, use)) return;
+        fs::path p = work / fs::path(use).lexically_normal();
         struct stat st {};
         if (lstat(p.c_str(), &st) != 0) return;
         OutputEntry e;

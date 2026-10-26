@@ -1,5 +1,7 @@
 #include "plugin/loader.hpp"
 
+#include "plugin/client_api_handle.hpp"
+
 #include <dlfcn.h>
 
 #include <cstdlib>

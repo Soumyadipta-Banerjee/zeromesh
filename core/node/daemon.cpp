@@ -18,6 +18,7 @@
 #include "node/node_client.hpp"
 #include "node/node_service.hpp"
 #include "node/state.hpp"
+#include "plugin/client_api_handle.hpp"
 #include "plugin/loader.hpp"
 #include "sched/placer.hpp"
 #include "store/merkle.hpp"
@@ -210,6 +211,7 @@ int Daemon::Run() {
     std::shared_ptr<TeamState> team;
     std::shared_ptr<net::PinStore> pins;
     std::shared_ptr<plugin::Registry> registry;
+    std::shared_ptr<plugin::ClientApiHandle> frontend_handle;
     net::Identity identity;
     std::string node_id;
 
@@ -325,9 +327,16 @@ int Daemon::Run() {
             throw std::runtime_error("cannot chmod " + sock.string() + ": " + std::strerror(errno));
         }
 
-        plugin::ClientApiHandle frontend_handle;
-        frontend_handle.unix_socket = sock;
-        registry->StartFrontends(frontend_handle, plugin::PluginConfig{});
+        // Front-ends (e.g. frontend-reapi) talk back to this daemon over the ClientApi unix socket.
+        // Keep the handle alive for the daemon lifetime — ReapiServer holds a reference into it.
+        frontend_handle = std::make_shared<plugin::ClientApiHandle>(
+            sock.string(),
+            grpc::CreateChannel("unix:" + sock.string(), grpc::InsecureChannelCredentials()));
+        plugin::PluginConfig frontend_cfg;
+        if (const char* en = std::getenv("ZM_ENABLE_REAPI")) {
+            frontend_cfg.values["enabled"] = en;
+        }
+        registry->StartFrontends(*frontend_handle, frontend_cfg);
 
         grpc::ServerBuilder node_builder;
         node::ApplyNodeApiMessageLimits(node_builder);
@@ -483,6 +492,7 @@ int Daemon::Run() {
         if (drain_thread.joinable()) drain_thread.join();
         if (gc_thread.joinable()) gc_thread.join();
         if (registry) registry->StopFrontends();
+        frontend_handle.reset();
         if (discovery) discovery->Stop();
         if (node_server) node_server->Shutdown();
         if (client_server) client_server->Shutdown();
@@ -532,6 +542,7 @@ int Daemon::Run() {
     }
 
     if (registry) registry->StopFrontends();
+    frontend_handle.reset();
 
     auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(2);
     if (node_server) node_server->Shutdown(deadline);
