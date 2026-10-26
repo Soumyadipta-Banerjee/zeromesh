@@ -15,11 +15,12 @@ ZeroMesh is moving to a **core + plugin architecture**. See the
 **What works today:**
 - A local content-addressed store (SHA-256) and directory tree hashing.
 - A sandbox executor (bubblewrap, `SCHED_IDLE`).
-- LAN peer discovery over UDP multicast (unauthenticated for now).
-- `zm status` and `zm version`.
+- The `zmd` daemon: a gRPC `ClientApi` on an owner-only unix socket, a job manager for static
+  task DAGs, an action cache, and local sandboxed execution.
+- `zm run [-o PATH]... -- CMD...` (runs CMD on this machine with the current directory as
+  input and writes its outputs back), `zm status`, `zm monitor` and `zm version`.
 
-**What does not work yet:** running tasks on other machines, the daemon, team security, and
-the SDK. These are milestones M2–M5. Earlier code for a REAPI server, FUSE filesystem, DHT,
+**What does not work yet:** running tasks on other machines, team security, and the SDK. These are milestones M2–M5. Earlier code for a REAPI server, FUSE filesystem, DHT,
 distributed shared memory and GPU offload is parked in [`frozen/`](frozen/README.md). Most of
 it was stubbed, and none of it is built.
 
@@ -36,15 +37,20 @@ sudo apt-get install meson ninja-build g++ pkg-config bubblewrap libgrpc++-dev p
   libprotobuf-dev protobuf-compiler libsodium-dev libssl-dev python3-grpcio python3-grpc-tools
 
 make build     # meson setup + ninja
-make test      # meson test
-./build/zm status
+make test      # meson test (unit + integration)
+./build/zmd &  # the daemon
+./build/zm run -- echo hi
 ```
 
 ## Repository layout
 
 ```
-src/        current sources (moving into core/, plugins/, cli/, zmd/ during M1–M2)
-tests/      unit tests
+core/       the daemon's library: store, exec, net, node, plugin
+plugins/    core plugins (env-host)
+zmd/        the daemon executable
+cli/        the zm command-line client
+proto/      zeromesh.v1 gRPC contracts
+tests/      unit and integration tests
 frozen/     parked modules: not built, kept for later milestones
 docs/       design spec and implementation plans
 ```
