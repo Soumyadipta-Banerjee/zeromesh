@@ -14,7 +14,8 @@ namespace zeromesh::sched {
 struct Candidate {
     std::string node_id;
     bool is_local{false};
-    int cores_free{0};
+    int cores_total{0};  // fixed machine size (slot capacity); not live free cores
+    int cores_free{0};   // informational / load hint only
     uint64_t mem_available{0};
     double cpu_load_pct{0.0};
     bool on_ac{true};
@@ -28,12 +29,11 @@ struct Candidate {
 // Filter:
 //   - arch equals resources.arch; an empty resources.arch means the local candidate's
 //     arch (no arch filter when there is neither)
-//   - cores_free - in_flight * cores >= cores (cores 0 means 1)
+//   - slots = cores_total/cores - in_flight >= 1 (cores 0 means 1). Uses cores_total so
+//     a busy Cycles job does not shrink capacity to zero mid-job.
 //   - mem_available >= mem_bytes
 //   - policy.may_run_local / may_run_remote (unset = true)
-// Order: free slots descending (cores_free/cores - in_flight) so work spreads across the
-// mesh like a render farm queue, then missing_bytes ascending (unknown after known),
-// cpu_load_pct ascending, on AC first, latency ascending, then node_id.
+// Order: free slots descending, then missing_bytes, cpu_load_pct, AC, latency, node_id.
 std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates);
 
 } // namespace zeromesh::sched

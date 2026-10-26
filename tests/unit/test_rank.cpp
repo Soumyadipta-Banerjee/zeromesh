@@ -13,6 +13,7 @@ Candidate Node(std::string id, int64_t missing, bool local = false) {
     Candidate c;
     c.node_id = std::move(id);
     c.is_local = local;
+    c.cores_total = 4;
     c.cores_free = 4;
     c.mem_available = 1ull << 30;
     c.cpu_load_pct = 10;
@@ -48,9 +49,11 @@ TEST(RankPrefersFewerMissingBytes) {
 TEST(RankPrefersMoreFreeSlots) {
     zeromesh::v1::TaskSpec spec;
     Candidate local = Node("local", 0, true);
+    local.cores_total = 12;
     local.cores_free = 12;
     local.in_flight = 0;
     Candidate peer = Node("peer", -1);
+    peer.cores_total = 20;
     peer.cores_free = 20;
     peer.in_flight = 0;
     // Peer has more free slots despite unknown missing_bytes — do not pack local first.
@@ -58,6 +61,20 @@ TEST(RankPrefersMoreFreeSlots) {
 
     peer.in_flight = 10;  // 10 slots left on peer, 12 on local
     ASSERT_EQ(Ids(Rank(spec, {local, peer})), (std::vector<std::string>{"local", "peer"}));
+}
+
+TEST(RankIgnoresLiveCoresFreeWhenBusy) {
+    // A machine at 100% CPU reports cores_free≈0; capacity must still use cores_total.
+    zeromesh::v1::TaskSpec spec;
+    spec.mutable_resources()->set_cores(8);
+    Candidate busy = Node("busy", 0);
+    busy.cores_total = 20;
+    busy.cores_free = 0;
+    busy.cpu_load_pct = 100;
+    busy.in_flight = 1;  // one of two slots used (20/8=2)
+    ASSERT_EQ(Ids(Rank(spec, {busy})), (std::vector<std::string>{"busy"}));
+    busy.in_flight = 2;
+    ASSERT_TRUE(Rank(spec, {busy}).empty());
 }
 
 TEST(RankFiltersArchAndRemoteOnly) {

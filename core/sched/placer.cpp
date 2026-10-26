@@ -261,6 +261,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             if (local_) {
                 candidates.push_back(Candidate{.node_id = local_id_,
                                                .is_local = true,
+                                               .cores_total = self.cores_total,
                                                .cores_free = self.cores_free,
                                                .mem_available = self.mem_available,
                                                .cpu_load_pct = self.cpu_load_pct,
@@ -275,6 +276,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                 if (rejected.count(p.id)) continue;
                 candidates.push_back(Candidate{.node_id = p.id,
                                                .is_local = false,
+                                               .cores_total = p.cores,
                                                .cores_free = p.cores_free,
                                                .mem_available = p.mem_available,
                                                .cpu_load_pct = p.cpu_load_pct,
