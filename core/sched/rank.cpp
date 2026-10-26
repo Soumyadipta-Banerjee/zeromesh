@@ -7,10 +7,13 @@ namespace zeromesh::sched {
 
 namespace {
 
-// How many more tasks of `cores` this node can take right now.
+// How many more tasks of `cores` this node can take. Capacity is cores_total
+// (fixed), not live cores_free — otherwise a full-CPU Blender run makes Rank
+// think the machine has vanished and waiting tasks hard-fail.
 int FreeSlots(const Candidate& c, int cores) {
     const int per = std::max(cores, 1);
-    const int capacity = std::max(c.cores_free, 0) / per;
+    int total = c.cores_total > 0 ? c.cores_total : c.cores_free;
+    const int capacity = std::max(total, 0) / per;
     return capacity - c.in_flight;
 }
 
