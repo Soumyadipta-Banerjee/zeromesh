@@ -202,6 +202,7 @@ int Daemon::Run() {
     std::shared_ptr<sched::Placer> placer;
     std::unique_ptr<ClientService> client_service;
     std::unique_ptr<NodeService> node_service;
+    std::shared_ptr<net::PeerTable> peers;
     std::shared_ptr<net::Discovery> discovery;
     std::shared_ptr<TeamState> team;
     std::shared_ptr<net::PinStore> pins;
@@ -215,6 +216,7 @@ int Daemon::Run() {
 
     std::atomic<bool> admit_stop{false};
     std::thread admit_thread;
+    std::thread drain_thread;
 
     std::mutex telemetry_mu;
     net::TelemetrySampler telemetry_sampler;
@@ -222,6 +224,7 @@ int Daemon::Run() {
         std::lock_guard lock(telemetry_mu);
         return telemetry_sampler.Sample();
     };
+    DrainController drain_controller;
 
     try {
         auto state = NodeState::LoadOrCreate(config_.state_dir);
@@ -240,7 +243,7 @@ int Daemon::Run() {
         int slots = std::max(1, hw - 1);
         local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, slots);
         auto cache = std::make_shared<ActionCache>(cas);
-        auto peers = std::make_shared<net::PeerTable>();
+        peers = std::make_shared<net::PeerTable>();
 
         team = std::make_shared<TeamState>();
         team->state_dir = config_.state_dir;
@@ -288,6 +291,7 @@ int Daemon::Run() {
         client_service = std::make_unique<ClientService>(cas, merkle, jobs, peers, opts, team, local_executor);
 
         DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
+        drain_controller.SetPolicy(policy);
         node_service = std::make_unique<NodeService>(
             node_id, pins, [team]() { return team->Get(); }, identity.fingerprint,
             [svc = client_service.get()]() { return svc->SelfInfo(); }, cas, registry, local_executor, telemetry_fn,
@@ -352,12 +356,65 @@ int Daemon::Run() {
             }
         });
 
+        // Sticky drain (M4): sample telemetry, keep discovery announcements draining until
+        // the hold period clears, notify requesters, and cancel preemptible donor tasks.
+        drain_thread = std::thread([&]() {
+            while (!admit_stop.load()) {
+                const net::Telemetry t = telemetry_fn();
+                const auto upd = drain_controller.Tick(t);
+                if (upd.entered) {
+                    std::cerr << "zmd: draining: " << upd.reason << "\n";
+                    if (discovery) discovery->BroadcastNodeDraining(upd.reason);
+                    if (node_service) {
+                        node_service->SetDraining(true, upd.reason);
+                        for (const auto& req_id : node_service->RequestersWithWork()) {
+                            std::shared_ptr<NodeClient> c;
+                            {
+                                std::lock_guard lock(clients_mu);
+                                if (auto it = clients.find(req_id); it != clients.end()) c = it->second;
+                            }
+                            if (!c && peers) {
+                                if (auto peer = peers->Get(req_id);
+                                    peer && !peer->ip_address.empty() && peer->node_port > 0 &&
+                                    pins->FingerprintFor(peer->id)) {
+                                    c = std::make_shared<NodeClient>(
+                                        peer->ip_address + ":" + std::to_string(peer->node_port), identity, pins,
+                                        peer->id);
+                                    std::lock_guard lock(clients_mu);
+                                    clients[peer->id] = c;
+                                }
+                            }
+                            if (c) {
+                                std::string err;
+                                c->Drain(upd.reason, &err);
+                            }
+                        }
+                        node_service->CancelPreemptible();
+                    }
+                } else if (upd.left) {
+                    std::cerr << "zmd: resume accepting work\n";
+                    if (discovery) {
+                        discovery->SetLocalState(net::PeerState::Active);
+                        discovery->AnnounceNow();
+                    }
+                    if (node_service) node_service->SetDraining(false);
+                } else if (upd.draining && discovery &&
+                           discovery->local_state() != net::PeerState::Draining) {
+                    discovery->SetLocalState(net::PeerState::Draining);
+                }
+                for (int i = 0; i < 10 && !admit_stop.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+        });
+
         std::cerr << "zmd: node " << node_id << " listening on " << sock.string() << " and NodeApi :"
                   << config_.node_port << "\n";
     } catch (const std::exception& e) {
         std::cerr << "zmd: " << e.what() << "\n";
         admit_stop = true;
         if (admit_thread.joinable()) admit_thread.join();
+        if (drain_thread.joinable()) drain_thread.join();
         if (discovery) discovery->Stop();
         if (node_server) node_server->Shutdown();
         if (client_server) client_server->Shutdown();
@@ -383,9 +440,10 @@ int Daemon::Run() {
         if (fds[1].revents & POLLIN) break;
     }
 
-    // Stop admission, then discovery; Drain peers with tasks in flight; shut down both servers.
+    // Stop admission and drain monitor, then discovery; Drain peers with tasks in flight.
     admit_stop = true;
     if (admit_thread.joinable()) admit_thread.join();
+    if (drain_thread.joinable()) drain_thread.join();
     if (discovery) {
         discovery->BroadcastNodeDraining("shutting down");
         discovery->Stop();

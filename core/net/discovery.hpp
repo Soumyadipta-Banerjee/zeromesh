@@ -91,7 +91,14 @@ public:
     // Sends one announcement now. No-op without a team.
     void AnnounceNow();
 
+    // Sticky local peer state for periodic announcements (Active by default).
+    // Draining stays on the wire until SetLocalState(Active), so a one-shot
+    // BroadcastNodeDraining is not overwritten by the next 2 s announce.
+    void SetLocalState(PeerState state);
+    [[nodiscard]] PeerState local_state() const;
+
     // Tells team peers we are draining (battery, thermal, user activity). No-op without a team.
+    // Also sets local state to Draining so subsequent AnnounceNow stay draining.
     void BroadcastNodeDraining(const std::string& reason);
 
     [[nodiscard]] const std::string& node_id() const { return config_.node_id; }
@@ -109,6 +116,8 @@ private:
     mutable std::mutex team_mutex_;
     std::optional<TeamKey> team_;
     std::mutex telemetry_mutex_;
+    mutable std::mutex state_mutex_;
+    PeerState local_state_{PeerState::Active};
     std::atomic<bool> running_{false};
     std::thread advertiser_thread_;
     std::thread listener_thread_;

@@ -5,9 +5,29 @@
 namespace zeromesh::net {
 
 void PeerTable::Upsert(Peer peer) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    peer.last_seen = std::chrono::steady_clock::now();
-    peers_[peer.id] = std::move(peer);
+    std::vector<PreemptCallback> callbacks;
+    std::string drained_id;
+    std::string drained_reason;
+    bool entered_drain = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        peer.last_seen = std::chrono::steady_clock::now();
+        auto it = peers_.find(peer.id);
+        const bool was_draining = it != peers_.end() && it->second.state == PeerState::Draining;
+        if (peer.state == PeerState::Draining && !was_draining) {
+            entered_drain = true;
+            drained_id = peer.id;
+            drained_reason = peer.draining_reason.empty() ? "draining" : peer.draining_reason;
+            callbacks = preempt_callbacks_;
+        }
+        peers_[peer.id] = std::move(peer);
+    }
+    // Announcements with state=Draining must preempt the same way as ZM2D / NodeApi.Drain.
+    if (entered_drain) {
+        for (const auto& cb : callbacks) {
+            if (cb) cb(drained_id, drained_reason);
+        }
+    }
 }
 
 void PeerTable::MarkDraining(const std::string& id, const std::string& reason) {

@@ -65,6 +65,18 @@ public:
     grpc::Status CancelTask(grpc::ServerContext* ctx, const v1::TaskRef* req, v1::Empty* resp) override;
     grpc::Status Drain(grpc::ServerContext* ctx, const v1::DrainNotice* req, v1::Empty* resp) override;
 
+    // Sticky donor drain: refuse new offers while draining. Entering drain cancels
+    // preemptible running tasks; non-preemptible ones keep running.
+    void SetDraining(bool draining, std::string reason = {});
+    [[nodiscard]] bool IsDraining() const;
+
+    // Node ids of requesters that currently have a reserved or running task here.
+    [[nodiscard]] std::vector<std::string> RequestersWithWork() const;
+
+    // Cancels every running remote task whose Policy.preemptible is true (default).
+    // Returns how many were cancelled.
+    int CancelPreemptible();
+
 private:
     // The pin gate: OK (and the caller's pinned node id in *peer_node_id, if given)
     // iff the caller's TLS certificate fingerprint is pinned; else PERMISSION_DENIED.
@@ -87,6 +99,7 @@ private:
     struct Running {
         std::string exec_id;
         int cores{1};
+        bool preemptible{true};
     };
     void PurgeExpiredLocked();
     int CoresInUseLocked() const;
@@ -99,9 +112,11 @@ private:
     DonorPolicy policy_;
     std::shared_ptr<net::PeerTable> peers_;
 
-    std::mutex mu_;
+    mutable std::mutex mu_;
     std::map<TaskKey, Reservation> reserved_;
     std::map<TaskKey, Running> running_;
+    bool draining_{false};
+    std::string drain_reason_;
 };
 
 inline constexpr std::chrono::seconds kOfferReservation{30};

@@ -3,8 +3,10 @@
 #include <sys/utsname.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -94,6 +96,36 @@ void ReadPowerSupply(const fs::path& dir, Telemetry& out) {
     out.on_ac = mains_online || !have_battery;
 }
 
+// Sum of IRQ counts whose device name looks like keyboard/mouse/touchpad input.
+uint64_t ReadInputIrqs(const fs::path& path) {
+    std::ifstream in(path);
+    std::string line;
+    uint64_t total = 0;
+    while (std::getline(in, line)) {
+        // " 12:  100 200  ...  i8042" or " 1: ...  keyboard"
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string lower = line;
+        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lower.find("i8042") == std::string::npos && lower.find("keyboard") == std::string::npos &&
+            lower.find("mouse") == std::string::npos && lower.find("touchpad") == std::string::npos) {
+            continue;
+        }
+        std::istringstream ls(line.substr(colon + 1));
+        uint64_t n = 0;
+        while (ls >> n) total += n;
+    }
+    return total;
+}
+
+std::optional<bool> ReadUserActiveOverride(const fs::path& path) {
+    if (!fs::exists(path)) return std::nullopt;
+    const std::string v = ReadTrimmed(path);
+    if (v == "1" || v == "true") return true;
+    if (v == "0" || v == "false") return false;
+    return std::nullopt;
+}
+
 }  // namespace
 
 TelemetrySampler::TelemetrySampler(std::filesystem::path sysroot) : sysroot_(std::move(sysroot)) {}
@@ -115,6 +147,21 @@ Telemetry TelemetrySampler::Sample() {
 
     ReadMeminfo(sysroot_ / "proc/meminfo", t);
     ReadPowerSupply(sysroot_ / "sys/class/power_supply", t);
+
+    if (auto over = ReadUserActiveOverride(sysroot_ / "run/zeromesh/user_active")) {
+        t.user_active = *over;
+    } else {
+        // Require a clear jump in input IRQs so background noise and test harness
+        // activity do not flap the donor into sticky drain.
+        const uint64_t irqs = ReadInputIrqs(sysroot_ / "proc/interrupts");
+        constexpr uint64_t kActivityDelta = 64;
+        if (have_irq_prev_ && irqs > prev_input_irqs_ &&
+            (irqs - prev_input_irqs_) >= kActivityDelta) {
+            t.user_active = true;
+        }
+        have_irq_prev_ = true;
+        prev_input_irqs_ = irqs;
+    }
 
     utsname u{};
     if (uname(&u) == 0) t.arch = u.machine;

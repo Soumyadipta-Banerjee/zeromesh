@@ -62,6 +62,10 @@ DonorPolicy DonorPolicy::Parse(std::string_view text, std::ostream& warn, std::s
             if (auto v = ParseBool(value)) p.allow_network = *v; else bad();
         } else if (key == "drain_below_battery") {
             if (auto v = ParseInt(value, 0, 100)) p.drain_below_battery = *v; else bad();
+        } else if (key == "drain_on_user_activity") {
+            if (auto v = ParseBool(value)) p.drain_on_user_activity = *v; else bad();
+        } else if (key == "drain_hold_s") {
+            if (auto v = ParseInt(value, 0, 86400)) p.drain_hold_s = *v; else bad();
         } else {
             warn << where() << "unknown key '" << key << "', ignored\n";
         }
@@ -85,6 +89,12 @@ int DonorPolicy::CoreLimit(int cores_total) const {
 
 bool DonorPolicy::ShouldDrain(const net::Telemetry& t) const {
     return !t.on_ac && t.battery_pct >= 0 && t.battery_pct < drain_below_battery;
+}
+
+bool DonorPolicy::DrainCondition(const net::Telemetry& t) const {
+    if (ShouldDrain(t)) return true;
+    if (drain_on_user_activity && t.user_active) return true;
+    return false;
 }
 
 std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
@@ -118,6 +128,41 @@ std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v
                " are available";
     }
     return std::nullopt;
+}
+
+DrainController::DrainController(DonorPolicy policy) : policy_(std::move(policy)) {}
+
+void DrainController::SetPolicy(DonorPolicy policy) { policy_ = std::move(policy); }
+
+DrainController::TickResult DrainController::Tick(const net::Telemetry& t, Clock::time_point now) {
+    TickResult out;
+    std::string active_reason;
+    if (policy_.ShouldDrain(t)) {
+        active_reason = "battery at " + std::to_string(t.battery_pct) + "% (drain below " +
+                        std::to_string(policy_.drain_below_battery) + "%)";
+    } else if (policy_.drain_on_user_activity && t.user_active) {
+        active_reason = "user activity";
+    }
+
+    if (!active_reason.empty()) {
+        clear_since_.reset();
+        out.entered = !draining_;
+        draining_ = true;
+        reason_ = std::move(active_reason);
+    } else if (draining_) {
+        if (!clear_since_) clear_since_ = now;
+        const auto hold = std::chrono::seconds(std::max(policy_.drain_hold_s, 0));
+        if (now - *clear_since_ >= hold) {
+            draining_ = false;
+            reason_.clear();
+            clear_since_.reset();
+            out.left = true;
+        }
+    }
+
+    out.draining = draining_;
+    out.reason = reason_;
+    return out;
 }
 
 } // namespace zeromesh::node

@@ -55,3 +55,37 @@ TEST(TelemetryNoBatteryMeansAc) {
     ASSERT_EQ(t.battery_pct, -1);
     ASSERT_TRUE(t.on_ac);
 }
+
+TEST(TelemetryUserActiveOverride) {
+    TempDir root;
+    WriteFile(root / "proc/stat", ProcStat(0, 100));
+    WriteFile(root / "proc/meminfo", "MemTotal: 1000 kB\nMemAvailable: 500 kB\n");
+    WriteFile(root / "run/zeromesh/user_active", "1\n");
+    TelemetrySampler sampler(root.path());
+    ASSERT_TRUE(sampler.Sample().user_active);
+    WriteFile(root / "run/zeromesh/user_active", "0\n");
+    ASSERT_FALSE(sampler.Sample().user_active);
+}
+
+TEST(TelemetryUserActiveFromInterrupts) {
+    TempDir root;
+    WriteFile(root / "proc/stat", ProcStat(0, 100));
+    WriteFile(root / "proc/meminfo", "MemTotal: 1000 kB\nMemAvailable: 500 kB\n");
+    WriteFile(root / "proc/interrupts",
+              "           CPU0       CPU1\n"
+              "  1:         10         10   IO-APIC   1-edge      i8042\n"
+              " 12:          5          5   IO-APIC  12-edge      i8042\n");
+    TelemetrySampler sampler(root.path());
+    ASSERT_FALSE(sampler.Sample().user_active);  // first sample establishes the baseline
+    // Small bump is noise, not activity.
+    WriteFile(root / "proc/interrupts",
+              "           CPU0       CPU1\n"
+              "  1:         20         10   IO-APIC   1-edge      i8042\n"
+              " 12:          5          5   IO-APIC  12-edge      i8042\n");
+    ASSERT_FALSE(sampler.Sample().user_active);
+    WriteFile(root / "proc/interrupts",
+              "           CPU0       CPU1\n"
+              "  1:        100        100   IO-APIC   1-edge      i8042\n"
+              " 12:         50         50   IO-APIC  12-edge      i8042\n");
+    ASSERT_TRUE(sampler.Sample().user_active);
+}
