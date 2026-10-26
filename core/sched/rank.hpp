@@ -31,8 +31,9 @@ struct Candidate {
 //   - cores_free - in_flight * cores >= cores (cores 0 means 1)
 //   - mem_available >= mem_bytes
 //   - policy.may_run_local / may_run_remote (unset = true)
-// Order: missing_bytes ascending (unknown after known), cpu_load_pct ascending (most idle
-// first), on AC first, latency ascending, then node_id.
+// Order: free slots descending (cores_free/cores - in_flight) so work spreads across the
+// mesh like a render farm queue, then missing_bytes ascending (unknown after known),
+// cpu_load_pct ascending, on AC first, latency ascending, then node_id.
 std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates);
 
 } // namespace zeromesh::sched

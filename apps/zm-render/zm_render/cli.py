@@ -54,8 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--cores",
         type=int,
-        default=1,
-        help="Cores requested per chunk task (default: 1)",
+        default=8,
+        help="Cores reserved per chunk (default: 8). Higher ≈ fewer concurrent "
+        "Blenders per machine (Flamenco-style: keep peers fed from a queue).",
     )
     p.add_argument(
         "--remote-only",

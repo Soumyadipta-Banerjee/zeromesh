@@ -33,16 +33,31 @@ std::vector<std::string> Ids(const std::vector<Candidate>& cs) {
 
 TEST(RankPrefersFewerMissingBytes) {
     zeromesh::v1::TaskSpec spec;
+    // Same free slots → missing_bytes breaks the tie.
     auto ranked = Rank(spec, {Node("unknown", -1), Node("big", 5000), Node("small", 10), Node("zero", 0)});
     ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"zero", "small", "big", "unknown"}));
 
-    // Then idle CPU, AC power, latency, and node id as the deterministic tie-break.
     Candidate busy = Node("busy", -1), battery = Node("battery", -1), far = Node("far", -1);
     busy.cpu_load_pct = 90;
     battery.on_ac = false;
     far.latency = std::chrono::milliseconds(50);
     ranked = Rank(spec, {busy, far, battery, Node("b", -1), Node("a", -1)});
     ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"a", "b", "far", "battery", "busy"}));
+}
+
+TEST(RankPrefersMoreFreeSlots) {
+    zeromesh::v1::TaskSpec spec;
+    Candidate local = Node("local", 0, true);
+    local.cores_free = 12;
+    local.in_flight = 0;
+    Candidate peer = Node("peer", -1);
+    peer.cores_free = 20;
+    peer.in_flight = 0;
+    // Peer has more free slots despite unknown missing_bytes — do not pack local first.
+    ASSERT_EQ(Ids(Rank(spec, {local, peer})), (std::vector<std::string>{"peer", "local"}));
+
+    peer.in_flight = 10;  // 10 slots left on peer, 12 on local
+    ASSERT_EQ(Ids(Rank(spec, {local, peer})), (std::vector<std::string>{"local", "peer"}));
 }
 
 TEST(RankFiltersArchAndRemoteOnly) {
