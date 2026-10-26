@@ -12,6 +12,8 @@ Built on the **Remote Execution API (REAPI v2)**. Unmodified **CMake**, **Make**
 zeromesh/
 ├── meson.build                           # Root Meson build configuration (C++20)
 ├── subprojects/                          # Dependency fallbacks and wrap specifications
+├── include/
+│   └── zmdsm.h                           # Public C library header for Distributed Shared Memory (DSM)
 ├── proto/
 │   └── remote_execution.proto            # Official REAPI v2 protocol definitions
 ├── src/
@@ -19,13 +21,19 @@ zeromesh/
 │   ├── discovery/
 │   │   ├── mdns.hpp / .cpp               # mDNS broadcast & listener (_zeromesh._tcp)
 │   │   └── peer_table.hpp / .cpp         # Node telemetry, ping, and peer registry
+│   ├── dht/
+│   │   └── kademlia.hpp / .cpp           # BitTorrent Kademlia DHT (chunk providers, action cache)
+│   ├── vfs/
+│   │   └── fuse_fs.hpp / .cpp            # Distributed Secure FUSE Filesystem (fuse3 / lazy CAS)
+│   ├── dsm/
+│   │   └── dsm_engine.hpp / .cpp         # Network Distributed Shared Memory engine (LRC / page traps)
 │   ├── reapi/
 │   │   ├── server.hpp / .cpp             # gRPC server setup (127.0.0.1:8980)
 │   │   ├── execution_service.hpp / .cpp  # REAPI Execution service implementation
 │   │   ├── cas_service.hpp / .cpp        # ContentAddressableStorage service
 │   │   └── action_cache.hpp / .cpp       # ActionCache get/update
 │   ├── cas/
-│   │   ├── store.hpp / .cpp              # Local content-addressed store (SHA-256)
+│   │   ├── store.hpp / .cpp              # Local content-addressed store (SHA-256 / BLAKE3)
 │   │   ├── merkle.hpp / .cpp             # Directory tree hasher / digest calculator
 │   │   └── p2p_syncer.hpp / .cpp         # Local LAN blob streamer
 │   ├── scheduler/
@@ -36,6 +44,10 @@ zeromesh/
 │   │   ├── bwrap.hpp / .cpp              # bubblewrap CLI builder & fork/exec supervisor
 │   │   ├── landlock.hpp / .cpp           # Direct Linux Landlock syscall setup
 │   │   └── host_guard.hpp / .cpp         # sched_setscheduler(SCHED_IDLE) & power monitor
+│   ├── gpu/
+│   │   └── gpu_engine.hpp / .cpp         # Heterogeneous accelerator mesh (wgpu / CUDA)
+│   ├── verify/
+│   │   └── byzantine_spot_checker.hpp    # 2% Byzantine spot-checking & TPM/Enclave signing
 │   └── ui/
 │       └── tui.hpp / .cpp                # Terminal monitor (ftxui / ncurses)
 ├── PLAN.md                               # Living architectural state and roadmap
@@ -64,6 +76,12 @@ zeromesh/
 | **`src/executor/bwrap.*`** | Configures unprivileged Bubblewrap isolation boundaries | `BwrapBuilder` | `BuildArgs()`, `RunSandboxed()` |
 | **`src/executor/landlock.*`** | Configures in-kernel Landlock filesystem access control | `LandlockSandbox` | `ApplyRuleset(roPaths, rwPaths)` |
 | **`src/executor/host_guard.*`** | Enforces `SCHED_IDLE` and thermal/battery preemption | `HostGuard` | `EnforceIdlePriority(pid)`, `IsThrottled()`, `CheckBattery()` |
+| **`src/dht/kademlia.*`** | BitTorrent Kademlia DHT for trackerless chunk provider discovery & action memoization | `KademliaDht`, `DhtNode` | `Start()`, `AnnounceChunk()`, `GetChunkProviders()`, `FindValue()` |
+| **`src/vfs/fuse_fs.*`** | Distributed Secure FUSE-FS (`zm-fs`) via `fuse3` with lazy chunk faulting | `FuseFileSystem`, `FileInode` | `Mount()`, `Unmount()`, `PublishFile()` |
+| **`src/dsm/dsm_engine.*`** | Network Distributed Shared Memory engine; page traps & release consistency | `DsmEngine`, `DsmRegion` | `Initialize()`, `AllocateRegion()`, `Barrier()`, `Lock()` |
+| **`include/zmdsm.h`** | Public C API for Distributed Shared Memory applications | C API Functions | `zmdsm_init()`, `zmdsm_alloc()`, `zmdsm_barrier()`, `zmdsm_lock()` |
+| **`src/gpu/gpu_engine.*`** | Heterogeneous accelerator mesh (`wgpu` / CUDA) with bandwidth gate | `GpuEngine`, `GpuProfile` | `ProbeHardware()`, `ShouldOffload()`, `ExecuteComputeKernel()` |
+| **`src/verify/byzantine_spot_checker.*`** | 2% randomized shadow verification and TPM/Enclave signing | `ByzantineSpotChecker` | `ShouldSpotCheck()`, `VerifyResult()`, `QuarantinePeer()` |
 | **`src/ui/tui.*`** | Live terminal core and network activity monitor | `TerminalUI` | `RenderDashboard(peerTable, stats)` |
 
 ---
@@ -152,3 +170,60 @@ You can also run commands through the ZeroMesh launcher:
 ```bash
 zm run -- g++ -c main.cpp -o main.o
 ```
+
+---
+
+## 6. Distributed Secure FUSE Filesystem (`zm-fs`)
+
+Mount a virtual, peer-synchronized folder across all paired laptops with zero central storage servers:
+
+```bash
+# Mount the distributed mesh filesystem on local mountpoint
+zm fs mount ~/zeromesh-shared
+
+# Files are chunked (512 KB), encrypted with ChaCha20-Poly1305, and cached on local NVMe
+cp my_dataset.tar.zst ~/zeromesh-shared/
+
+# Other nodes in the mesh can read or execute it immediately via lazy on-demand chunk streaming
+ls -lh ~/zeromesh-shared/
+```
+
+---
+
+## 7. Network Distributed Shared Memory (DSM) C Library (`libzmdsm`)
+
+For high-performance simulations, distributed matrix models, or multi-node parallel computing without MPI:
+
+```c
+#include <stdio.h>
+#include "zmdsm.h"
+
+int main() {
+    // 1. Join cluster session
+    zmdsm_ctx_t *ctx = zmdsm_init("mesh_compute_cluster", -1);
+
+    // 2. Allocate named shared memory segment (synchronized across all nodes)
+    size_t size = 1024 * 1024 * sizeof(double);
+    double *shared_array = (double *)zmdsm_alloc(ctx, "global_array", size, ZMDSM_READ_WRITE);
+
+    // 3. Coordinate work across nodes with barriers and locks
+    zmdsm_barrier(ctx, "start_sync");
+
+    int rank = zmdsm_get_node_id(ctx);
+    shared_array[rank * 100] = 42.0 * rank;
+
+    zmdsm_barrier(ctx, "end_sync");
+
+    // 4. Cleanup
+    zmdsm_free(ctx, shared_array);
+    zmdsm_destroy(ctx);
+    return 0;
+}
+```
+
+Compile directly with `-lzmdsm`:
+```bash
+gcc -O3 worker.c -o worker -lzmdsm
+./worker
+```
+
