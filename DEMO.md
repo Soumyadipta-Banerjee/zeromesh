@@ -30,20 +30,20 @@ pip install -e ./sdk/python -e ./apps/zm-render pytest grpcio
 Ubuntu sandbox tip: `sudo sysctl kernel.apparmor_restrict_userns=0`  
 (or `kernel.apparmor_restrict_unprivileged_userns=0`).
 
-## Quick demo (one command)
+## Offload from this laptop
 
-On the requester (after a build + `pip install -e ./apps/zm-render` once):
+After a build + `pip install -e ./apps/zm-render` once:
 
 ```bash
-./scripts/demo_blender.sh
-# optional: ./scripts/demo_blender.sh --frames 1-240 --chunk 16 --remote-only
+./scripts/setup_offload.sh
+# optional: ./scripts/setup_offload.sh --frames 1-240 --chunk 16
+# setup only:   ./scripts/setup_offload.sh --setup-only
 ```
 
-Starts `zmd` if needed, kicks off `zm-render` on `spin_cube.blend` in the background,
-then drops you into `zm monitor` (q / Ctrl-C to leave). Render log: `/tmp/zeromesh-demo-render.log`.
+Starts `zmd` if needed, submits `spin_cube.blend` with **`--remote-only`** (work leaves this
+laptop), then opens `zm monitor`. Logs: `/tmp/zeromesh-offload-*.log`.
 
-Friend machine: `source scripts/demo_env.sh && ./build-verify/zmd` (or `./build/zmd`), then
-`./build-verify/zm team join '…'` if you are not already on the same team.
+On each donor: `source scripts/demo_env.sh && zmd`, same team (`zm team join '…'`), `blender` on PATH.
 
 ## Demo script (manual)
 
