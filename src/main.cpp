@@ -1,51 +1,23 @@
-#include "cas/merkle.hpp"
-#include "cas/store.hpp"
-#include "dht/kademlia.hpp"
-#include "discovery/mdns.hpp"
 #include "discovery/peer_table.hpp"
 #include "executor/host_guard.hpp"
-#include "executor/runner.hpp"
-#include "reapi/action_cache.hpp"
-#include "reapi/cas_service.hpp"
-#include "reapi/execution_service.hpp"
-#include "reapi/server.hpp"
-#include "scheduler/heuristics.hpp"
-#include "scheduler/scheduler.hpp"
 #include "ui/tui.hpp"
-#include "vfs/fuse_fs.hpp"
 
-#include <chrono>
 #include <iostream>
 #include <memory>
 #include <string>
-#include <thread>
-#include <vector>
 
-void PrintBanner() {
-    std::cout << R"(
-  ______               __  __           _     
- |___  /              |  \/  |         | |    
-    / / ___ _ __ ___  | \  / | ___  ___| |__  
-   / / / _ \ '__/ _ \ | |\/| |/ _ \/ __| '_ \
-  / /_|  __/ | | (_) || |  | |  __/\__ \ | | |
- /_____\___|_|  \___/ |_|  |_|\___||___/_| |_|
-  Zero-Config P2P Remote Execution Mesh
-)" << std::endl;
-}
+namespace {
 
 void PrintUsage(const char* prog) {
-    PrintBanner();
-    std::cout << "Usage: " << prog << " <command> [options]\n\n"
+    std::cout << "ZeroMesh v0.1.0 (restructuring: see PLAN.md)\n\n"
+              << "Usage: " << prog << " <command>\n\n"
               << "Commands:\n"
-              << "  up       Start the ZeroMesh background daemon (zmd) on 127.0.0.1:8980\n"
-              << "  run      Execute a command via the local REAPI cluster\n"
-              << "  mount    Mount the DHT-backed distributed VFS (e.g. 'zm mount /mnt/zm')\n"
-              << "  publish  Publish file or dir to distributed VFS (e.g. 'zm publish ./src /src')\n"
-              << "  status   Display active cluster peers and hardware telemetry\n"
-              << "  monitor  Open the live interactive terminal dashboard\n"
-              << "  version  Show version and kernel Landlock / bwrap capability\n"
+              << "  status   Show this node and discovered peers\n"
+              << "  version  Show version\n"
               << std::endl;
 }
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -56,146 +28,14 @@ int main(int argc, char** argv) {
     std::string command = argv[1];
 
     if (command == "version" || command == "--version" || command == "-v") {
-        PrintBanner();
-        std::cout << "ZeroMesh v0.1.0 (REAPI v2 compatible)\n"
-                  << "C++ Standard: C++20\n"
-                  << "Host CPU Load: " << zeromesh::executor::HostGuard::GetLocalCpuLoadPct() << "%\n"
-                  << "Battery: " << zeromesh::executor::HostGuard::GetBatteryPercent() << "%\n"
-                  << "AC Power: " << (zeromesh::executor::HostGuard::IsAcConnected() ? "Connected" : "Disconnected") << "\n"
-                  << std::endl;
+        std::cout << "ZeroMesh v0.1.0\n";
         return 0;
     }
-
-    // Core subsystem initialization
-    auto cas_store = std::make_shared<zeromesh::cas::CasStore>();
-    auto merkle = std::make_shared<zeromesh::cas::MerkleBuilder>(cas_store);
-    auto task_runner = std::make_shared<zeromesh::executor::TaskRunner>(cas_store, merkle);
-    auto peer_table = std::make_shared<zeromesh::discovery::PeerTable>();
-    auto scheduler = std::make_shared<zeromesh::scheduler::Scheduler>(peer_table);
-
-    // mDNS zero-configuration peer discovery
-    zeromesh::discovery::MdnsConfig mdns_cfg{
-        .grpc_port = 8980
-    };
-    auto mdns_engine = std::make_shared<zeromesh::discovery::MdnsEngine>(peer_table, mdns_cfg);
-
-    // Option 1: REAPI Gateway Services
-    auto cas_svc = std::make_shared<zeromesh::reapi::CasService>(cas_store);
-    auto ac_svc = std::make_shared<zeromesh::reapi::ActionCacheService>(cas_store);
-    auto exec_svc = std::make_shared<zeromesh::reapi::ExecutionService>(cas_store, ac_svc, scheduler, task_runner);
-
-    zeromesh::reapi::ServerConfig config{
-        .host = "127.0.0.1",
-        .port = 8980
-    };
-    zeromesh::reapi::ReapiServer server(config, cas_svc, ac_svc, exec_svc);
-
-    if (command == "up" || command == "daemon") {
-        PrintBanner();
-        std::cout << "[+] ContentAddressableStorage (CAS) initialized at " << cas_store->GetBasePath() << "\n"
-                  << "[+] ActionCache (AC) initialized with Cache-First fast path\n"
-                  << "[+] Locality-Aware Scheduler initialized\n"
-                  << "[+] mDNS Zero-Config Discovery listening on LAN multicast\n"
-                  << "[+] REAPI v2 Gateway listening on 127.0.0.1:8980\n"
-                  << "\nBuild tools can now connect:\n"
-                  << "  export RECC_SERVER=127.0.0.1:8980\n"
-                  << "  export CMAKE_CXX_COMPILER_LAUNCHER=recc\n"
-                  << std::endl;
-
-        mdns_engine->Start();
-        server.Start();
-        return 0;
-    }
-
-    zeromesh::ui::TerminalUI tui(peer_table, scheduler);
 
     if (command == "status") {
-        PrintBanner();
+        auto peer_table = std::make_shared<zeromesh::discovery::PeerTable>();
+        zeromesh::ui::TerminalUI tui(peer_table);
         tui.PrintStatusSnapshot();
-        return 0;
-    }
-
-    if (command == "monitor") {
-        tui.RunLiveDashboard();
-        return 0;
-    }
-
-    if (command == "run") {
-        if (argc < 3) {
-            std::cerr << "Error: 'zm run' requires a command to execute (e.g. 'zm run -- g++ -c main.cpp')\n";
-            return 1;
-        }
-
-        std::vector<std::string> args;
-        for (int i = 2; i < argc; ++i) {
-            args.push_back(argv[i]);
-        }
-
-        std::cout << "Executing build action via ZeroMesh REAPI pipeline...\n";
-        zeromesh::executor::ExecutionRequest req{
-            .action_id = "test-action-001",
-            .command_args = args,
-            .env_vars = {},
-            .input_root_digest = zeromesh::cas::Digest{"", 0},
-            .expected_output_files = {},
-            .expected_output_directories = {},
-            .working_directory = "."
-        };
-
-        auto res = exec_svc->ExecuteAction(req);
-        std::cout << "Execution completed. Exit code: " << res.exit_code 
-                  << " (Worker: " << res.worker_id << ")\n";
-        return res.exit_code;
-    }
-
-    if (command == "mount") {
-        if (argc < 3) {
-            std::cerr << "Usage: " << argv[0] << " mount <mountpoint>\n";
-            return 1;
-        }
-        std::string mount_point = argv[2];
-        zeromesh::dht::NodeId self_id{};
-        self_id.fill(0x42);
-        auto dht = std::make_shared<zeromesh::dht::KademliaDht>(self_id, 8982);
-        dht->Start();
-
-        zeromesh::vfs::FuseConfig cfg;
-        cfg.mount_point = mount_point;
-        auto fs = std::make_unique<zeromesh::vfs::FuseFileSystem>(cfg, dht, cas_store);
-        std::cout << "[+] Mounting ZeroMesh DHT VFS at " << mount_point << "...\n";
-        if (!fs->Mount()) {
-            std::cerr << "Failed to mount filesystem.\n";
-            return 1;
-        }
-        std::cout << "[+] Mounted successfully. Press Ctrl+C to unmount.\n";
-        while (fs->IsMounted()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-        return 0;
-    }
-
-    if (command == "publish") {
-        if (argc < 4) {
-            std::cerr << "Usage: " << argv[0] << " publish <local_path> <virtual_path>\n";
-            return 1;
-        }
-        std::filesystem::path local_path = argv[2];
-        std::string vpath = argv[3];
-
-        zeromesh::dht::NodeId self_id{};
-        self_id.fill(0x42);
-        auto dht = std::make_shared<zeromesh::dht::KademliaDht>(self_id, 8982);
-        dht->Start();
-
-        zeromesh::vfs::FuseConfig cfg;
-        auto fs = std::make_unique<zeromesh::vfs::FuseFileSystem>(cfg, dht, cas_store);
-        if (std::filesystem::is_directory(local_path)) {
-            size_t count = fs->PublishDirectory(local_path, vpath);
-            std::cout << "[+] Published " << count << " files to " << vpath << "\n";
-        } else {
-            std::string hash = fs->PublishFile(local_path, vpath);
-            std::cout << "[+] Published file to " << vpath << " (manifest: " << hash << ")\n";
-        }
         return 0;
     }
 

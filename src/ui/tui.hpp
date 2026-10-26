@@ -1,7 +1,6 @@
 #pragma once
 
 #include "discovery/peer_table.hpp"
-#include "scheduler/scheduler.hpp"
 
 #include <atomic>
 #include <memory>
@@ -14,10 +13,7 @@ namespace zeromesh::ui {
  */
 class TerminalUI {
 public:
-    TerminalUI(
-        std::shared_ptr<discovery::PeerTable> peer_table,
-        std::shared_ptr<scheduler::Scheduler> scheduler
-    );
+    explicit TerminalUI(std::shared_ptr<discovery::PeerTable> peer_table);
     ~TerminalUI() = default;
 
     /**
@@ -32,7 +28,6 @@ public:
 
 private:
     std::shared_ptr<discovery::PeerTable> peer_table_;
-    std::shared_ptr<scheduler::Scheduler> scheduler_;
     std::atomic<bool> keep_running_{true};
 };
 
