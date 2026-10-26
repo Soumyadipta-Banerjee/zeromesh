@@ -1,0 +1,21 @@
+[Unit]
+Description=ZeroMesh Daemon (zmd) - peer-to-peer compute mesh
+Documentation=https://github.com/Soumyadipta-Banerjee/zeromesh
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zmd
+Restart=on-failure
+RestartSec=3s
+
+# ZeroMesh sandboxes tasks using bubblewrap.
+# To donate resources while logged out, enable lingering for your user:
+#   loginctl enable-linger $USER
+
+# Network requirements:
+#   - TCP 8981 (NodeApi mTLS)
+#   - UDP 8988 (Discovery multicast)
+
+[Install]
+WantedBy=default.target

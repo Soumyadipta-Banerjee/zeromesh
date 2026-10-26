@@ -2,31 +2,216 @@ name: ZeroMesh CI
 
 on:
   push:
-    branches: [ main, master, develop, 'restructure/**' ]
+    branches: [ main, master, develop, 'restructure/**', 'stream/**' ]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main, master, develop, 'restructure/**', 'stream/**' ]
 
 jobs:
-  build:
-    name: Build & test
-    runs-on: ubuntu-latest
+  build-test-matrix:
+    name: Build & Test (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install build tools and dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build g++ pkg-config bubblewrap \
+          sudo apt-get install -y \
+            meson ninja-build pkg-config bubblewrap \
+            g++ clang \
             libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
-            libsodium-dev libssl-dev python3-grpcio python3-grpc-tools
+            libsodium-dev libssl-dev
+          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
 
-      - name: Allow unprivileged user namespaces (needed by bubblewrap)
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Configure Linux kernel and network for sandboxing and discovery
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo ip link set lo multicast on || true
+          sudo ip route add 224.0.0.0/4 dev lo || true
 
-      - name: Build
-        run: make build
+      - name: Configure build
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: meson setup build
+
+      - name: Compile
+        run: ninja -C build
 
       - name: Test
-        run: make test
+        run: meson test -C build --print-errorlogs
+
+  sanitizers:
+    name: Sanitizers (ASan + UBSan)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build g++ pkg-config bubblewrap \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
+            libsodium-dev libssl-dev
+          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
+
+      - name: Configure Linux kernel and network
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo ip link set lo multicast on || true
+          sudo ip route add 224.0.0.0/4 dev lo || true
+
+      - name: Configure build with sanitizers
+        run: meson setup -Db_sanitize=address,undefined build
+
+      - name: Compile
+        run: ninja -C build
+
+      - name: Run unit tests under ASan and UBSan
+        env:
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: meson test -C build all_unit_tests --print-errorlogs
+
+  arch-linux:
+    name: Build & Test (Arch Linux Container)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies via pacman
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring || true
+          pacman -Syu --noconfirm \
+            base-devel meson ninja gcc pkgconf bubblewrap iproute2 \
+            protobuf grpc libsodium openssl \
+            python python-pytest python-protobuf python-grpcio python-grpcio-tools
+
+      - name: Configure network and unprivileged namespaces
+        run: |
+          ip link set lo multicast on || true
+          ip route add 224.0.0.0/4 dev lo || true
+
+      - name: Configure build
+        run: meson setup build
+
+      - name: Compile
+        run: ninja -C build
+
+      - name: Run unit tests
+        run: meson test -C build all_unit_tests --print-errorlogs
+
+  python-sdk:
+    name: Python SDK (Install & Test)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build g++ pkg-config bubblewrap \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
+            libsodium-dev libssl-dev
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
+
+      - name: Configure Linux kernel and network
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo ip link set lo multicast on || true
+          sudo ip route add 224.0.0.0/4 dev lo || true
+
+      - name: Build zmd and zm
+        run: |
+          meson setup build
+          ninja -C build
+
+      - name: Install Python SDK and test
+        run: |
+          if [ -d "sdk/python" ]; then
+            pip install ./sdk/python
+            python -c "import zeromesh; print('ZeroMesh SDK version:', zeromesh.__version__)"
+            pytest -v sdk/python/tests/
+          else
+            echo "sdk/python not present on this branch yet; skipping SDK tests."
+          fi
+
+  packaging:
+    name: Packaging (Debian & PKGBUILD)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools and dpkg-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build g++ pkg-config dpkg-dev \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
+            libsodium-dev libssl-dev
+          pip install --upgrade pip pytest grpcio protobuf grpcio-tools
+
+      - name: Build binaries
+        run: |
+          meson setup build
+          ninja -C build
+
+      - name: Build Debian package
+        run: ./packaging/debian/build_deb.sh build
+
+      - name: Inspect and verify Debian package
+        run: |
+          dpkg-deb -c zeromesh_0.1.0_amd64.deb
+          dpkg-deb -I zeromesh_0.1.0_amd64.deb
+
+      - name: Validate Arch PKGBUILD syntax
+        run: bash -n packaging/arch/PKGBUILD
