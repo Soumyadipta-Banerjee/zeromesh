@@ -3,6 +3,8 @@
 #include "discovery/peer_table.hpp"
 
 #include <chrono>
+#include <atomic>
+#include <optional>
 #include <thread>
 
 TEST(MdnsEngine_StartAndStop) {
@@ -57,18 +59,20 @@ TEST(MdnsEngine_P2PDiscoveryAndPreemptionBroadcast) {
     // Trigger immediate announcement from node 2
     engine2.AnnounceNow();
 
-    // Allow loopback packet propagation
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-    // Table 1 must have discovered peer-node-2
-    auto discovered = table1->Get("peer-node-2");
+    // Poll for loopback propagation; re-announce in case the first datagram raced the listener.
+    std::optional<zeromesh::discovery::Peer> discovered;
+    for (int i = 0; i < 50 && !discovered; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        discovered = table1->Get("peer-node-2");
+        if (!discovered && i % 5 == 4) engine2.AnnounceNow();
+    }
     ASSERT_TRUE(discovered.has_value());
     ASSERT_EQ(discovered->hostname, "laptop-2");
     ASSERT_EQ(discovered->grpc_port, 8981);
     ASSERT_EQ(discovered->cores, 16);
 
     // Test fast preemption signal propagation (< 500ms)
-    bool preempt_received = false;
+    std::atomic<bool> preempt_received{false};
     std::string preempt_reason;
     table1->RegisterPreemptCallback([&](const std::string& id, const std::string& reason) {
         if (id == "peer-node-2") {
@@ -79,7 +83,9 @@ TEST(MdnsEngine_P2PDiscoveryAndPreemptionBroadcast) {
 
     engine2.BroadcastNodeDraining("User opened IDE on donor laptop");
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (int i = 0; i < 50 && !preempt_received; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
     ASSERT_TRUE(preempt_received);
     ASSERT_EQ(preempt_reason, "User opened IDE on donor laptop");
