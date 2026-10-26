@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Blender binary name/path on the donor (default: blender)",
     )
     p.add_argument(
+        "--engine",
+        default=None,
+        metavar="NAME",
+        help="Blender render engine (-E), e.g. CYCLES; default: use the .blend setting",
+    )
+    p.add_argument(
         "--cores",
         type=int,
         default=8,
@@ -106,17 +112,21 @@ def main(argv: list[str] | None = None) -> int:
         env=args.env,
         encode=args.encode,
         blender_bin=args.blender,
+        engine=args.engine,
         cores=args.cores,
         may_run_local=not args.remote_only,
         may_run_remote=True,
     )
 
-    from zm_render.render import MissingFramesError
+    from zm_render.render import ChunkTasksFailed, MissingFramesError
 
     try:
         with client:
             result = run_render(client, opts)
     except FileNotFoundError as e:
+        print(f"zm-render: {e}", file=sys.stderr)
+        return 1
+    except ChunkTasksFailed as e:
         print(f"zm-render: {e}", file=sys.stderr)
         return 1
     except MissingFramesError as e:

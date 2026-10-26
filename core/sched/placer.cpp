@@ -467,6 +467,14 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         }
 
         std::string err;
+        if (node::EncodedOfferByteSize(task->id, spec, *needed) >
+            static_cast<size_t>(node::kNodeApiMaxMessageSize)) {
+            release(*reserved);
+            last_reason = "input tree too large to offer: " + std::to_string(needed->size()) + " digests";
+            skip.insert(reserved->node_id);
+            tried.erase(reserved->node_id);
+            continue;
+        }
         auto reply = client->Offer(task->id, spec, *needed, &err);
         if (!reply) {
             release(*reserved);

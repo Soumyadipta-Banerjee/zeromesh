@@ -54,6 +54,7 @@ class CustomDevelop(develop):
         super().run()
 
 
+# Runtime deps are declared in pyproject.toml ([project].dependencies).
 setup(
     name="zeromesh",
     version="0.1.0",
@@ -61,13 +62,6 @@ setup(
     author="ZeroMesh Team",
     packages=find_packages(),
     python_requires=">=3.9",
-    install_requires=[
-        "grpcio>=1.51.0",
-        "protobuf>=4.21.0",
-    ],
-    extras_require={
-        "dev": ["pytest>=7.0", "grpcio-tools>=1.51.0"],
-    },
     cmdclass={
         "build_py": CustomBuildPy,
         "develop": CustomDevelop,

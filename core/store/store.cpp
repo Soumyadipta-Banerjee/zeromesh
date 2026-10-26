@@ -1,12 +1,18 @@
 #include "store/store.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
+#include <system_error>
 #include <unistd.h>
+#include <vector>
 
 namespace zeromesh::store {
 
@@ -169,6 +175,49 @@ Digest CasStore::ComputeFileDigest(const std::filesystem::path& file_path) {
     return Digest{ctx.Final(), total_size};
 }
 
+void RemovePath(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+std::filesystem::path MakeUniqueTempIn(const std::filesystem::path& dir, const char* prefix) {
+    std::string pattern = (dir / (std::string(prefix) + "XXXXXX")).string();
+    std::vector<char> buf(pattern.begin(), pattern.end());
+    buf.push_back('\0');
+    const int fd = ::mkstemp(buf.data());
+    if (fd < 0) {
+        throw std::system_error(errno, std::generic_category(), "mkstemp " + pattern);
+    }
+    ::close(fd);
+    return std::filesystem::path(buf.data());
+}
+
+void FsyncPath(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        throw std::system_error(errno, std::generic_category(), "open for fsync " + path.string());
+    }
+    if (::fsync(fd) != 0) {
+        const int err = errno;
+        ::close(fd);
+        throw std::system_error(err, std::generic_category(), "fsync " + path.string());
+    }
+    ::close(fd);
+}
+
+void CommitTempFile(const std::filesystem::path& tmp, const std::filesystem::path& target) {
+    FsyncPath(tmp);
+    std::error_code ec;
+    std::filesystem::rename(tmp, target, ec);
+    if (!ec) return;
+    if (std::filesystem::exists(target)) {
+        RemovePath(tmp);
+        return;
+    }
+    RemovePath(tmp);
+    throw std::system_error(ec.value(), std::generic_category(), "rename " + tmp.string() + " -> " + target.string());
+}
+
 Digest CasStore::PutBlob(std::string_view data) {
     Digest digest = ComputeDigest(data);
 
@@ -185,30 +234,79 @@ Digest CasStore::PutBlob(std::string_view data) {
         return digest;
     }
 
-    auto tmp_target = blobs_dir_ / ("upload-" + digest.hash + ".tmp");
+    auto tmp_target = MakeUniqueTempIn(blobs_dir_, "upload-");
     {
         std::ofstream out(tmp_target, std::ios::binary);
-        out.write(data.data(), data.size());
+        if (!out.is_open()) {
+            RemovePath(tmp_target);
+            throw std::runtime_error("cannot write CAS blob temp " + tmp_target.string());
+        }
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+        if (!out.good()) {
+            RemovePath(tmp_target);
+            throw std::runtime_error("short write to CAS blob temp " + tmp_target.string());
+        }
+        out.close();
+        if (!out.good()) {
+            RemovePath(tmp_target);
+            throw std::runtime_error("cannot close CAS blob temp " + tmp_target.string());
+        }
     }
-
-    std::filesystem::rename(tmp_target, target);
+    try {
+        CommitTempFile(tmp_target, target);
+    } catch (...) {
+        RemovePath(tmp_target);
+        throw;
+    }
     return digest;
 }
 
 Digest CasStore::PutBlobFile(const std::filesystem::path& src_file) {
-    Digest digest = ComputeFileDigest(src_file);
-    if (digest.hash.empty()) {
-        return digest;
-    }
-    auto target = blobs_dir_ / digest.hash;
-    if (std::filesystem::exists(target)) {
-        return digest;
+    std::ifstream in(src_file, std::ios::binary);
+    if (!in.is_open()) return Digest{"", 0};
+
+    auto tmp_target = MakeUniqueTempIn(blobs_dir_, "upload-");
+    std::ofstream out(tmp_target, std::ios::binary);
+    if (!out.is_open()) {
+        RemovePath(tmp_target);
+        throw std::runtime_error("cannot write CAS blob temp " + tmp_target.string());
     }
 
-    // Copy then rename, so a concurrent reader never sees a partial blob.
-    auto tmp_target = blobs_dir_ / ("upload-" + digest.hash + "-" + std::to_string(::getpid()) + ".tmp");
-    std::filesystem::copy_file(src_file, tmp_target, std::filesystem::copy_options::overwrite_existing);
-    std::filesystem::rename(tmp_target, target);
+    Sha256Engine ctx;
+    std::array<char, 64 * 1024> buf{};
+    int64_t total_size = 0;
+    while (in.read(buf.data(), buf.size()) || in.gcount() > 0) {
+        const auto n = in.gcount();
+        total_size += n;
+        ctx.Update(reinterpret_cast<const uint8_t*>(buf.data()), static_cast<size_t>(n));
+        out.write(buf.data(), n);
+        if (!out.good()) {
+            RemovePath(tmp_target);
+            throw std::runtime_error("short write to CAS blob temp " + tmp_target.string());
+        }
+    }
+    if (!in.eof() && in.fail()) {
+        RemovePath(tmp_target);
+        throw std::runtime_error("cannot read " + src_file.string());
+    }
+    out.close();
+    if (!out.good()) {
+        RemovePath(tmp_target);
+        throw std::runtime_error("cannot close CAS blob temp " + tmp_target.string());
+    }
+
+    Digest digest{ctx.Final(), total_size};
+    auto target = blobs_dir_ / digest.hash;
+    if (std::filesystem::exists(target)) {
+        RemovePath(tmp_target);
+        return digest;
+    }
+    try {
+        CommitTempFile(tmp_target, target);
+    } catch (...) {
+        RemovePath(tmp_target);
+        throw;
+    }
     return digest;
 }
 
@@ -250,10 +348,31 @@ std::filesystem::path CasStore::GetBlobPath(const std::string& hash) const {
 bool CasStore::PutActionResult(const std::string& action_hash, std::string_view serialized_result) {
     if (!IsValidHash(action_hash)) return false;
     auto target = ac_dir_ / action_hash;
-    std::ofstream out(target, std::ios::binary);
-    if (!out.is_open()) return false;
-    out.write(serialized_result.data(), serialized_result.size());
-    return true;
+    if (std::filesystem::exists(target)) return true;
+    std::filesystem::path tmp;
+    try {
+        tmp = MakeUniqueTempIn(ac_dir_, "ac-");
+        std::ofstream out(tmp, std::ios::binary);
+        if (!out.is_open()) {
+            RemovePath(tmp);
+            return false;
+        }
+        out.write(serialized_result.data(), static_cast<std::streamsize>(serialized_result.size()));
+        if (!out.good()) {
+            RemovePath(tmp);
+            return false;
+        }
+        out.close();
+        if (!out.good()) {
+            RemovePath(tmp);
+            return false;
+        }
+        CommitTempFile(tmp, target);
+        return true;
+    } catch (...) {
+        if (!tmp.empty()) RemovePath(tmp);
+        return false;
+    }
 }
 
 std::optional<std::string> CasStore::GetActionResult(const std::string& action_hash) const {

@@ -1,11 +1,13 @@
 #include "tests/unit/node_fixture.hpp"
 
 #include "node/convert.hpp"
+#include "node/node_client.hpp"
 #include "store/merkle.hpp"
 
 #include <grpcpp/client_context.h>
 
 #include <atomic>
+#include <cstdio>
 #include <chrono>
 #include <thread>
 #include <vector>
@@ -122,6 +124,33 @@ TEST(NodeApiRemoteRun) {
 
     // The reservation was used up.
     Expect(!client->Run("t1", nullptr, &err).has_value(), "second run of t1 succeeded");
+}
+
+TEST(NodeApiLargeOfferAccepts) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+
+    v1::TaskSpec spec = Shell("true");
+    std::vector<v1::Digest> needed;
+    needed.reserve(70000);
+    for (int i = 0; i < 70000; ++i) {
+        v1::Digest d;
+        char hex[65];
+        std::snprintf(hex, sizeof(hex), "%064x", i);
+        d.set_hash(hex);
+        d.set_size_bytes(1);
+        needed.push_back(d);
+    }
+    ASSERT_TRUE(zeromesh::node::EncodedOfferByteSize("big-offer", spec, needed) <
+                static_cast<size_t>(zeromesh::node::kNodeApiMaxMessageSize));
+
+    std::string err;
+    auto reply = a.ClientTo(b)->Offer("big-offer", spec, needed, &err);
+    Expect(reply.has_value(), err);
+    ASSERT_TRUE(reply->accepted());
 }
 
 TEST(NodeApiOfferRejectsMissingCommand) {

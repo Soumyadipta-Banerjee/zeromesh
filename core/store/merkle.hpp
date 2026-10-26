@@ -64,7 +64,8 @@ public:
      * existing directory there (the item wins on name clashes); a file item replaces
      * whatever had that name. An empty base_tree hash means an empty tree.
      */
-    Digest Overlay(const Digest& base_tree, const std::string& at_path, const Digest& item, bool item_is_tree);
+    Digest Overlay(const Digest& base_tree, const std::string& at_path, const Digest& item, bool item_is_tree,
+                   bool item_executable = false);
 
     /**
      * @brief Every digest reachable from the tree `root`: the root manifest, each sub-tree
@@ -87,7 +88,7 @@ private:
     DirectoryManifest LoadManifest(const Digest& tree);
     Digest MergeTrees(const Digest& base, const Digest& item);
     Digest OverlayRecursive(const Digest& base, const std::vector<std::string>& segs, size_t i,
-                            const Digest& item, bool item_is_tree);
+                            const Digest& item, bool item_is_tree, bool item_executable);
     bool MaterializeDirectoryRecursive(const Digest& dir_digest, const std::filesystem::path& current_path);
 
     std::shared_ptr<CasStore> store_;

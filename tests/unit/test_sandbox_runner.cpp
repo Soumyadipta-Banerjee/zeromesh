@@ -100,6 +100,32 @@ TEST(RunnerCommandNotFoundAndHugeOutput) {
     ASSERT_EQ(big.stdout_head.size(), zeromesh::exec::kLogHeadBytes);
 }
 
+TEST(RunnerOutputRejectsSymlinkParentEscape) {
+    Fixture f;
+    TempDir secret;
+    zeromesh::testing::WriteFile(secret / "secret", "TOP_SECRET_KEY_MATERIAL");
+    const std::string secret_dir = secret.path().string();
+    RunSpec spec;
+    spec.outputs = {"esc/secret"};
+    auto r = f.Sh("ln -s '" + secret_dir + "' esc", spec);
+    ASSERT_EQ(r.exit_code, 0);
+    for (const auto& o : r.outputs) {
+        ASSERT_NE(o.path, std::string("esc/secret"));
+        if (!o.digest.hash.empty()) {
+            auto blob = f.cas->GetBlob(o.digest.hash);
+            ASSERT_TRUE(!blob.has_value() || *blob != "TOP_SECRET_KEY_MATERIAL");
+        }
+    }
+
+    RunSpec spec2;
+    spec2.capture_changed = true;
+    auto r2 = f.Sh("ln -s '" + secret_dir + "' esc", spec2);
+    ASSERT_EQ(r2.exit_code, 0);
+    for (const auto& o : r2.outputs) {
+        ASSERT_NE(o.path, std::string("esc/secret"));
+    }
+}
+
 TEST(RunnerOutputSymlinkNotFollowed) {
     Fixture f;
     RunSpec spec;

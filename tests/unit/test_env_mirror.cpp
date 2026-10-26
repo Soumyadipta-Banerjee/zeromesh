@@ -192,6 +192,15 @@ TEST(EnvMirrorCheckMethod) {
     ASSERT_FALSE(env->Check(unreachable).ok);
 }
 
+TEST(EnvMirrorDenyListCoversZeromeshStateAndConfig) {
+    auto rules = DenyList::CreateIgnoreRules();
+    ASSERT_TRUE(rules.Ignored(".local/share/zeromesh", true));
+    ASSERT_TRUE(rules.Ignored(".local/share/zeromesh/node.key", false));
+    ASSERT_TRUE(rules.Ignored(".local/share/zeromesh/team", false));
+    ASSERT_TRUE(rules.Ignored(".config/zeromesh", true));
+    ASSERT_TRUE(rules.Ignored(".config/zeromesh/donor.toml", false));
+}
+
 TEST(EnvMirrorCustomDenyList) {
     TempDir config_dir;
     WriteFile(config_dir / "mirror_deny", "*.custom_secret\nsecrets/\n");

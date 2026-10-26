@@ -20,11 +20,12 @@
 
 namespace zeromesh::net {
 
-// TLS 1.3 server credentials presenting `self`; a client certificate is requested
+// gRPC experimental TLS credentials presenting `self`; a client certificate is requested
 // and required but not chain-verified (GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_BUT_DONT_VERIFY).
+// This grpc++ build does not expose a minimum TLS version on Tls*CredentialsOptions.
 std::shared_ptr<grpc::ServerCredentials> ServerCreds(const Identity& self);
 
-// TLS 1.3 client credentials presenting `self`. Server chain and host-name checks are
+// Experimental TLS client credentials presenting `self`. Server chain and host-name checks are
 // off; instead the handshake fails unless accept(<server leaf fingerprint>) is true.
 // `accept` may run on any gRPC thread and must be thread-safe.
 std::shared_ptr<grpc::ChannelCredentials> ClientCreds(const Identity& self,

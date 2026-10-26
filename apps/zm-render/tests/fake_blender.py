@@ -2,9 +2,11 @@
 """Minimal Blender stand-in for CI: writes one tiny PNG per frame.
 
 Understands the subset of flags zm-render passes:
-  -b SCENE  -o //out/frame_####  -F PNG  -s A  -e B  -a
+  -b SCENE  [-noaudio]  [-E ENGINE]  -o //out/frame_####  -F PNG  -s A  -e B  -a
 
 If the scene basename contains 'skip3', frame 3 is omitted (for missing-frame tests).
+If the scene basename contains 'partialfail' and -s start >= 3, exits with code 1
+(for partial-chunk tests).
 """
 
 from __future__ import annotations
@@ -19,6 +21,9 @@ PNG = (
     b"\xc0\x00\x00\x00\x03\x00\x01\x00\x05\xfe\xd4\xef\x00\x00\x00\x00IEND\xaeB`\x82"
 )
 
+_FLAGS_WITH_ARG = frozenset({"-b", "-o", "-s", "-e", "-E", "-F"})
+_FLAGS_BOOL = frozenset({"-a", "-noaudio"})
+
 
 def main(argv: list[str]) -> int:
     out_pat = None
@@ -27,27 +32,37 @@ def main(argv: list[str]) -> int:
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == "-b" and i + 1 < len(argv):
-            scene = argv[i + 1]
+        if a in _FLAGS_WITH_ARG:
+            if i + 1 >= len(argv):
+                print(f"fake_blender: {a} requires an argument", file=sys.stderr)
+                return 2
+            if a == "-b":
+                scene = argv[i + 1]
+            elif a == "-o":
+                out_pat = argv[i + 1]
+            elif a == "-s":
+                start = int(argv[i + 1])
+            elif a == "-e":
+                end = int(argv[i + 1])
             i += 2
             continue
-        if a == "-o" and i + 1 < len(argv):
-            out_pat = argv[i + 1]
-            i += 2
+        if a in _FLAGS_BOOL:
+            i += 1
             continue
-        if a == "-s" and i + 1 < len(argv):
-            start = int(argv[i + 1])
-            i += 2
-            continue
-        if a == "-e" and i + 1 < len(argv):
-            end = int(argv[i + 1])
-            i += 2
+        if a.startswith("-") and a not in _FLAGS_WITH_ARG and a not in _FLAGS_BOOL:
+            # Unknown option (e.g. future Blender flags): ignore.
+            i += 1
             continue
         i += 1
 
     if out_pat is None or start is None or end is None:
         print("fake_blender: missing -o/-s/-e", file=sys.stderr)
         return 2
+
+    base = os.path.basename(scene)
+    if "partialfail" in base and start is not None and start >= 3:
+        print("fake_blender: simulating chunk task failure", file=sys.stderr)
+        return 1
 
     # Blender //path is relative to the .blend directory (= cwd in our sandbox).
     if out_pat.startswith("//"):
@@ -57,7 +72,7 @@ def main(argv: list[str]) -> int:
         print("fake_blender: expected #### in -o", file=sys.stderr)
         return 2
 
-    skip3 = "skip3" in os.path.basename(scene)
+    skip3 = "skip3" in base
     for frame in range(start, end + 1):
         if skip3 and frame == 3:
             continue

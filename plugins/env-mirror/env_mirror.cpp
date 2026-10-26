@@ -11,6 +11,16 @@ namespace {
 
 namespace fs = std::filesystem;
 
+bool SafeTaskIdForPath(const std::string& task_id) {
+    return !task_id.empty();
+}
+
+// Task ids come from peers and contain '/' (job/task); never use them as path components.
+fs::path MirrorScratchBase(const plugin::TaskContext& ctx) {
+    if (!ctx.scratch_dir.empty()) return ctx.scratch_dir;
+    return fs::temp_directory_path() / ("zm-mirror-" + store::CasStore::ComputeDigest(ctx.task_id).hash);
+}
+
 class MirrorEnv final : public plugin::IEnvProvider {
 public:
     explicit MirrorEnv(std::shared_ptr<IChunkSource> fallback_source)
@@ -49,10 +59,11 @@ public:
         if (!MirrorFuse::IsFuseAvailable()) {
             return {.value = std::nullopt, .error = "FUSE is not available on this donor"};
         }
+        if (!SafeTaskIdForPath(ctx.task_id)) {
+            return {.value = std::nullopt, .error = "invalid task_id for mirror scratch path"};
+        }
 
-        fs::path base_scratch = ctx.scratch_dir.empty()
-            ? (fs::temp_directory_path() / ("zm-mirror-" + ctx.task_id))
-            : ctx.scratch_dir;
+        fs::path base_scratch = MirrorScratchBase(ctx);
         fs::path mount_dir = base_scratch / "mirror";
         fs::path cache_dir = base_scratch / "mirror_cache";
         std::error_code ec;
@@ -173,13 +184,11 @@ public:
             fuse_inst->Unmount();
         }
 
-        // Secondary guarantee: ensure no mount remains at mount_dir
-        fs::path base_scratch = ctx.scratch_dir.empty()
-            ? (fs::temp_directory_path() / ("zm-mirror-" + ctx.task_id))
-            : ctx.scratch_dir;
-        fs::path mount_dir = base_scratch / "mirror";
+        if (!SafeTaskIdForPath(ctx.task_id)) return;
+
+        fs::path mount_dir = MirrorScratchBase(ctx) / "mirror";
         if (MirrorFuse::IsPathMounted(mount_dir)) {
-            ::system(("fusermount3 -u -z " + mount_dir.string() + " 2>/dev/null").c_str());
+            MirrorFuse::FusermountUnmountLazy(mount_dir);
         }
     }
 

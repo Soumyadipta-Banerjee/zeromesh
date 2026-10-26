@@ -278,7 +278,7 @@ Digest MerkleBuilder::MergeTrees(const Digest& base, const Digest& item) {
 }
 
 Digest MerkleBuilder::OverlayRecursive(const Digest& base, const std::vector<std::string>& segs, size_t i,
-                                       const Digest& item, bool item_is_tree) {
+                                       const Digest& item, bool item_is_tree, bool item_executable) {
     DirectoryManifest m = LoadManifest(base);
     const std::string& name = segs[i];
     const DirectoryNode* existing = FindDir(m, name);
@@ -291,17 +291,18 @@ Digest MerkleBuilder::OverlayRecursive(const Digest& base, const std::vector<std
             m.directories.push_back({.name = name, .digest = sub});
         } else {
             RemoveName(m, name);
-            m.files.push_back({.name = name, .digest = item, .is_executable = false});
+            m.files.push_back({.name = name, .digest = item, .is_executable = item_executable});
         }
     } else {
-        Digest sub = OverlayRecursive(existing_dir, segs, i + 1, item, item_is_tree);
+        Digest sub = OverlayRecursive(existing_dir, segs, i + 1, item, item_is_tree, item_executable);
         RemoveName(m, name);
         m.directories.push_back({.name = name, .digest = sub});
     }
     return store_->PutBlob(m.Serialize());
 }
 
-Digest MerkleBuilder::Overlay(const Digest& base_tree, const std::string& at_path, const Digest& item, bool item_is_tree) {
+Digest MerkleBuilder::Overlay(const Digest& base_tree, const std::string& at_path, const Digest& item, bool item_is_tree,
+                              bool item_executable) {
     std::vector<std::string> segs;
     size_t start = 0;
     while (start <= at_path.size()) {
@@ -317,7 +318,7 @@ Digest MerkleBuilder::Overlay(const Digest& base_tree, const std::string& at_pat
         if (!item_is_tree) throw std::invalid_argument("cannot overlay a file at the tree root");
         return base_tree.hash.empty() ? item : MergeTrees(base_tree, item);
     }
-    return OverlayRecursive(base_tree, segs, 0, item, item_is_tree);
+    return OverlayRecursive(base_tree, segs, 0, item, item_is_tree, item_executable);
 }
 
 } // namespace zeromesh::store
