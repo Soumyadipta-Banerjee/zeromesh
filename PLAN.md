@@ -1,156 +1,81 @@
-# ZeroMesh Architecture & Living Execution Plan
+# ZeroMesh: Living Plan
 
-> **Note for AI Agents & Developers:** Keep this document continuously updated. When you complete an objective or discover an architectural requirement, update the statuses (`[ ]` -> `[x]`), refine module contracts, and record design decisions in the ADR log at the bottom.
+> **For developers and AI agents:** keep this file true. A box is ticked only when the
+> milestone's acceptance test has passed. Never tick work that is stubbed or simulated.
+
+**Design:** [`docs/superpowers/specs/2026-10-26-core-plugin-architecture-design.md`](docs/superpowers/specs/2026-10-26-core-plugin-architecture-design.md)
+**Current implementation plan:** [`docs/superpowers/plans/2026-10-26-core-plugin-part1-m0-m3.md`](docs/superpowers/plans/2026-10-26-core-plugin-part1-m0-m3.md)
 
 ---
 
-## 1. High-Level Architectural Design
+## 1. Architecture
 
-ZeroMesh operates as a single binary daemon (`zmd` / `zm`) installed on each machine. It functions simultaneously as a **Client Proxy**, a **REAPI Service Provider**, a **P2P CAS Node**, and an **Unprivileged Hermetic Executor**.
+ZeroMesh is a small, stable core (`zmd`) that pools idle Linux machines on a LAN. Domain
+tools are **apps** built on a public client API. Gazebo is the structural model: a
+small core, with features attached through narrow plugin interfaces.
 
-```text
-+---------------------------------------------------------------------------------+
-|                                  Host Machine                                   |
-|                                                                                 |
-|  [ Workloads ] (CMake/Bazel / zm run / Native C App with libzmdsm / zm fs mount)|
-|         |                                 |                       |             |
-|         v (REAPI v2: :8980)               v (DSM Page Traps)      v (POSIX VFS) |
-|  +---------------------------------------------------------------------------+  |
-|  |                          ZeroMesh Daemon (zmd)                            |  |
-|  |                                                                           |  |
-|  |  +------------------------------+     +--------------------------------+  |  |
-|  |  |      REAPI gRPC Gateway      |     |    Locality-Aware Scheduler    |  |  |
-|  |  | - ExecutionService           | <-> | - Graph DAG analysis           |  |  |
-|  |  | - CASService                 |     | - Network latency & load weight|  |  |
-|  |  | - ActionCacheService         |     | - Critical path local pinning  |  |  |
-|  |  +------------------------------+     +--------------------------------+  |  |
-|  |                 |                                     |                   |  |
-|  |                 v                                     v                   |  |
-|  |  +------------------------------+     +--------------------------------+  |  |
-|  |  |   Secure FUSE-FS (zm-fs)     |     |    Sandboxed Task Executor     |  |  |
-|  |  | - fuse3 user-space mount     |     | - Bubblewrap (bwrap) isolation |  |  |
-|  |  | - Lazy block faulting        |     | - Landlock filesystem lockdown |  |  |
-|  |  | - ChaCha20-Poly1305 encrypt  |     | - SCHED_IDLE task priority     |  |  |
-|  |  +------------------------------+     | - Heterogeneous wgpu / CUDA    |  |  |
-|  |                 |                     +--------------------------------+  |  |
-|  |                 v                                     |                   |  |
-|  |  +------------------------------+                     v                   |  |
-|  |  |   Network DSM (libzmdsm)     |         Isolated Linux Subprocess       |  |  |
-|  |  | - Shared memory over LAN     |        (No host/network access)         |  |  |
-|  |  | - Twin-page diffs & barriers |                                         |  |  |
-|  |  +------------------------------+                                         |  |
-|  |                 |                                                         |  |
-|  |                 v                                                         |  |
-|  |  +------------------------------+     +--------------------------------+  |  |
-|  |  |  BitTorrent Kademlia DHT     |     |   2% Byzantine Spot Checker    |  |  |
-|  |  | - 256-bit BLAKE3 key space   | <-> | - Shadow re-execution quorum   |  |  |
-|  |  | - Chunk provider registry    |     | - Hardware TPM/Enclave signing |  |  |
-|  |  | - Action Cache memoization   |     | - Automated peer quarantine    |  |  |
-|  |  +------------------------------+     +--------------------------------+  |  |
-|  |                 |                                                         |  |
-|  |                 v                                                         |  |
-|  |  +------------------------------+                                         |  |
-|  |  |     mDNS Peer Mesh Engine    |                                         |  |
-|  |  | - Node discovery & heartbeat |                                         |  |
-|  |  | - Hardware telemetry gossip  |                                         |  |
-|  |  +------------------------------+                                         |  |
-|  +---------------------------------------------------------------------------+  |
-+---------------------------------------------------------------------------------+
-                                     |
-                (Encrypted LAN P2P Traffic: mTLS / Noise)
-                                     v
-+---------------------------------------------------------------------------------+
-|                                 Donor Peer 1..N                                 |
-| - Identical zmd daemon running in background                                    |
-| - Contributes idle CPU/GPU cycles automatically via SCHED_IDLE                  |
-+---------------------------------------------------------------------------------+
+```
+   ┌──────────────────────── apps (out-of-process, any language) ────────────────────────┐
+   │  zm CLI (run, run --each, status, monitor)   zm-render   (future: zm-sweep, zm-sim)  │
+   └───────────────────────────────┬──────────────────────────────────────────────────────┘
+                                   │ zeromesh.v1.ClientApi  (gRPC over a unix socket, owner-only)
+   ┌───────────────────────────────▼─────────── zmd (daemon) ────────────────────────────┐
+   │  node/      ClientApi service · NodeApi service · job manager                        │
+   │  sched/     task graph · placement · retries · re-dispatch on drain/loss             │
+   │  exec/      sandbox runner (bwrap + SCHED_IDLE)       ◄── IEnvProvider plugins       │
+   │  store/     CAS + Merkle (Objects)                                                   │
+   │  net/       discovery (team-scoped) · peer table · telemetry · secure transport      │
+   │  plugin/    loader + interfaces                       ◄── IFrontend plugins          │
+   └───────────────────────────────┬──────────────────────────────────────────────────────┘
+                                   │ zeromesh.v1.NodeApi  (gRPC over mTLS, team members only)
+                         other zmd nodes on the LAN
 ```
 
----
+## 2. Module status
 
-## 2. Component Design & Responsibilities
+| Module | Status |
+|---|---|
+| CAS store + Merkle | Real; moving to `core/store` |
+| Sandbox executor (bwrap, SCHED_IDLE) | Real; moving to `core/exec` |
+| LAN discovery + peer table | Real but unauthenticated; moving to `core/net` |
+| TUI | Real; becomes a ClientApi client |
+| Daemon, ClientApi, NodeApi, placement, team security | **Not built yet** (M2–M3) |
+| FUSE filesystem | Frozen until M5 (`env-mirror` plugin) |
+| REAPI front-end | Frozen until M6 (it was a print-only stub) |
+| DHT, DSM, GPU, Byzantine/TPM, torrent GUI | Frozen; see [`frozen/README.md`](frozen/README.md) |
 
-| Subsystem | Primary Responsibilities | Core Dependencies | Key Files |
-| :--- | :--- | :--- | :--- |
-| **`discovery/`** | Broadcast node capability over mDNS (`_zeromesh._tcp`); maintain dynamic peer routing table, heartbeat pings, and hardware telemetry (cores, load, battery). | Avahi / mDNS socket, POSIX sockets | `src/discovery/mdns.hpp`, `src/discovery/peer_table.hpp` |
-| **`dht/`** | BitTorrent-style Kademlia Distributed Hash Table; 256-bit BLAKE3 keys, $k$-buckets, chunk provider announcements (`ANNOUNCE_CHUNK`/`GET_PROVIDERS`), and Action Cache memoization. | Encrypted UDP, BLAKE3 | `src/dht/kademlia.hpp` |
-| **`vfs/`** | Distributed Secure FUSE Filesystem (`zm-fs`) via Linux `fuse3`; lazy block-level chunk faulting, local LRU NVMe cache, and ChaCha20-Poly1305 encryption. | `fuse3`, OpenSSL/libhydrogen | `src/vfs/fuse_fs.hpp` |
-| **`dsm/`** | Network Distributed Shared Memory engine; virtual memory page fault traps (`userfaultfd`/`mprotect`), twin-page bitwise diffing, and release-consistency synchronization. | POSIX `mmap`, `userfaultfd` | `src/dsm/dsm_engine.hpp`, `include/zmdsm.h` |
-| **`reapi/`** | Standard REAPI v2 gRPC server handling `Execute`, `FindMissingBlobs`, `BatchUpdateBlobs`, `BatchReadBlobs`, `GetActionResult`, `UpdateActionResult`. | gRPC C++, Protobuf C++ | `src/reapi/server.hpp`, `src/reapi/execution_service.hpp`, `src/reapi/cas_service.hpp`, `src/reapi/action_cache.hpp` |
-| **`cas/`** | Content-Addressed Storage engine; SHA-256 / BLAKE3 chunking; Merkle tree builder for directories; P2P chunk sync over LAN. Default storage: `~/.zeromesh/cas`. | OpenSSL, `std::filesystem` | `src/cas/store.hpp`, `src/cas/merkle.hpp`, `src/cas/p2p_syncer.hpp` |
-| **`scheduler/`** | Cost model evaluating network latency vs. missing byte transfer cost; critical-path detection (pin linkers/fat tasks locally); remote dispatch & re-queueing. | Dynamic peer metrics, DAG heuristics | `src/scheduler/scheduler.hpp`, `src/scheduler/heuristics.hpp` |
-| **`executor/`** | Unprivileged hermetic sandbox; Bubblewrap (`bwrap`) mounts, Landlock direct kernel syscalls; `sched_setscheduler(SCHED_IDLE)` and thermal/battery preemption. | `bwrap`, Linux Landlock (`linux/landlock.h`), `sched.h` | `src/executor/runner.hpp`, `src/executor/bwrap.hpp`, `src/executor/landlock.hpp`, `src/executor/host_guard.hpp` |
-| **`gpu/`** | Heterogeneous accelerator mesh managing compute dispatch via `wgpu` (Vulkan/Metal/DX12) and CUDA, Apple Silicon UMA pooling, and link bandwidth gate. | `wgpu`, Vulkan/Metal | `src/gpu/gpu_engine.hpp` |
-| **`verify/`** | 2% randomized Byzantine spot-check shadow execution, TPM 2.0 / Apple Secure Enclave signing, and automatic rogue peer quarantine. | Hardware TPM/Enclave, Ed25519 | `src/verify/byzantine_spot_checker.hpp` |
-| **`ui/`** | Interactive terminal status monitor and live core utilization visualizer. | ANSI escape codes / FTXUI / Ncurses | `src/ui/tui.hpp` |
-| **`main`** | Unified CLI entry point supporting `zm up`, `zm run`, `zm fs`, `zm status`, `zm monitor`, and daemon lifecycle management. | CLI parser / `CLI11` | `src/main.cpp` |
+## 3. Milestones
 
----
+Each milestone is done **only** when its acceptance test passes.
 
-## 3. Implementation Checklist & Development Tasks
+- [ ] **M0: Honesty pass.** *(Local build and tests green; tick once CI passes on GitHub.)* Rewrite PLAN.md and README.md to match the audit and the design. Move frozen modules out of the build. Make CI install gRPC and run the tests.
+  *Acceptance:* CI green on a clean Ubuntu runner. PLAN.md has no `[x]` on unimplemented work. README describes only what works.
+- [ ] **M1: Contracts.** v1 protos, plugin interfaces, generated C++ and Python stubs.
+  *Acceptance:* a Python script submits a 3-task job and receives results and events.
+- [ ] **M2: Core relocation.** Keep modules moved into `core/`. Real telemetry. Persistent node IDs. `zmd` runs as a long-lived daemon with a real `ClientApi` and local execution.
+  *Acceptance:* `zm run -- echo hi` prints `hi` with exit 0. Two runs with different commands give two real results, with no false cache hits. Killing `zmd` and restarting it keeps the node ID.
+- [ ] **M3: Remote execution + security.** Team create/join, admission, mTLS, `NodeApi`, blob transfer, `env-host` plugin, placement.
+  *Acceptance:* **Two machines:** on A, `zm run --remote-only -- sh -c 'hostname > out.txt'` with output `out.txt` produces a file containing **B's** hostname. A third machine not in the team never appears in `zm status` and can't call `NodeApi`.
+- [ ] **M4: Fan-out + resilience.** `zm run --each`, job DAGs, retries, drain/loss re-dispatch, donor policy file.
+  *Acceptance:* `zm run --each 'cases/*' -- ./sim {}` with 20 CPU-bound cases (each ~30 s single-threaded, inputs under 10 MB) on 3 machines completes in under 45% of the single-machine time. Killing one donor's `zmd` mid-job still completes all 20 correctly.
+- [ ] **M5: SDK + first app + mirror mode.** Python SDK, `zm-render`, and the `env-mirror` plugin.
+  *Acceptance:* `zm-render shot.blend --frames 1-240` on 4 machines produces the same frames as a local render. A donor without Blender installed renders frames through mirror mode.
+- [ ] **M6: REAPI front-end plugin.**
+  *Acceptance:* a CMake project builds through `recc` against `zmd`, with compile actions observed running on a peer.
 
-### Phase 1: Foundations & REAPI Skeleton
-- [x] Create project layout and C++20 / Meson build configuration (`meson.build`)
-- [x] Specify official REAPI v2 Protobuf definitions (`proto/remote_execution.proto`)
-- [x] Implement local gRPC server listening on `127.0.0.1:8980`
-- [x] Implement baseline in-memory and local disk CAS blob store with SHA-256 verification
-- [x] Implement Action Cache (AC) for storing and looking up previous action digests
-- [x] Support `recc` compiler launcher by answering basic `FindMissingBlobs` and `BatchUpdateBlobs`
+## 4. Architectural Decision Records
 
-### Phase 2: Hermetic Execution & Sandboxing
-- [x] Implement Bubblewrap (`bwrap`) wrapper with `--ro-bind` for system toolchains and `--unshare-all`
-- [x] Implement Landlock sandbox ruleset (`SYS_landlock_create_ruleset`, `SYS_landlock_restrict_self`)
-- [x] Implement `SCHED_IDLE` (or `nice 19`) task scheduling to prevent donor machine stutter
-- [x] Add thermal and battery guard checks (suspend donor execution if battery < 20% or discharging)
+### ADR-011: Core + plugin architecture (2026-10-26)
+- **Context:** The audit found the central piece (running a task on another machine) missing, while the leaf modules worked. Every domain tool (Flamenco, distcc, CFD sweeps) rebuilds the same plumbing.
+- **Decision:** Build a small general core (Tasks, Objects, static DAGs) with in-process core plugins (`IEnvProvider`, `IFrontend`) and out-of-process apps on a public `ClientApi`. REAPI becomes one optional front-end plugin.
+- **Consequence:** Domain logic stays out of `core/`. Apps can't reach internals. Several people can work in parallel against stable contracts.
 
-### Phase 3: P2P Mesh & Blob Transfer
-- [x] Implement mDNS publisher and subscriber (`_zeromesh._tcp`) for zero-configuration subnet discovery
-- [x] Implement PeerTable with automatic stale node eviction and heartbeat gossiping
-- [x] Implement P2P missing blob syncer to stream input trees between nodes over LAN
-- [x] Add team-wide Action Cache lookups across peers to avoid duplicate compilation
+### ADR-012: bwrap mount layout instead of stacked Landlock (2026-10-26)
+- **Context:** The old design stacked Landlock with bubblewrap. The Linux kernel docs (v7.3.0) state: *"Threads sandboxed with filesystem restrictions cannot modify filesystem topology, whether via mount(2) or pivot_root(2)."* bwrap needs mount(2).
+- **Decision:** bwrap's mount layout is the write boundary: inputs at `/work`, and only `/work` and `/tmp` are writable. `landlock.*` stays in the tree, unused.
+- **Consequence:** The same write limits as intended, without a sandbox that can't start.
 
-### Phase 4: Locality-Aware Scheduler
-- [x] Implement cost heuristics comparing network round-trip + transfer time against local compilation cost
-- [x] Implement critical path detection to pin linker tasks (`ld`, `lld`, `ar`) locally
-- [ ] Implement worker timeout, node health degradation, and automatic job re-dispatch
-
-### Phase 5: Ergonomics & Observability
-- [x] Provide one-touch daemon management (`zm up`, `zm down`, `zm status`)
-- [x] Provide terminal TUI monitor (`zm monitor`) showing cluster nodes, live core loads, and transfer speeds
-- [x] Provide compiler integration script (`scripts/install_recc.sh`) for CMake, Make, and Meson builds
-
-### Phase 6: BitTorrent-Style Kademlia DHT Engine
-- [x] 256-bit BLAKE3 key space and $k$-bucket routing table ($k=8$).
-- [x] Implement `ANNOUNCE_CHUNK` and `GET_PROVIDERS` RPCs for trackerless CAS chunk location.
-- [x] Distributed Action Cache storage and lookup over encrypted UDP datagrams.
-- [x] 1-hop LAN shortcut routing table initialization via mDNS discovery.
-
-### Phase 7: Distributed Secure FUSE Filesystem (`zm-fs`)
-- [x] Implement user-space filesystem driver via `fuse3` (`src/vfs/fuse_fs.hpp`).
-- [x] Lazy block faulting: pull only requested 512 KB chunks on `read()` syscalls via DHT providers.
-- [x] Authenticated at-rest and in-transit chunk encryption via ChaCha20-Poly1305.
-- [x] Local NVMe/SSD LRU chunk cache for offline read resilience.
-
-### Phase 8: Network Distributed Shared Memory (DSM) C Library (`libzmdsm`)
-- [x] Implement public C library interface (`include/zmdsm.h`).
-- [x] Virtual memory page trap engine using Linux `userfaultfd` and `mprotect`.
-- [x] Twin-page dirty detection and bitwise XOR diff propagation over TCP/QUIC.
-- [x] Distributed barrier synchronization (`zmdsm_barrier`) and distributed mutex (`zmdsm_lock`).
-
-### Phase 9: Heterogeneous Accelerator & GPU Engine (`wgpu` / CUDA)
-- [ ] Implement `wgpu` compute shader dispatch (Vulkan on Linux, Metal on macOS, DX12 on Windows).
-- [ ] Direct CUDA / MLIR compute channel for Linux workstations.
-- [ ] Apple Silicon Unified Memory Architecture (UMA) pooling for large model/matrix transformations.
-- [ ] Dynamic bandwidth-throttling gate evaluating FLOP/byte density before offloading.
-
-### Phase 10: Zero-Trust Security & Byzantine Spot-Check Quorums
-- [x] Hardware-backed Ed25519 signing using Linux TPM 2.0 and Apple Secure Enclave.
-- [x] Randomized 2% shadow re-execution of completed background tasks on independent peers.
-- [x] Automatic cryptographic digest cross-validation and rogue peer quarantine.
-
----
-
-## 4. Architectural Decision Records (ADR)
+## 5. Historical ADRs (superseded by the 2026-10-26 spec)
 
 ### ADR-001 (Protocol Selection): Adopt Google/Linux Foundation REAPI v2
 - **Context:** We need a standard remote execution wire protocol supported by industry build systems without requiring custom compiler plugins or proprietary agents.
