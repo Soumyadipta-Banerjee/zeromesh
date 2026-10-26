@@ -50,6 +50,7 @@ core_sources = files(
   'src/ui/tui.cpp',
   'core/plugin/loader.cpp',
   'core/node/task_key.cpp',
+  'core/net/team.cpp',
   'plugins/env-host/env_host.cpp',
 )
 
@@ -80,6 +81,7 @@ test_bin = executable('unit_tests',
     'tests/unit/test_task_key.cpp',
     'tests/unit/test_ignore.cpp',
     'tests/unit/test_env_host.cpp',
+    'tests/unit/test_team.cpp',
   ),
   include_directories: inc,
   link_with: zm_core,
