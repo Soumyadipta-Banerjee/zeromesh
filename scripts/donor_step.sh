@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
-# Donor machine — do these steps in order, then leave monitor open.
+# One-shot donor: blender → env → build → zmd → monitor.
 #
-#   ./scripts/setup_donor.sh
-#   ./scripts/setup_donor.sh --join 'ZM-XXXX-…-XXC'
-#
-# 1) checkout demo/m5-all + pull
-# 2) blender + build env
-# 3) build zm/zmd if missing
-# 4) run zmd
-# 5) zm monitor
+#   bash ./scripts/donor_step.sh
+#   bash ./scripts/donor_step.sh --join 'ZM-XXXX-…-XXC'
 #
 set -euo pipefail
 
@@ -22,7 +16,7 @@ while [[ $# -gt 0 ]]; do
     --join) JOIN_CODE="$2"; shift 2 ;;
     -j|--jobs) JOBS="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: setup_donor.sh [--join 'ZM-…'] [-j N]"
+      echo "Usage: donor_step.sh [--join 'ZM-…'] [-j N]"
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -40,22 +34,29 @@ git pull --ff-only origin demo/m5-all || true
 step "2/5 blender + demo env"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/demo_env.sh"
-command -v blender >/dev/null 2>&1 || die "install Blender and put \`blender\` on PATH"
+command -v blender >/dev/null 2>&1 || die "install Blender so \`command -v blender\` resolves"
+# Prefer the real binary path (which/command -v → realpath).
 BLENDER_BIN="$(command -v blender)"
-echo "blender → $BLENDER_BIN"
-# zmd env-host only searches /usr/local/bin:/usr/bin:/bin (not snap/~/.local).
-if [[ "$BLENDER_BIN" != /usr/local/bin/blender && "$BLENDER_BIN" != /usr/bin/blender &&
-      "$BLENDER_BIN" != /bin/blender ]]; then
-  if [[ -w /usr/local/bin ]] || sudo -n true 2>/dev/null; then
-    echo "linking $BLENDER_BIN → /usr/local/bin/blender (needed by zmd sandbox PATH)"
-    sudo ln -sfn "$BLENDER_BIN" /usr/local/bin/blender
-  else
-    die "blender is at $BLENDER_BIN but zmd only sees /usr/local/bin:/usr/bin:/bin — run: sudo ln -sfn $BLENDER_BIN /usr/local/bin/blender"
-  fi
+if command -v realpath >/dev/null 2>&1; then
+  BLENDER_BIN="$(realpath "$BLENDER_BIN")"
 fi
-[[ -x /usr/local/bin/blender || -x /usr/bin/blender || -x /bin/blender ]] ||
-  die "no blender under /usr/local/bin|/usr/bin|/bin after link step"
-blender --version 2>/dev/null | head -1 || true
+[[ -x "$BLENDER_BIN" ]] || die "blender not executable: $BLENDER_BIN"
+echo "blender → $BLENDER_BIN"
+# zmd env-host bare-name PATH is only /usr/local/bin:/usr/bin:/bin.
+# Absolute /opt/... paths are fine when the requester passes --blender <path>.
+# Also link a sandbox-visible name so bare \`blender\` works.
+case "$BLENDER_BIN" in
+  /usr/local/bin/blender|/usr/bin/blender|/bin/blender) ;;
+  *)
+    if [[ -w /usr/local/bin ]] || sudo -n true 2>/dev/null; then
+      echo "linking $BLENDER_BIN → /usr/local/bin/blender (env-host PATH)"
+      sudo ln -sfn "$BLENDER_BIN" /usr/local/bin/blender
+    else
+      die "need sandbox-visible blender — run: sudo ln -sfn $BLENDER_BIN /usr/local/bin/blender"
+    fi
+    ;;
+esac
+"$BLENDER_BIN" --version 2>/dev/null | head -1 || true
 
 step "3/5 build zm / zmd"
 BUILD=""
@@ -68,7 +69,6 @@ if [[ -z "$BUILD" ]]; then
     if [ -f "$HOME/zeromesh-backups/zm-native.ini" ]; then
       cp "$HOME/zeromesh-backups/zm-native.ini" /tmp/zm-native.ini
     else
-      # Minimal native file pointing at system tools; demo_env already set PKG_CONFIG_PATH.
       printf '%s\n' '[binaries]' 'c = '\''gcc'\''' 'cpp = '\''g++'\''' > /tmp/zm-native.ini
     fi
   }
@@ -101,6 +101,10 @@ if [[ -n "$JOIN_CODE" ]]; then
   "$ZM" team join "$JOIN_CODE"
 fi
 "$ZM" status || true
+
+echo
+echo "requester tip:  zm-render … --remote-only --blender $BLENDER_BIN"
+echo "               (or --blender /usr/local/bin/blender after the link above)"
 
 step "5/5 zm monitor (q / Ctrl-C) — leave this up"
 exec "$ZM" monitor
