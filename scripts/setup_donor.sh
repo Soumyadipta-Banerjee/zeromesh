@@ -41,7 +41,20 @@ step "2/5 blender + demo env"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/demo_env.sh"
 command -v blender >/dev/null 2>&1 || die "install Blender and put \`blender\` on PATH"
-echo "blender → $(command -v blender)"
+BLENDER_BIN="$(command -v blender)"
+echo "blender → $BLENDER_BIN"
+# zmd env-host only searches /usr/local/bin:/usr/bin:/bin (not snap/~/.local).
+if [[ "$BLENDER_BIN" != /usr/local/bin/blender && "$BLENDER_BIN" != /usr/bin/blender &&
+      "$BLENDER_BIN" != /bin/blender ]]; then
+  if [[ -w /usr/local/bin ]] || sudo -n true 2>/dev/null; then
+    echo "linking $BLENDER_BIN → /usr/local/bin/blender (needed by zmd sandbox PATH)"
+    sudo ln -sfn "$BLENDER_BIN" /usr/local/bin/blender
+  else
+    die "blender is at $BLENDER_BIN but zmd only sees /usr/local/bin:/usr/bin:/bin — run: sudo ln -sfn $BLENDER_BIN /usr/local/bin/blender"
+  fi
+fi
+[[ -x /usr/local/bin/blender || -x /usr/bin/blender || -x /bin/blender ]] ||
+  die "no blender under /usr/local/bin|/usr/bin|/bin after link step"
 blender --version 2>/dev/null | head -1 || true
 
 step "3/5 build zm / zmd"
