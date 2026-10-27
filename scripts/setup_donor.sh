@@ -1,59 +1,78 @@
 #!/usr/bin/env bash
-# Donor machine setup: Blender check → zmd → zm monitor.
-# Run this on the OTHER laptops. The requester offloads FROM theirs.
+# Donor machine — do these steps in order, then leave monitor open.
 #
 #   ./scripts/setup_donor.sh
 #   ./scripts/setup_donor.sh --join 'ZM-XXXX-…-XXC'
 #
+# 1) checkout demo/m5-all + pull
+# 2) blender + build env
+# 3) build zm/zmd if missing
+# 4) run zmd
+# 5) zm monitor
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck disable=SC1091
-source "$ROOT/scripts/demo_env.sh"
+cd "$ROOT"
 
 JOIN_CODE=""
+JOBS="${JOBS:-2}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --join) JOIN_CODE="$2"; shift 2 ;;
+    -j|--jobs) JOBS="$2"; shift 2 ;;
     -h|--help)
-      cat <<'EOF'
-Usage: setup_donor.sh [--join 'ZM-…']
-  1) check blender on PATH
-  2) start zmd
-  3) optional team join
-  4) zm monitor
-EOF
+      echo "Usage: setup_donor.sh [--join 'ZM-…'] [-j N]"
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-pick_bin() {
-  local name="$1"
-  if [[ -x "$ROOT/build-verify/$name" ]]; then echo "$ROOT/build-verify/$name"; return; fi
-  if [[ -x "$ROOT/build/$name" ]]; then echo "$ROOT/build/$name"; return; fi
-  if command -v "$name" >/dev/null 2>&1; then command -v "$name"; return; fi
-  echo ""
-}
-
-ZM="$(pick_bin zm)"
-ZMD="$(pick_bin zmd)"
 die() { echo "donor: $*" >&2; exit 1; }
+step() { echo; echo "=== $1 ==="; }
 
-[[ -n "$ZM" && -n "$ZMD" ]] || die "need zm/zmd (build first: ninja -C build-verify)"
+step "1/5 branch demo/m5-all"
+git fetch origin demo/m5-all 2>/dev/null || git fetch origin
+git checkout demo/m5-all
+git pull --ff-only origin demo/m5-all || true
 
-echo "donor: checking blender…"
-if ! command -v blender >/dev/null 2>&1; then
-  die "blender not on PATH — install Blender and ensure \`blender\` works in this shell"
-fi
-echo "donor: blender OK → $(command -v blender)"
+step "2/5 blender + demo env"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/demo_env.sh"
+command -v blender >/dev/null 2>&1 || die "install Blender and put \`blender\` on PATH"
+echo "blender → $(command -v blender)"
 blender --version 2>/dev/null | head -1 || true
 
-export ZM_BUILD_DIR="${ZM_BUILD_DIR:-$(dirname "$ZM")}"
+step "3/5 build zm / zmd"
+BUILD=""
+for d in build-verify build; do
+  if [[ -x "$ROOT/$d/zm" && -x "$ROOT/$d/zmd" ]]; then BUILD="$ROOT/$d"; break; fi
+done
+if [[ -z "$BUILD" ]]; then
+  BUILD="$ROOT/build"
+  [ -f /tmp/zm-native.ini ] || {
+    if [ -f "$HOME/zeromesh-backups/zm-native.ini" ]; then
+      cp "$HOME/zeromesh-backups/zm-native.ini" /tmp/zm-native.ini
+    else
+      # Minimal native file pointing at system tools; demo_env already set PKG_CONFIG_PATH.
+      printf '%s\n' '[binaries]' 'c = '\''gcc'\''' 'cpp = '\''g++'\''' > /tmp/zm-native.ini
+    fi
+  }
+  if [[ ! -f "$BUILD/build.ninja" ]]; then
+    meson setup "$BUILD" --native-file /tmp/zm-native.ini
+  fi
+  ninja -C "$BUILD" -j"$JOBS" zm zmd
+fi
+ZM="$BUILD/zm"
+ZMD="$BUILD/zmd"
+[[ -x "$ZM" && -x "$ZMD" ]] || die "build failed — no $BUILD/zm or zmd"
+export PATH="$BUILD:$PATH"
+export ZM_BUILD_DIR="$BUILD"
+echo "using $BUILD"
 
+step "4/5 run zmd"
 if ! "$ZM" status >/dev/null 2>&1; then
-  echo "donor: starting zmd…"
   "$ZMD" >/tmp/zeromesh-donor-zmd.log 2>&1 &
   for _ in $(seq 1 40); do
     "$ZM" status >/dev/null 2>&1 && break
@@ -61,15 +80,14 @@ if ! "$ZM" status >/dev/null 2>&1; then
   done
   "$ZM" status >/dev/null 2>&1 || die "zmd failed — see /tmp/zeromesh-donor-zmd.log"
 else
-  echo "donor: zmd already running"
+  echo "zmd already running"
 fi
 
 if [[ -n "$JOIN_CODE" ]]; then
-  echo "donor: joining team…"
+  echo "joining team…"
   "$ZM" team join "$JOIN_CODE"
 fi
-
-echo "donor: status"
 "$ZM" status || true
-echo "donor: monitor (q / Ctrl-C) — leave this up while the requester offloads"
+
+step "5/5 zm monitor (q / Ctrl-C) — leave this up"
 exec "$ZM" monitor
