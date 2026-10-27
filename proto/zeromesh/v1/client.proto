@@ -54,6 +54,8 @@ service ClientApi {
   rpc ListPeers(Empty) returns (PeerList);
   // Submitted jobs + local sandboxes (working and finished rows for zm monitor).
   rpc ListActivity(Empty) returns (ActivitySnapshot);
+  // Drops finished rows from ListActivity. Running tasks stay; job results stay fetchable.
+  rpc ClearActivity(Empty) returns (Empty);
   rpc TeamCreate(Empty) returns (TeamSecretReply);
   rpc TeamJoin(TeamJoinRequest) returns (Empty);
   rpc TeamLeave(Empty) returns (Empty);

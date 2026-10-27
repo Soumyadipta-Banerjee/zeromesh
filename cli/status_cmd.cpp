@@ -29,6 +29,13 @@ grpc::Status ListActivity(Client& client, v1::ActivitySnapshot* out) {
     return client.stub().ListActivity(&ctx, v1::Empty{}, out);
 }
 
+grpc::Status ClearActivity(Client& client) {
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    v1::Empty reply;
+    return client.stub().ClearActivity(&ctx, v1::Empty{}, &reply);
+}
+
 } // namespace
 
 int StatusCommand(Client& client) {
@@ -71,6 +78,13 @@ int MonitorCommand(Client& client) {
             // UNIMPLEMENTED on old daemon → empty activity, keep monitor alive.
             if (s.error_code() == grpc::StatusCode::UNIMPLEMENTED) return v1::ActivitySnapshot{};
             return std::nullopt;
+        },
+        [&client](std::string* error) {
+            grpc::Status s = ClearActivity(client);
+            if (s.ok()) return true;
+            *error = s.error_code() == grpc::StatusCode::UNIMPLEMENTED ? "daemon too old (restart zmd)"
+                                                                        : s.error_message();
+            return false;
         },
         g_stop);
     if (rc == kExitNotRunning) std::cerr << kNotRunning << "\n";
