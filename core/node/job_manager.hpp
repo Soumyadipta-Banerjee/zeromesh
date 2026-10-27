@@ -58,6 +58,8 @@ public:
     [[nodiscard]] std::optional<v1::JobStatus> Get(const std::string& job_id) const;
     // Snapshot of submitted jobs for zm monitor (working + finished tasks stay listed).
     [[nodiscard]] std::vector<v1::ActiveTask> ListActive() const;
+    // Hides every finished task from ListActive. Jobs stay for GetJob / FetchOutputs.
+    void ClearFinished();
     // Input and in-flight output digests of jobs that have not finished, plus recent
     // finished-job outputs for a short grace period. GC must keep these.
     [[nodiscard]] std::unordered_set<std::string> ProtectedBlobHashes() const;

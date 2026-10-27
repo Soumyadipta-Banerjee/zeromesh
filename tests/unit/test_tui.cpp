@@ -115,3 +115,59 @@ TEST(Tui_WhereNamesThePeer) {
     ASSERT_TRUE(s.find("here") != std::string::npos);
     ASSERT_TRUE(s.find("bb") != std::string::npos);
 }
+
+TEST(Tui_MonitorTabsSeparateLiveAndDone) {
+    zeromesh::v1::PeerList peers;
+    auto* self = peers.add_peers();
+    self->set_node_id("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    self->set_hostname("devbox");
+    self->set_is_self(true);
+    self->set_cores_total(8);
+    self->set_cores_free(4);
+    self->set_mem_available(8LL * 1024 * 1024 * 1024);
+    self->set_cpu_load_pct(10.0);
+
+    zeromesh::v1::ActivitySnapshot snap;
+    *snap.add_tasks() = Act("submitted", "live_task", zeromesh::v1::RUNNING);
+    *snap.add_tasks() = Act("submitted", "done_task", zeromesh::v1::SUCCEEDED);
+    *snap.add_tasks() = Act("executing", "fail_task", zeromesh::v1::FAILED);
+
+    std::ostringstream live;
+    zeromesh::cli::RenderMonitor(peers, snap, live, false, /*tab=*/0, /*scroll=*/0, /*rows=*/24, /*cols=*/80);
+    const std::string live_s = live.str();
+    ASSERT_TRUE(live_s.find("Live 1") != std::string::npos);
+    ASSERT_TRUE(live_s.find("Done 2") != std::string::npos);
+    ASSERT_TRUE(live_s.find("live_task") != std::string::npos);
+    ASSERT_TRUE(live_s.find("done_task") == std::string::npos);
+    ASSERT_TRUE(live_s.find("fail_task") == std::string::npos);
+
+    std::ostringstream done;
+    zeromesh::cli::RenderMonitor(peers, snap, done, false, /*tab=*/1, /*scroll=*/0, /*rows=*/24, /*cols=*/80);
+    const std::string done_s = done.str();
+    ASSERT_TRUE(done_s.find("done_task") != std::string::npos);
+    ASSERT_TRUE(done_s.find("fail_task") != std::string::npos);
+    ASSERT_TRUE(done_s.find("live_task") == std::string::npos);
+}
+
+TEST(Tui_MonitorScrollSkipsRows) {
+    zeromesh::v1::PeerList peers;
+    auto* self = peers.add_peers();
+    self->set_node_id("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    self->set_hostname("devbox");
+    self->set_is_self(true);
+    self->set_cores_total(8);
+    self->set_cores_free(4);
+    self->set_mem_available(8LL * 1024 * 1024 * 1024);
+
+    zeromesh::v1::ActivitySnapshot snap;
+    for (int i = 0; i < 30; ++i) {
+        *snap.add_tasks() = Act("submitted", "task_" + std::to_string(i), zeromesh::v1::RUNNING);
+    }
+
+    std::ostringstream out;
+    zeromesh::cli::RenderMonitor(peers, snap, out, false, /*tab=*/0, /*scroll=*/5, /*rows=*/16, /*cols=*/80);
+    const std::string s = out.str();
+    ASSERT_TRUE(s.find("task_0") == std::string::npos);
+    ASSERT_TRUE(s.find("task_5") != std::string::npos);
+    ASSERT_TRUE(s.find("of 30") != std::string::npos);
+}

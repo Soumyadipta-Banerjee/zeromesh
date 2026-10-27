@@ -110,6 +110,7 @@ struct TaskRun {
     std::string worker_id;  // set at PLACED, before the task finishes
     v1::TaskResult result;
     bool has_result{false};
+    bool hidden{false};  // cleared from the monitor; result is still served by GetJob
     size_t retained_log_bytes{0};
 };
 
@@ -185,6 +186,7 @@ public:
     void Cancel(const std::string& job_id);
     std::optional<v1::JobStatus> Get(const std::string& job_id) const;
     std::vector<v1::ActiveTask> ListActive() const;
+    void ClearFinished();
     std::unordered_set<std::string> ProtectedBlobHashes() const;
     std::shared_ptr<EventStream> Watch(const std::string& job_id);
     void CancelAll();
@@ -607,7 +609,7 @@ std::vector<v1::ActiveTask> JobManager::Impl::ListActive() const {
 
     auto append_job = [&](const JobPtr& job, bool want_terminal) {
         for (const auto& t : job->tasks) {
-            if (IsTerminal(t.state) != want_terminal) continue;
+            if (t.hidden || IsTerminal(t.state) != want_terminal) continue;
             v1::ActiveTask a;
             a.set_job_id(job->id);
             a.set_task_name(t.spec.name());
@@ -657,6 +659,16 @@ std::string JobManager::Submit(v1::JobSpec spec) { return impl_->Submit(std::mov
 void JobManager::Cancel(const std::string& job_id) { impl_->Cancel(job_id); }
 std::optional<v1::JobStatus> JobManager::Get(const std::string& job_id) const { return impl_->Get(job_id); }
 std::vector<v1::ActiveTask> JobManager::ListActive() const { return impl_->ListActive(); }
+void JobManager::ClearFinished() { impl_->ClearFinished(); }
+
+void JobManager::Impl::ClearFinished() {
+    std::lock_guard lock(mu_);
+    for (auto& [id, job] : jobs_) {
+        for (auto& t : job->tasks) {
+            if (IsTerminal(t.state)) t.hidden = true;
+        }
+    }
+}
 
 std::unordered_set<std::string> JobManager::Impl::ProtectedBlobHashes() const {
     struct JobSnap {

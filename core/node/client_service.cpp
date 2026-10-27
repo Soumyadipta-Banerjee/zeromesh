@@ -590,6 +590,12 @@ grpc::Status ClientService::ListActivity(grpc::ServerContext*, const v1::Empty*,
     return grpc::Status::OK;
 }
 
+grpc::Status ClientService::ClearActivity(grpc::ServerContext*, const v1::Empty*, v1::Empty*) {
+    if (jobs_) jobs_->ClearFinished();
+    if (local_executor_) local_executor_->ClearFinished();
+    return grpc::Status::OK;
+}
+
 grpc::Status ClientService::TeamCreate(grpc::ServerContext*, const v1::Empty*, v1::TeamSecretReply* reply) {
     if (!team_ || !team_->discovery || !team_->pins) {
         return {grpc::StatusCode::FAILED_PRECONDITION, "team commands are not available"};

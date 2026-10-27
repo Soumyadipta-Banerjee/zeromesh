@@ -75,6 +75,7 @@ public:
     grpc::Status ListPeers(grpc::ServerContext* ctx, const v1::Empty* req, v1::PeerList* reply) override;
     grpc::Status ListActivity(grpc::ServerContext* ctx, const v1::Empty* req,
                               v1::ActivitySnapshot* reply) override;
+    grpc::Status ClearActivity(grpc::ServerContext* ctx, const v1::Empty* req, v1::Empty* reply) override;
     grpc::Status TeamCreate(grpc::ServerContext* ctx, const v1::Empty* req, v1::TeamSecretReply* reply) override;
     grpc::Status TeamJoin(grpc::ServerContext* ctx, const v1::TeamJoinRequest* req, v1::Empty* reply) override;
     grpc::Status TeamLeave(grpc::ServerContext* ctx, const v1::Empty* req, v1::Empty* reply) override;

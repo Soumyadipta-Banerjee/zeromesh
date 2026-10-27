@@ -49,6 +49,8 @@ public:
         v1::TaskState state{v1::QUEUED};
     };
     [[nodiscard]] std::vector<ActiveItem> ListActive() const;
+    // Forgets finished sandboxes (monitor history only).
+    void ClearFinished();
 
 private:
     static constexpr size_t kRecentLimit = 128;

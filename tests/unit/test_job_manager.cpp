@@ -170,6 +170,40 @@ TEST(JobListActiveKeepsFinished) {
     ASSERT_EQ(done, 2);
 }
 
+TEST(JobClearFinishedHidesDoneKeepsRunning) {
+    TempDir dir;
+    auto cas = std::make_shared<zeromesh::store::CasStore>(dir / "cas");
+    auto merkle = std::make_shared<zeromesh::store::MerkleBuilder>(cas);
+    auto cache = std::make_shared<zeromesh::node::ActionCache>(cas);
+    auto exec = std::make_shared<HoldExecutor>();
+    JobManager jm{cas, merkle, cache, exec};
+
+    auto done_id = jm.Submit(Job({Task("a", "a")}));
+    v1::TaskResult r;
+    r.set_exit_code(0);
+    exec->held.on_done(std::move(r));
+    Drain(jm, done_id);
+
+    auto running_id = jm.Submit(Job({Task("b", "b")}));
+    ASSERT_EQ(jm.ListActive().size(), static_cast<size_t>(2));
+
+    jm.ClearFinished();
+    auto rows = jm.ListActive();
+    ASSERT_EQ(rows.size(), static_cast<size_t>(1));
+    ASSERT_EQ(rows[0].job_id(), running_id);
+    ASSERT_EQ(rows[0].state(), v1::PLACED);
+    // The cleared job's result is still served.
+    auto st = jm.Get(done_id);
+    ASSERT_TRUE(st && st->done());
+    ASSERT_EQ(st->tasks().at("a"), v1::SUCCEEDED);
+
+    v1::TaskResult r2;
+    r2.set_exit_code(0);
+    exec->held.on_done(std::move(r2));
+    Drain(jm, running_id);
+    ASSERT_EQ(jm.ListActive().size(), static_cast<size_t>(1));  // finished after the clear: listed
+}
+
 TEST(JobListActiveOrdersWorkingBeforeDone) {
     Fixture f;
     // Block the second job's task so the first can finish while the second stays open.
