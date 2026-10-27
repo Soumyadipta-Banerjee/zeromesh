@@ -45,6 +45,9 @@ two-case lid-driven-cavity sweep on peer nodes:
 ```bash
 # Arch Linux: run on every machine that will execute CFD cases.
 bash scripts/install_openfoam_arch.sh
+
+# Ubuntu: run on every machine that will execute CFD cases.
+bash scripts/install_openfoam_ubuntu.sh
 ```
 
 ```bash
