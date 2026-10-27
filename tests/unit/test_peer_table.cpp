@@ -86,4 +86,10 @@ TEST(PeerTable_FastPreemptionSignal) {
     // Draining node must no longer be returned as an available active worker
     auto active_nodes = table.ListActive();
     ASSERT_EQ(active_nodes.size(), 0);
+
+    // But it must still appear for status/monitor/admission.
+    auto present = table.ListPresent();
+    ASSERT_EQ(present.size(), 1);
+    ASSERT_EQ(present[0].id, "node-donor");
+    ASSERT_TRUE(present[0].state == zeromesh::net::PeerState::Draining);
 }
