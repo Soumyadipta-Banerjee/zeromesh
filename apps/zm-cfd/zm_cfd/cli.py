@@ -24,7 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env", choices=("host",), default="host")
     parser.add_argument("--cores", type=int, default=1, help="cores requested per case task")
     parser.add_argument("-o", "--output", type=Path, default=Path("cfd-results"))
-    parser.add_argument("--remote-only", action="store_true", help="run cases only on peer nodes")
+    placement = parser.add_mutually_exclusive_group()
+    placement.add_argument("--remote-only", action="store_true", help="run cases only on peer nodes")
+    placement.add_argument("--local-only", action="store_true", help="run cases only on this machine")
     parser.add_argument("--socket", help="override local zmd socket path")
     return parser
 
@@ -51,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
             cores=args.cores,
             out_dir=args.output,
             may_run_local=not args.remote_only,
+            may_run_remote=not args.local_only,
         )
         with client:
             result = run_cfd(client, options)

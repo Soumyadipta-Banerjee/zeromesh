@@ -39,8 +39,10 @@ Install the SDK and CFD adapter on the requester:
 pip install -e ./sdk/python -e ./apps/zm-cfd
 ```
 
-Each donor needs the same OpenFOAM release installed. Run the bundled short
-two-case lid-driven-cavity sweep on peer nodes:
+Each donor needs the same OpenFOAM release installed. Run the bundled two-case
+lid-driven-cavity benchmark on peer nodes. It targets roughly two minutes when
+both cases run sequentially on a typical laptop; with two donors, each case can
+run in parallel:
 
 ```bash
 # Arch Linux: run on every machine that will execute CFD cases.
@@ -63,3 +65,5 @@ zm-cfd tests/data/cfd-cavity-sweep \
 Replace `/path/to/OpenFOAM/etc/bashrc` with the installed OpenFOAM setup script.
 `zm-cfd` submits one task per independent case, and `zm monitor` shows their
 placement and completion while the results are collected under `/tmp/zm-cfd-results`.
+For a baseline, add `--local-only` and use a different output directory; then
+compare it with the two-donor `--remote-only` run.
