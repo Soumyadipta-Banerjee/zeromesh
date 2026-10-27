@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,9 @@ public:
     BwrapBuilder& AddReadWriteBind(const std::string& host, const std::string& sandbox);
     BwrapBuilder& AddSymlink(const std::string& target, const std::string& link);
     BwrapBuilder& AddTmpfs(const std::string& sandbox);
+    // Applies to the next AddDir (bwrap --perms OCTAL).
+    BwrapBuilder& AddPerms(unsigned mode);
+    BwrapBuilder& AddDir(const std::string& sandbox);
     BwrapBuilder& AddDev(const std::string& sandbox);
     BwrapBuilder& AddProc(const std::string& sandbox);
     BwrapBuilder& AddEnv(const std::string& key, const std::string& value);
@@ -29,6 +33,7 @@ private:
     std::vector<std::vector<std::string>> mounts_;
     std::vector<std::pair<std::string, std::string>> env_;
     std::string chdir_{"/"};
+    std::optional<unsigned> pending_perms_;
 };
 
 } // namespace zeromesh::exec

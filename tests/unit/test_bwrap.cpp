@@ -64,3 +64,14 @@ TEST(BwrapEnvAndChdir) {
     ASSERT_EQ(args[Pos(args, "--chdir") + 1], std::string("/work/sub"));
     ASSERT_TRUE(Pos(args, "--chdir") < Pos(args, "--"));
 }
+
+TEST(BwrapPermsDir) {
+    zeromesh::exec::BwrapBuilder b;
+    b.AddTmpfs("/tmp").AddPerms(0700).AddDir("/tmp/xdg-runtime");
+    auto args = b.Build({"true"});
+    auto perms = Pos(args, "--perms");
+    auto dir = Pos(args, "--dir");
+    ASSERT_TRUE(perms < dir);
+    ASSERT_EQ(args[perms + 1], std::string("700"));
+    ASSERT_EQ(args[dir + 1], std::string("/tmp/xdg-runtime"));
+}
