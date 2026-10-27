@@ -20,6 +20,7 @@
 #include "node/state.hpp"
 #include "plugin/client_api_handle.hpp"
 #include "plugin/loader.hpp"
+#include "sched/dispatch_policy.hpp"
 #include "sched/placer.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
@@ -73,6 +74,15 @@ fs::path HomeDir() {
     return "/tmp";
 }
 
+std::optional<int> IntFromEnv(const char* name) {
+    std::string v = Env(name);
+    if (v.empty()) return std::nullopt;
+    char* end = nullptr;
+    long n = std::strtol(v.c_str(), &end, 10);
+    if (end == v.c_str() || *end != '\0') return std::nullopt;
+    return static_cast<int>(n);
+}
+
 int PortFromEnv(const char* name, int def) {
     std::string v = Env(name);
     if (v.empty()) return def;
@@ -124,7 +134,17 @@ DaemonConfig DaemonConfig::FromEnv() {
 
     c.node_port = PortFromEnv("ZM_NODE_PORT", 8981);
     c.discovery_port = PortFromEnv("ZM_DISCOVERY_PORT", 8988);
+    c.slots = IntFromEnv("ZM_SLOTS");
+    c.cores_per_slot = IntFromEnv("ZM_CORES_PER_SLOT");
+    c.queue_depth = IntFromEnv("ZM_QUEUE_DEPTH");
+    c.max_per_requester = IntFromEnv("ZM_MAX_PER_REQUESTER");
     return c;
+}
+
+int ResolveInt(std::optional<int> flag, int toml_value, int def) {
+    if (flag) return *flag;
+    if (toml_value >= 0) return toml_value;
+    return def;
 }
 
 bool UnixSocketAlive(const fs::path& path) {
@@ -228,11 +248,17 @@ int Daemon::Run() {
 
     std::mutex telemetry_mu;
     net::TelemetrySampler telemetry_sampler;
+    DrainController drain_controller;
+    int donor_slots = 1;
+    int donor_queue_depth = 0;
+    int donor_cores_per_slot = 1;
     auto telemetry_fn = [&]() {
         std::lock_guard lock(telemetry_mu);
-        return telemetry_sampler.Sample();
+        net::Telemetry t = telemetry_sampler.Sample();
+        t.slots = donor_slots;
+        t.queue_depth = donor_queue_depth;
+        return t;
     };
-    DrainController drain_controller;
 
     try {
         auto state = NodeState::LoadOrCreate(config_.state_dir);
@@ -250,6 +276,7 @@ int Daemon::Run() {
         registry = std::make_shared<plugin::Registry>();
         registry->RegisterEnv(envhost::Make());
         registry->RegisterEnv(mirror::MakeMirrorEnv());
+        sched::RegisterBuiltinDispatchPolicies(*registry);
         registry->LoadSearchPath();
         cache = std::make_shared<ActionCache>(cas);
         peers = std::make_shared<net::PeerTable>();
@@ -294,22 +321,38 @@ int Daemon::Run() {
             auto peer = peers->Get(peer_id);
             return peer ? client_factory(*peer) : nullptr;
         };
-        int hw = static_cast<int>(std::thread::hardware_concurrency());
-        int slots = std::max(1, hw - 1);
-        local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, slots,
-                                                         config_.state_dir / "scratch", cas, client_for_node);
+        DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
+        donor_slots = ResolveInt(config_.slots, policy.slots, 1);
+        donor_queue_depth = ResolveInt(config_.queue_depth, policy.queue_depth, 0);
+        const int max_per_req = ResolveInt(config_.max_per_requester, policy.max_per_requester, 0);
+        policy.slots = donor_slots;
+        policy.queue_depth = donor_queue_depth;
+        policy.max_per_requester = max_per_req;
+        {
+            net::Telemetry probe = telemetry_sampler.Sample();
+            const int core_cap = policy.CoreLimit(probe.cores_total);
+            int cps = ResolveInt(config_.cores_per_slot, policy.cores_per_slot, 0);
+            if (cps <= 0) cps = std::max(1, core_cap / std::max(donor_slots, 1));
+            donor_cores_per_slot = cps;
+            policy.cores_per_slot = cps;
+        }
 
-        placer = std::make_shared<sched::Placer>(local_executor, peers, client_factory, cas, merkle, node_id,
-                                                 telemetry_fn);
+        local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, donor_slots,
+                                                         config_.state_dir / "scratch", cas, client_for_node,
+                                                         donor_cores_per_slot);
+
+        placer = std::make_shared<sched::Placer>(local_executor, peers, client_factory, cas, merkle, registry,
+                                                 node_id, telemetry_fn);
         jobs = std::make_shared<JobManager>(cas, merkle, cache, placer);
 
         ClientServiceOptions opts;
         opts.node_id = node_id;
         opts.node_port = config_.node_port;
         opts.upload_limit_bytes = UploadLimitFromEnv();
+        opts.slots = donor_slots;
+        opts.queue_depth = donor_queue_depth;
         client_service = std::make_unique<ClientService>(cas, merkle, jobs, peers, opts, team, local_executor);
 
-        DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
         drain_controller.SetPolicy(policy);
         node_service = std::make_unique<NodeService>(
             node_id, pins, [team]() { return team->Get(); }, identity.fingerprint,

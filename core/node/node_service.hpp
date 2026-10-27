@@ -109,6 +109,8 @@ private:
     };
     void PurgeExpiredLocked();
     int CoresInUseLocked() const;
+    int TasksInUseLocked() const;  // reserved + running remote + local tasks
+    int RequesterTasksInUseLocked(const std::string& requester) const;
     bool RemoteExecConfigured() const;
 
     std::shared_ptr<store::CasStore> cas_;

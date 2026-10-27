@@ -13,6 +13,7 @@ const zeromesh::plugin::PluginEntry kEntry{
     .name = "mirror",
     .make_env = &MakeMirror,
     .make_frontend = nullptr,
+    .make_dispatch = nullptr,
 };
 
 } // namespace

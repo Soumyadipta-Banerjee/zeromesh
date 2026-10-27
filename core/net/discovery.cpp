@@ -7,6 +7,7 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <charconv>
@@ -185,14 +186,33 @@ std::string FormatAnnouncement(const AnnounceFields& a, const TeamKey& key) {
     body += t.on_ac ? '1' : '0';
     body += '\t';
     body += StateName(a.state);
+    body += '\t';
+    AppendNumber(body, std::max(t.slots, 0));
+    body += '\t';
+    AppendNumber(body, std::max(t.queue_depth, 0));
     return Sign(std::move(body), kAnnounceLabel, key);
 }
 
 std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, const TeamKey& key,
                                                     std::string_view self_node_id) {
-    const auto f = OpenEnvelope(packet, kAnnounceTag, 17, kAnnounceLabel, key, self_node_id);
+    // 19 = slots + queue_depth; 18 = slots only; 17 = legacy (no slots).
+    auto f = OpenEnvelope(packet, kAnnounceTag, 19, kAnnounceLabel, key, self_node_id);
+    if (!f) f = OpenEnvelope(packet, kAnnounceTag, 18, kAnnounceLabel, key, self_node_id);
+    if (!f) f = OpenEnvelope(packet, kAnnounceTag, 17, kAnnounceLabel, key, self_node_id);
     if (!f) return std::nullopt;
     const auto& v = *f;
+    int slots = 0;
+    int queue_depth = 0;
+    if (v.size() >= 18) {
+        const auto s = ParseNumber<int>(v[16]);
+        if (!s || *s < 0) return std::nullopt;
+        slots = *s;
+    }
+    if (v.size() == 19) {
+        const auto q = ParseNumber<int>(v[17]);
+        if (!q || *q < 0) return std::nullopt;
+        queue_depth = *q;
+    }
 
     const auto seq = ParseNumber<uint64_t>(v[4]);
     const auto timestamp_ms = ParseNumber<int64_t>(v[5]);
@@ -229,6 +249,8 @@ std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, con
     out.peer.arch = std::string(v[8]);
     out.peer.cores = *cores_total;
     out.peer.cores_free = *cores_free;
+    out.peer.slots = slots;
+    out.peer.queue_depth = queue_depth;
     out.peer.mem_available = *mem_available;
     out.peer.cpu_load_pct = *cpu_load;
     out.peer.battery_pct = *battery;

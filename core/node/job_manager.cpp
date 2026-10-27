@@ -117,6 +117,7 @@ struct TaskRun {
 struct Job {
     std::string id;
     std::string name;
+    v1::DispatchPolicy dispatch;
     std::vector<TaskRun> tasks;
     std::unordered_map<std::string, size_t> index;
     std::vector<v1::JobEvent> history;
@@ -225,6 +226,7 @@ private:
 std::string JobManager::Impl::Submit(v1::JobSpec spec) {
     auto job = std::make_shared<Job>();
     job->name = spec.name();
+    if (spec.has_dispatch()) job->dispatch = spec.dispatch();
     job->tasks.resize(static_cast<size_t>(spec.tasks_size()));
     for (size_t i = 0; i < job->tasks.size(); ++i) {
         v1::TaskSpec& t = *spec.mutable_tasks(static_cast<int>(i));
@@ -369,8 +371,11 @@ void JobManager::Impl::Start(const JobPtr& job, Ready r) {
     cb.on_done = [weak, job, i](v1::TaskResult res) {
         if (auto self = weak.lock()) self->Complete(job, i, std::move(res));
     };
+    ExecuteContext xctx;
+    xctx.job_id = job->id;
+    xctx.dispatch = job->dispatch;
     try {
-        executor_->Execute(task_id, spec, std::move(cb));
+        executor_->Execute(task_id, spec, std::move(cb), std::move(xctx));
     } catch (const std::exception& e) {
         v1::TaskResult res;
         res.set_exit_code(-1);

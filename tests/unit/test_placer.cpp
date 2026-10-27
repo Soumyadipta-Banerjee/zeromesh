@@ -3,10 +3,13 @@
 #include "node/action_cache.hpp"
 #include "node/convert.hpp"
 #include "node/job_manager.hpp"
+#include "sched/dispatch_policy.hpp"
 #include "sched/placer.hpp"
 #include "sched/rank.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -33,8 +36,10 @@ struct Requester {
             return std::make_shared<zeromesh::node::NodeClient>(p.ip_address + ":" + std::to_string(p.node_port),
                                                                 self.id, self.pins, p.id);
         };
+        zeromesh::sched::RegisterBuiltinDispatchPolicies(*self.registry);
         placer = std::make_shared<zeromesh::sched::Placer>(self.executor, self.peers, factory, self.cas, self.merkle,
-                                                           self.node_id, [&self] { return self.telemetry; });
+                                                           self.registry, self.node_id,
+                                                           [&self] { return self.telemetry; });
         jm = std::make_unique<zeromesh::node::JobManager>(
             self.cas, self.merkle, std::make_shared<zeromesh::node::ActionCache>(self.cas), placer);
     }
@@ -415,4 +420,139 @@ TEST(PlacerInFlightCapSpread) {
     ASSERT_EQ(st->tasks().at("t1"), v1::SUCCEEDED);
     ASSERT_TRUE(peak <= 1);
     ASSERT_TRUE(peak >= 1);
+}
+
+namespace {
+
+v1::JobSpec SleepJob(int n, const std::string& kind, std::map<std::string, std::string> params = {}) {
+    v1::JobSpec job;
+    job.set_name("sleeps");
+    job.mutable_dispatch()->set_kind(kind);
+    for (const auto& [k, v] : params) (*job.mutable_dispatch()->mutable_params())[k] = v;
+    for (int i = 0; i < n; ++i) {
+        auto* t = job.add_tasks();
+        t->set_name("t" + std::to_string(i));
+        t->add_argv("sh");
+        t->add_argv("-c");
+        t->add_argv("sleep 0.4");
+        t->mutable_policy()->set_may_run_local(false);
+    }
+    return job;
+}
+
+// Requester + one admitted donor that announces `slots` / `queue_depth`.
+struct SlotMesh {
+    zeromesh::net::TeamKey key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull requester{"node-a", key};
+    TestNodeFull donor{"node-b", key};
+    std::unique_ptr<Requester> req;
+
+    SlotMesh(int slots, int queue_depth, std::unique_ptr<zeromesh::plugin::IDispatchPolicy> extra = nullptr) {
+        donor.telemetry.slots = slots;
+        donor.telemetry.queue_depth = queue_depth;
+        if (extra) requester.registry->RegisterDispatch(std::move(extra));
+        requester.Start();
+        donor.Start();
+        requester.Admit(donor);
+        requester.peers->Upsert(donor.AsPeer());
+        req = std::make_unique<Requester>(requester);
+    }
+
+    // Peak in-flight on the donor while the job runs.
+    int Run(const std::string& id) {
+        int peak = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (std::chrono::steady_clock::now() < deadline && !req->jm->Get(id)->done()) {
+            peak = std::max(peak, req->placer->InFlightOn("node-b"));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return peak;
+    }
+
+    void ExpectAllSucceeded(const std::string& id) {
+        auto st = req->jm->Get(id);
+        ASSERT_TRUE(st->done());
+        for (const auto& [name, state] : st->tasks()) Expect(state == v1::SUCCEEDED, name + " did not succeed");
+    }
+};
+
+} // namespace
+
+TEST(PlacerPullRunsOnePerSlotBackToBack) {
+    SlotMesh mesh(/*slots=*/1, /*queue_depth=*/0);
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::string id = mesh.req->jm->Submit(SleepJob(4, "pull"));
+    const int peak = mesh.Run(id);
+    const auto took = std::chrono::steady_clock::now() - t0;
+    mesh.ExpectAllSucceeded(id);
+    ASSERT_EQ(peak, 1);
+    // 4 × 0.4 s in series; the next task must start right after one finishes.
+    Expect(took < std::chrono::milliseconds(4000), "pull left the slot idle between tasks");
+}
+
+TEST(PlacerBatchPrefetchesUpToQueueDepth) {
+    SlotMesh mesh(/*slots=*/1, /*queue_depth=*/1);
+    const std::string id = mesh.req->jm->Submit(SleepJob(4, "batch", {{"prefetch", "3"}}));
+    const int peak = mesh.Run(id);
+    mesh.ExpectAllSucceeded(id);
+    ASSERT_EQ(peak, 2);  // 1 running + min(prefetch 3, queue_depth 1)
+}
+
+TEST(PlacerMaxInFlightCapsJob) {
+    SlotMesh mesh(/*slots=*/4, /*queue_depth=*/0);
+    const std::string id = mesh.req->jm->Submit(SleepJob(4, "fast", {{"max_in_flight", "2"}}));
+    const int peak = mesh.Run(id);
+    mesh.ExpectAllSucceeded(id);
+    ASSERT_EQ(peak, 2);
+}
+
+TEST(PlacerUnknownDispatchPolicyFails) {
+    SlotMesh mesh(1, 0);
+    const std::string id = mesh.req->jm->Submit(SleepJob(1, "no-such-policy"));
+    WaitDone(*mesh.req->jm, id);
+    auto st = mesh.req->jm->Get(id);
+    ASSERT_EQ(st->tasks().at("t0"), v1::FAILED);
+    const std::string& err = st->results().at("t0").error();
+    Expect(err == "unknown dispatch policy 'no-such-policy'", err);
+}
+
+namespace {
+
+// A custom policy: one task at a time, and it records what the core reported back.
+class OneAtATime final : public zeromesh::plugin::IDispatchPolicy {
+public:
+    std::atomic<int> decided{0};
+    std::atomic<int> results{0};
+    std::string_view Name() const override { return "one-at-a-time"; }
+    std::vector<zeromesh::plugin::DispatchAssignment> Decide(
+        const std::vector<zeromesh::plugin::DispatchTaskView>& pending,
+        const std::vector<zeromesh::plugin::DispatchNodeView>& nodes, const std::map<std::string, std::string>&,
+        int job_in_flight) override {
+        if (job_in_flight > 0 || pending.empty()) return {};
+        for (const auto& n : nodes) {
+            if (!n.is_local) {
+                ++decided;
+                // Also try an id that is not pending; the core must ignore it.
+                return {{pending.front().id, n.node_id}, {"bogus", n.node_id}};
+            }
+        }
+        return {};
+    }
+    void OnResult(const std::string&, const std::string& node_id, bool ok, int64_t) override {
+        if (ok && node_id == "node-b") ++results;
+    }
+};
+
+} // namespace
+
+TEST(PlacerCustomDispatchPolicyPlugin) {
+    auto owned = std::make_unique<OneAtATime>();
+    OneAtATime* policy = owned.get();
+    SlotMesh mesh(/*slots=*/4, /*queue_depth=*/0, std::move(owned));
+    const std::string id = mesh.req->jm->Submit(SleepJob(3, "one-at-a-time"));
+    const int peak = mesh.Run(id);
+    mesh.ExpectAllSucceeded(id);
+    ASSERT_EQ(peak, 1);
+    ASSERT_EQ(policy->decided.load(), 3);
+    ASSERT_EQ(policy->results.load(), 3);
 }

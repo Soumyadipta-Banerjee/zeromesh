@@ -3,6 +3,7 @@
 #
 #   bash ./scripts/donor_step.sh
 #   bash ./scripts/donor_step.sh --join 'ZM-XXXX-…-XXC'
+#   bash ./scripts/donor_step.sh --slots 4 --queue-depth 8
 #
 set -euo pipefail
 
@@ -11,12 +12,15 @@ cd "$ROOT"
 
 JOIN_CODE=""
 JOBS="${JOBS:-2}"
+# Donor limits go straight to zmd, which resolves flag > ZM_* env > donor.toml > default.
+ZMD_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --join) JOIN_CODE="$2"; shift 2 ;;
     -j|--jobs) JOBS="$2"; shift 2 ;;
+    --slots|--cores-per-slot|--queue-depth|--max-per-requester) ZMD_ARGS+=("$1" "$2"); shift 2 ;;
     -h|--help)
-      echo "Usage: donor_step.sh [--join 'ZM-…'] [-j N]"
+      echo "Usage: donor_step.sh [--join 'ZM-…'] [-j N] [--slots N] [--cores-per-slot N] [--queue-depth N] [--max-per-requester N]"
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -84,11 +88,12 @@ export ZM_BUILD_DIR="$BUILD"
 echo "using $BUILD"
 
 step "4/5 restart zmd"
+echo "zmd ${ZMD_ARGS[*]:-(default limits: 1 slot, full machine)}"
 pkill -f '/zmd' 2>/dev/null || true
 sleep 0.4
 rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/zeromesh/zmd.sock" \
       /tmp/zeromesh-$(id -u)/zmd.sock 2>/dev/null || true
-"$ZMD" >/tmp/zeromesh-donor-zmd.log 2>&1 &
+"$ZMD" ${ZMD_ARGS[@]+"${ZMD_ARGS[@]}"} >/tmp/zeromesh-donor-zmd.log 2>&1 &
 for _ in $(seq 1 40); do
   "$ZM" status >/dev/null 2>&1 && break
   sleep 0.25
@@ -102,8 +107,8 @@ fi
 "$ZM" status || true
 
 echo
-echo "requester tip:  zm-render … --remote-only --blender blender"
-echo "               (donors need blender on /usr/local/bin|/usr/bin — linked above)"
+echo "requester tip:  zm-render … --policy pull --blender blender"
+echo "               (optional --remote-only when local Blender is not on donor PATH)"
 
 step "5/5 zm monitor (q / Ctrl-C) — leave this up"
 exec "$ZM" monitor

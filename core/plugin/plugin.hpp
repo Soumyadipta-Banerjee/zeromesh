@@ -15,7 +15,7 @@
 
 namespace zeromesh::plugin {
 
-inline constexpr uint32_t kAbiMajor = 2;
+inline constexpr uint32_t kAbiMajor = 3;
 
 struct Bind {
     std::string host;
@@ -90,6 +90,57 @@ struct PluginConfig {
     std::map<std::string, std::string> values;
 };
 
+struct DispatchTaskView {
+    std::string id;
+    std::string name;
+    int cores{1};
+    int64_t mem_bytes{0};
+    int attempt{0};
+    int64_t age_ms{0};
+    bool preemptible{true};
+    bool may_run_local{true};
+    bool may_run_remote{true};
+    std::string arch;                       // resolved; never empty when the requester knows its arch
+    int64_t input_bytes{0};                 // size of the task's input tree
+    std::vector<std::string> exclude_nodes; // failed or lacking the command; never assign there
+};
+
+struct DispatchNodeView {
+    std::string node_id;
+    bool is_local{false};
+    int slots{0};        // 0: node predates slots; capacity is cores_total / task cores
+    int queue_depth{0};
+    int in_flight{0};    // tasks of every job on this requester already reserved there
+    int cores_total{0};
+    uint64_t mem_available{0};
+    double cpu_load_pct{0.0};
+    bool on_ac{true};
+    int64_t latency_ms{0};
+    int64_t missing_bytes{-1};  // of the job's input tree; -1 unknown
+    std::string arch;
+};
+
+struct DispatchAssignment {
+    std::string task_id;
+    std::string node_id;
+};
+
+// Chooses (task, node) pairs for a job's pending queue. Plain C++ only in the ABI.
+// Called whenever a slot frees, a task is queued or the mesh changes. The core drops
+// assignments to excluded or ineligible nodes and anything past a node's slots +
+// queue_depth; donors refuse the rest. Returning nothing leaves the tasks queued.
+class IDispatchPolicy {
+public:
+    virtual ~IDispatchPolicy() = default;
+    virtual std::string_view Name() const = 0;
+    virtual std::vector<DispatchAssignment> Decide(const std::vector<DispatchTaskView>& pending,
+                                                   const std::vector<DispatchNodeView>& nodes,
+                                                   const std::map<std::string, std::string>& params,
+                                                   int job_in_flight) = 0;
+    virtual void OnResult(const std::string& /*task_id*/, const std::string& /*node_id*/, bool /*ok*/,
+                          int64_t /*duration_ms*/) {}
+};
+
 // Exposes another protocol or UI on top of the ClientApi (e.g. REAPI).
 class IFrontend {
 public:
@@ -102,8 +153,9 @@ public:
 struct PluginEntry {
     uint32_t abi_major;
     const char* name;
-    IEnvProvider* (*make_env)();   // may be null
-    IFrontend* (*make_frontend)(); // may be null
+    IEnvProvider* (*make_env)();        // may be null
+    IFrontend* (*make_frontend)();      // may be null
+    IDispatchPolicy* (*make_dispatch)(); // may be null
 };
 
 } // namespace zeromesh::plugin

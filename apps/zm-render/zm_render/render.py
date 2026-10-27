@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional, TextIO
@@ -25,7 +26,9 @@ class RenderOptions:
     encode: Optional[Path] = None
     blender_bin: str = "blender"
     engine: Optional[str] = None
-    cores: int = 1
+    cores: int = 0
+    dispatch_kind: str = "pull"
+    dispatch_params: dict[str, str] = field(default_factory=dict)
     may_run_local: bool = True
     may_run_remote: bool = True
 
@@ -35,6 +38,7 @@ class ChunkProgress:
     chunk: Chunk
     executed_by: str = ""
     done: bool = False
+    started_at: Optional[float] = None
 
 
 @dataclass
@@ -104,6 +108,39 @@ _BLENDER_ENV = {
 }
 
 
+def parse_dispatch_policy(policy_str: str) -> tuple[str, dict[str, str]]:
+    """Parse ``--policy KIND`` or ``batch:N`` (N → prefetch param)."""
+    s = (policy_str or "").strip()
+    if not s:
+        return "pull", {}
+    if ":" in s:
+        kind, rest = s.split(":", 1)
+        kind = kind.strip()
+        rest = rest.strip()
+        if kind == "batch":
+            try:
+                n = int(rest)
+            except ValueError:
+                raise ValueError(f"batch policy needs integer prefetch, got {rest!r}")
+            if n < 1:
+                raise ValueError("batch prefetch must be >= 1")
+            return "batch", {"prefetch": str(n)}
+        return s, {}
+    return s, {}
+
+
+def format_policy_display(kind: str, params: dict[str, str]) -> str:
+    k = (kind or "pull").strip() or "pull"
+    if k == "batch" and params.get("prefetch"):
+        return f"batch:{params['prefetch']}"
+    extras = []
+    if params.get("max_in_flight"):
+        extras.append(f"max_in_flight={params['max_in_flight']}")
+    if not extras:
+        return k
+    return f"{k} ({', '.join(extras)})"
+
+
 def build_job_spec(
     *,
     input_root: Any,
@@ -117,6 +154,8 @@ def build_job_spec(
     may_run_local: bool = True,
     may_run_remote: bool = True,
     mirror_paths: Optional[list[str]] = None,
+    dispatch_kind: str = "pull",
+    dispatch_params: Optional[dict[str, str]] = None,
 ) -> Any:
     """Build a JobSpec with one task per chunk."""
     policy = common_pb2.Policy(
@@ -143,7 +182,9 @@ def build_job_spec(
                 env=_BLENDER_ENV,
             )
         )
-    return common_pb2.JobSpec(name="zm-render", tasks=tasks)
+    params = dict(dispatch_params or {})
+    dispatch = common_pb2.DispatchPolicy(kind=dispatch_kind or "pull", params=params)
+    return common_pb2.JobSpec(name="zm-render", tasks=tasks, dispatch=dispatch)
 
 
 def expected_frame_path(out_dir: Path, frame: int) -> Path:
@@ -187,6 +228,16 @@ def _who(node_id: str, names: dict[str, str]) -> str:
     return node_id[:8]
 
 
+def _chunk_timing(started_at: Optional[float], sandbox_ms: int) -> str:
+    """' 7.1s (sandbox 6.9s)': wall time since placement vs time inside the donor's sandbox."""
+    if started_at is None:
+        return ""
+    wall = time.monotonic() - started_at
+    if sandbox_ms > 0:
+        return f"  {wall:.1f}s (sandbox {sandbox_ms / 1000:.1f}s)"
+    return f"  {wall:.1f}s"
+
+
 def _print_event(kind: str, chunk: Chunk, who: str, file: TextIO, extra: str = "") -> None:
     msg = f"{kind:9} frames {chunk.start:>3}-{chunk.end:<3}  →  {who}"
     if extra:
@@ -220,9 +271,10 @@ def run_render(
     total = opts.frames.count
 
     names = _peer_names(client)
+    policy_label = format_policy_display(opts.dispatch_kind, opts.dispatch_params)
     print(
         f"zm-render: {total} frames → {len(chunks)} chunks "
-        f"(chunk={opts.chunk}, env={opts.env})",
+        f"(chunk={opts.chunk}, env={opts.env}, policy={policy_label})",
         file=prog,
         flush=True,
     )
@@ -246,6 +298,8 @@ def run_render(
         may_run_local=opts.may_run_local,
         may_run_remote=opts.may_run_remote,
         mirror_paths=mirror_paths,
+        dispatch_kind=opts.dispatch_kind,
+        dispatch_params=opts.dispatch_params,
     )
     job = client.submit(job_spec)
     print(f"zm-render: submitted job {job.job_id}", file=prog, flush=True)
@@ -267,6 +321,7 @@ def run_render(
         detail = (getattr(ev, "detail", "") or "").strip()
         if state in (running, placed) and name not in started:
             started.add(name)
+            cp.started_at = time.monotonic()
             # detail sometimes carries placer hint; result.executed_by only on finish
             who = detail if detail else "mesh…"
             _print_event("RUNNING", cp.chunk, who, prog)
@@ -276,12 +331,13 @@ def run_render(
             cp.executed_by = who_id or cp.executed_by
             cp.done = True
             done_frames += cp.chunk.end - cp.chunk.start + 1
+            timing = _chunk_timing(cp.started_at, getattr(res, "duration_ms", 0) if res is not None else 0)
             _print_event(
                 "DONE",
                 cp.chunk,
                 _who(cp.executed_by, names),
                 prog,
-                extra=f"[{done_frames}/{total} frames]",
+                extra=f"[{done_frames}/{total} frames]{timing}",
             )
 
     status = job.wait(check=False)

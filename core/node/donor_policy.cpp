@@ -58,6 +58,14 @@ DonorPolicy DonorPolicy::Parse(std::string_view text, std::ostream& warn, std::s
             if (auto v = ParseInt(value, 0, 100)) p.allow_on_battery_above = *v; else bad();
         } else if (key == "max_cores") {
             if (auto v = ParseInt(value, -1, 1 << 20)) p.max_cores = *v; else bad();
+        } else if (key == "slots") {
+            if (auto v = ParseInt(value, 1, 1 << 20)) p.slots = *v; else bad();
+        } else if (key == "cores_per_slot") {
+            if (auto v = ParseInt(value, 0, 1 << 20)) p.cores_per_slot = *v; else bad();
+        } else if (key == "queue_depth") {
+            if (auto v = ParseInt(value, 0, 1 << 20)) p.queue_depth = *v; else bad();
+        } else if (key == "max_per_requester") {
+            if (auto v = ParseInt(value, 0, 1 << 20)) p.max_per_requester = *v; else bad();
         } else if (key == "allow_network") {
             if (auto v = ParseBool(value)) p.allow_network = *v; else bad();
         } else if (key == "drain_below_battery") {
@@ -83,8 +91,8 @@ DonorPolicy DonorPolicy::Load(const std::filesystem::path& config_dir) {
 }
 
 int DonorPolicy::CoreLimit(int cores_total) const {
-    if (max_cores >= 0) return max_cores;
-    return std::max(cores_total - 1, 0);
+    if (max_cores >= 0) return std::min(max_cores, cores_total);
+    return std::max(cores_total, 0);
 }
 
 bool DonorPolicy::ShouldDrain(const net::Telemetry& t) const {
@@ -98,7 +106,7 @@ bool DonorPolicy::DrainCondition(const net::Telemetry& t) const {
 }
 
 std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                int cores_in_use) const {
+                                                int cores_in_use, int tasks_in_use, int requester_tasks) const {
     if (!t.on_ac && t.battery_pct >= 0) {
         if (ShouldDrain(t)) {
             return "on battery at " + std::to_string(t.battery_pct) + "%, below the drain threshold of " +
@@ -116,11 +124,22 @@ std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v
     if (!arch.empty() && !t.arch.empty() && arch != t.arch) {
         return "task needs arch " + arch + ", this node is " + t.arch;
     }
-    const int need = std::max(spec.resources().cores(), 1);
-    const int limit = CoreLimit(t.cores_total);
-    if (cores_in_use + need > limit) {
-        return "task needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) +
-               " and " + std::to_string(cores_in_use) + " are in use";
+    const int max_per = max_per_requester >= 0 ? max_per_requester : 0;
+    if (max_per > 0 && requester_tasks >= max_per) {
+        return "donor policy allows " + std::to_string(max_per) + " tasks from one requester and they are in use";
+    }
+    if (t.slots > 0) {
+        const int admit = t.slots + std::max(t.queue_depth, 0);
+        if (tasks_in_use >= admit) {
+            return "all " + std::to_string(t.slots) + " worker slots are in use";
+        }
+    } else {
+        const int need = std::max(spec.resources().cores(), 1);
+        const int limit = CoreLimit(t.cores_total);
+        if (cores_in_use + need > limit) {
+            return "task needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) +
+                   " and " + std::to_string(cores_in_use) + " are in use";
+        }
     }
     const int64_t mem = spec.resources().mem_bytes();
     if (mem > 0 && static_cast<uint64_t>(mem) > t.mem_available) {

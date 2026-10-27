@@ -66,6 +66,25 @@ DiscoveryConfig LoopbackConfig(const std::string& id, int port, const TeamKey& k
 
 } // namespace
 
+TEST(AnnounceSlotsAndQueueDepth) {
+    const TeamKey key = GenerateTeamKey();
+    auto fields = SampleFields();
+    fields.telemetry.slots = 2;
+    fields.telemetry.queue_depth = 3;
+    const auto packet = FormatAnnouncement(fields, key);
+    const auto parsed = ParseAnnouncement(packet, key, "self");
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_EQ(parsed->peer.slots, 2);
+    ASSERT_EQ(parsed->peer.queue_depth, 3);
+
+    fields.telemetry.queue_depth = 0;
+    const auto slots_only = FormatAnnouncement(fields, key);
+    const auto p18 = ParseAnnouncement(slots_only, key, "self");
+    ASSERT_TRUE(p18.has_value());
+    ASSERT_EQ(p18->peer.slots, 2);
+    ASSERT_EQ(p18->peer.queue_depth, 0);
+}
+
 TEST(AnnounceRoundTrip) {
     const TeamKey key = GenerateTeamKey();
     const auto packet = FormatAnnouncement(SampleFields(), key);

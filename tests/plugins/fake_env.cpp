@@ -27,6 +27,7 @@ const zeromesh::plugin::PluginEntry kEntry{
     .name = "fake",
     .make_env = &MakeFake,
     .make_frontend = nullptr,
+    .make_dispatch = nullptr,
 };
 
 } // namespace

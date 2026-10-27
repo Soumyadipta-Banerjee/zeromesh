@@ -132,6 +132,8 @@ struct TestNodeFull {
         p.node_port = port;
         p.cores = telemetry.cores_total;
         p.cores_free = telemetry.cores_free;
+        p.slots = telemetry.slots;
+        p.queue_depth = telemetry.queue_depth;
         p.memory_bytes = telemetry.mem_total;
         p.mem_available = telemetry.mem_available;
         p.cpu_load_pct = telemetry.cpu_load_pct;

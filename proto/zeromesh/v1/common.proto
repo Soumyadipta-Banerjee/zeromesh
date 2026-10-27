@@ -63,9 +63,26 @@ message TaskSpec {
   repeated InputFrom inputs_from = 12;
 }
 
+// How the requester hands a job's tasks to worker slots. Donor limits (slots,
+// queue_depth, max_per_requester) are enforced by each donor whatever the policy asks.
+message DispatchPolicy {
+  // "" or "pull" (default): one task per free slot, the next right after one finishes;
+  //   the node with the most free slots first. "spread" is the same.
+  // "batch": also keep up to params["prefetch"] (default 1) tasks queued on each donor,
+  //   capped by its queue_depth.
+  // "fast": hand everything out at once, up to each node's slots + queue_depth.
+  // "local-first": fill this node's slots before offering to peers.
+  // Any other name selects an IDispatchPolicy plugin loaded by zmd.
+  string kind = 1;
+  // Shared key: "max_in_flight" (cap on this job's tasks in flight across the mesh).
+  // Plugin policies may define more.
+  map<string, string> params = 2;
+}
+
 message JobSpec {
   string name = 1;
   repeated TaskSpec tasks = 2;
+  DispatchPolicy dispatch = 3;
 }
 
 message OutputEntry {
@@ -149,6 +166,8 @@ message PeerInfo {
   string state = 12;       // "active" | "draining" | "offline"
   bool is_self = 13;
   bool admitted = 14;      // true when this peer's cert is pinned (team member)
+  int32 slots = 15;        // worker slots (tasks at once); 0 = not announced
+  int32 queue_depth = 16;  // extra tasks it accepts to hold queued
 }
 
 message Empty {}

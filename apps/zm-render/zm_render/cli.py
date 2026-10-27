@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from zm_render.frames import parse_frames
-from zm_render.render import RenderOptions, run_render
+from zm_render.render import RenderOptions, parse_dispatch_policy, run_render
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,9 +69,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--cores",
         type=int,
-        default=8,
-        help="Cores reserved per chunk (default: 8). Higher ≈ fewer concurrent "
-        "Blenders per machine (Flamenco-style: keep peers fed from a queue).",
+        default=0,
+        help="Cores per chunk task (default: 0 = full donor slot share). "
+        "A positive value only lowers the share.",
+    )
+    p.add_argument(
+        "--policy",
+        default="pull",
+        metavar="KIND[:N]",
+        help="Dispatch policy: pull (default), batch or batch:N, fast, local-first, "
+        "spread, or a custom plugin policy name",
+    )
+    p.add_argument(
+        "--max-in-flight",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap tasks in flight across the mesh (dispatch param max_in_flight)",
     )
     p.add_argument(
         "--remote-only",
@@ -100,6 +114,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.env == "mirror" and not args.mirror_paths:
         print("zm-render: --env mirror requires at least one --mirror PATH", file=sys.stderr)
         return 2
+    if args.cores < 0:
+        print("zm-render: --cores must be >= 0", file=sys.stderr)
+        return 2
+    try:
+        dispatch_kind, dispatch_params = parse_dispatch_policy(args.policy)
+    except ValueError as e:
+        print(f"zm-render: {e}", file=sys.stderr)
+        return 2
+    if args.max_in_flight is not None:
+        if args.max_in_flight < 1:
+            print("zm-render: --max-in-flight must be >= 1", file=sys.stderr)
+            return 2
+        dispatch_params["max_in_flight"] = str(args.max_in_flight)
 
     try:
         import zeromesh
@@ -127,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
         blender_bin=args.blender,
         engine=args.engine,
         cores=args.cores,
+        dispatch_kind=dispatch_kind,
+        dispatch_params=dispatch_params,
         may_run_local=not args.remote_only,
         may_run_remote=True,
     )
