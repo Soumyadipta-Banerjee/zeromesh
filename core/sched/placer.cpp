@@ -55,6 +55,12 @@ bool OfferRejectionRetryable(const std::string& reason) {
     return reason.find("in use") != std::string::npos || reason.find("draining") != std::string::npos;
 }
 
+// Capability miss on one donor — keep that node in `tried` and try the next peer.
+bool OfferRejectionTryNextPeer(const std::string& reason) {
+    return reason.find("not found on this node") != std::string::npos ||
+           reason.find("no env provider") != std::string::npos;
+}
+
 } // namespace
 
 struct Placer::Task {
@@ -565,6 +571,10 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             if (OfferRejectionRetryable(why)) {
                 tried.erase(reserved->node_id);
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            } else if (OfferRejectionTryNextPeer(why)) {
+                // e.g. blender missing on this donor only — skip it, try other peers.
+                skip.insert(reserved->node_id);
+                last_reason = "node " + reserved->node_id + ": " + why;
             } else {
                 return task->Done(
                     Failed(local_id_, "no node can run this task: node " + reserved->node_id + ": " + why));
