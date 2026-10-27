@@ -43,10 +43,12 @@ ZM_RENDER="$(command -v zm-render || true)"
 [[ -n "$ZM_RENDER" ]] || { echo "need zm-render"; exit 1; }
 [[ -f "$SCENE" ]] || { echo "missing scene $SCENE"; exit 1; }
 
-echo "=== peers (want donors ADMITTED) ==="
+echo "=== peers (want donors ADMITTED + blender in /usr/bin or /usr/local/bin) ==="
 "$ZM" status || true
 echo
-echo "=== offload $FRAMES chunk=$CHUNK → $OUT (remote-only) ==="
+# Donors resolve argv via env-host PATH (/usr/local/bin:/usr/bin:/bin), not shell PATH.
+BLENDER="${BLENDER:-blender}"
+echo "=== offload $FRAMES chunk=$CHUNK → $OUT (remote-only, blender=$BLENDER) ==="
 mkdir -p "$OUT"
 rm -f "$OUT"/frame_*.png 2>/dev/null || true
 
@@ -54,13 +56,14 @@ START_EPOCH=$(date +%s)
 START_HMS=$(date -Is)
 {
   echo "start: $START_HMS"
-  echo "cmd: zm-render $SCENE --frames $FRAMES --chunk $CHUNK -o $OUT --remote-only"
+  echo "cmd: zm-render $SCENE --frames $FRAMES --chunk $CHUNK -o $OUT --remote-only --blender $BLENDER"
 } | tee "$LOG"
 
 # /usr/bin/time -f for clear wall/user/sys; also keep zm-render stdout
  /usr/bin/time -f 'wall_sec=%e user_sec=%U sys_sec=%S' \
   -o "$LOG" -a \
-  "$ZM_RENDER" "$SCENE" --frames "$FRAMES" --chunk "$CHUNK" -o "$OUT" --remote-only \
+  "$ZM_RENDER" "$SCENE" --frames "$FRAMES" --chunk "$CHUNK" -o "$OUT" \
+    --remote-only --blender "$BLENDER" \
   2>&1 | tee -a "$LOG"
 
 END_EPOCH=$(date +%s)
