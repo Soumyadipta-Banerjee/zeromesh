@@ -76,13 +76,10 @@ public:
                 env.binds.push_back({p, p, true});
             }
         }
-        // Host /etc/mtab is usually a symlink to ../proc/self/mounts — recreate that
-        // inside the sandbox (bwrap already mounts --proc) instead of binding the host link.
-        env.symlinks.push_back({"/proc/self/mounts", "/etc/mtab"});
-        for (const char* p : {"/etc/alternatives", "/etc/ld.so.cache", "/etc/ssl", "/etc/passwd",
-                              "/etc/group", "/etc/nsswitch.conf", "/etc/resolv.conf"}) {
-            if (fs::exists(p, ec)) env.binds.push_back({p, p, true});
-        }
+        // Whole /etc: Blender's setmntent("/etc/mtab") needs the host mtab (usually a
+        // symlink to ../proc/self/mounts). Piecemeal binds leave debian Blender exiting 1
+        // with only "could not get a list of mounted file-systems".
+        if (fs::exists("/etc", ec)) env.binds.push_back({"/etc", "/etc", true});
         env.env.emplace_back("PATH", std::string(SandboxPathEnv()));
         return {.value = std::move(env), .error = {}};
     }
