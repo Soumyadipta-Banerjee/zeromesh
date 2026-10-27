@@ -410,10 +410,15 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     // older Blender (e.g. Debian) aborts headless with only a mount-list warning first.
     b.AddPerms(0700).AddDir("/tmp/xdg-runtime");
     b.AddEnv("HOME", "/tmp").AddEnv("ZM_NODE_ID", spec.node_id);
+    // Headless: older Blender still opens GHOST/Wayland and dies if these look like a GUI.
+    b.AddEnv("SDL_VIDEODRIVER", "dummy");
+    b.AddEnv("LIBGL_ALWAYS_SOFTWARE", "1");
     for (const auto& [k, v] : spec.sandbox_env.env) b.AddEnv(k, v);
     for (const auto& [k, v] : spec.env) b.AddEnv(k, v);
     // Force a valid runtime dir last so task env cannot point at /tmp (mode ≠ 0700).
     b.AddEnv("XDG_RUNTIME_DIR", "/tmp/xdg-runtime");
+    b.AddEnv("WAYLAND_DISPLAY", "");
+    b.AddEnv("DISPLAY", "");
     b.SetWorkingDirectory((fs::path("/work") / spec.working_dir).lexically_normal().string());
     auto args = b.Build(spec.argv);
 

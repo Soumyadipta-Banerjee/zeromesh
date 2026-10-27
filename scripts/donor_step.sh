@@ -61,22 +61,21 @@ esac
 step "3/5 build zm / zmd"
 BUILD=""
 for d in build-verify build; do
-  if [[ -x "$ROOT/$d/zm" && -x "$ROOT/$d/zmd" ]]; then BUILD="$ROOT/$d"; break; fi
+  if [[ -f "$ROOT/$d/build.ninja" ]]; then BUILD="$ROOT/$d"; break; fi
 done
-if [[ -z "$BUILD" ]]; then
-  BUILD="$ROOT/build"
-  [ -f /tmp/zm-native.ini ] || {
-    if [ -f "$HOME/zeromesh-backups/zm-native.ini" ]; then
-      cp "$HOME/zeromesh-backups/zm-native.ini" /tmp/zm-native.ini
-    else
-      printf '%s\n' '[binaries]' 'c = '\''gcc'\''' 'cpp = '\''g++'\''' > /tmp/zm-native.ini
-    fi
-  }
-  if [[ ! -f "$BUILD/build.ninja" ]]; then
-    meson setup "$BUILD" --native-file /tmp/zm-native.ini
+if [[ -z "$BUILD" ]]; then BUILD="$ROOT/build"; fi
+[ -f /tmp/zm-native.ini ] || {
+  if [ -f "$HOME/zeromesh-backups/zm-native.ini" ]; then
+    cp "$HOME/zeromesh-backups/zm-native.ini" /tmp/zm-native.ini
+  else
+    printf '%s\n' '[binaries]' 'c = '\''gcc'\''' 'cpp = '\''g++'\''' > /tmp/zm-native.ini
   fi
-  ninja -C "$BUILD" -j"$JOBS" zm zmd
+}
+if [[ ! -f "$BUILD/build.ninja" ]]; then
+  meson setup "$BUILD" --native-file /tmp/zm-native.ini
 fi
+# Always rebuild after pull — leftover binaries skip the sandbox/blender fixes.
+ninja -C "$BUILD" -j"$JOBS" zm zmd
 ZM="$BUILD/zm"
 ZMD="$BUILD/zmd"
 [[ -x "$ZM" && -x "$ZMD" ]] || die "build failed — no $BUILD/zm or zmd"
@@ -84,17 +83,17 @@ export PATH="$BUILD:$PATH"
 export ZM_BUILD_DIR="$BUILD"
 echo "using $BUILD"
 
-step "4/5 run zmd"
-if ! "$ZM" status >/dev/null 2>&1; then
-  "$ZMD" >/tmp/zeromesh-donor-zmd.log 2>&1 &
-  for _ in $(seq 1 40); do
-    "$ZM" status >/dev/null 2>&1 && break
-    sleep 0.25
-  done
-  "$ZM" status >/dev/null 2>&1 || die "zmd failed — see /tmp/zeromesh-donor-zmd.log"
-else
-  echo "zmd already running"
-fi
+step "4/5 restart zmd"
+pkill -f '/zmd' 2>/dev/null || true
+sleep 0.4
+rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/zeromesh/zmd.sock" \
+      /tmp/zeromesh-$(id -u)/zmd.sock 2>/dev/null || true
+"$ZMD" >/tmp/zeromesh-donor-zmd.log 2>&1 &
+for _ in $(seq 1 40); do
+  "$ZM" status >/dev/null 2>&1 && break
+  sleep 0.25
+done
+"$ZM" status >/dev/null 2>&1 || die "zmd failed — see /tmp/zeromesh-donor-zmd.log"
 
 if [[ -n "$JOIN_CODE" ]]; then
   echo "joining team…"
