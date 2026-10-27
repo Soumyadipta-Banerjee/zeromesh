@@ -43,6 +43,11 @@ Each donor needs the same OpenFOAM release installed. Run the bundled short
 two-case lid-driven-cavity sweep on peer nodes:
 
 ```bash
+# Arch Linux: run on every machine that will execute CFD cases.
+bash scripts/install_openfoam_arch.sh
+```
+
+```bash
 zm-cfd tests/data/cfd-cavity-sweep \
   --solver bash \
   --solver-arg=-lc \
