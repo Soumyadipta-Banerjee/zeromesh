@@ -126,6 +126,28 @@ int NodeService::CoresInUseLocked() const {
     return n;
 }
 
+int NodeService::RequesterTasksInUseLocked(const std::string& requester) const {
+    int n = 0;
+    for (const auto& [key, _] : reserved_) {
+        if (key.first == requester) ++n;
+    }
+    for (const auto& [key, _] : running_) {
+        if (key.first == requester) ++n;
+    }
+    return n;
+}
+
+int NodeService::TasksInUseLocked() const {
+    int n = static_cast<int>(reserved_.size());
+    int handed_over = 0;  // running_ entries already counted by the executor
+    for (const auto& [key, r] : running_) {
+        ++n;
+        if (executor_ && executor_->Has(r.exec_id)) ++handed_over;
+    }
+    if (executor_) n += executor_->TaskCount() - handed_over;
+    return n;
+}
+
 std::unordered_set<std::string> NodeService::ProtectedBlobHashes() const {
     if (!cas_) return {};
     struct Snap {
@@ -303,7 +325,10 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
     const TaskKey key{peer, req->task_id()};
     if (running_.contains(key)) return reject("task " + req->task_id() + " is already running here");
     reserved_.erase(key);  // a repeated offer replaces the old reservation
-    if (auto why = policy_.Refuses(telemetry, spec, CoresInUseLocked())) return reject(*why);
+    if (auto why = policy_.Refuses(telemetry, spec, CoresInUseLocked(), TasksInUseLocked(),
+                                  RequesterTasksInUseLocked(peer))) {
+        return reject(*why);
+    }
 
     resp->set_accepted(true);
     for (auto& d : missing) *resp->add_missing() = std::move(d);

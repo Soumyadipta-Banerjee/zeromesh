@@ -220,6 +220,8 @@ v1::PeerInfo FromPeer(const net::Peer& p) {
         case net::PeerState::Draining: info.set_state("draining"); break;
         case net::PeerState::Offline: info.set_state("offline"); break;
     }
+    info.set_slots(p.slots);
+    info.set_queue_depth(p.queue_depth);
     return info;
 }
 
@@ -547,6 +549,8 @@ v1::PeerInfo ClientService::SelfInfo() {
     self.set_on_ac(t.on_ac);
     self.set_state("active");
     self.set_is_self(true);
+    self.set_slots(options_.slots);
+    self.set_queue_depth(options_.queue_depth);
     return self;
 }
 

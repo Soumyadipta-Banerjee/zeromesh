@@ -302,6 +302,9 @@ void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color) {
            << "  Node ID:   " << self->node_id() << "\n"
            << "  Hostname:  " << self->hostname() << " (" << self->arch() << ")\n"
            << "  Cores:     " << self->cores_free() << " free of " << self->cores_total() << "\n"
+           << "  Slots:     " << self->slots()
+           << (self->queue_depth() > 0 ? " (+" + std::to_string(self->queue_depth()) + " queued)" : std::string())
+           << "\n"
            << "  Memory:    " << Gib(self->mem_available()) << " available\n"
            << "  CPU load:  " << Pct(self->cpu_load_pct()) << "\n"
            << "  Power:     " << Power(*self) << "\n"
@@ -316,16 +319,19 @@ void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color) {
         return;
     }
     os << "  " << std::left << std::setw(10) << "NODE ID" << "  " << std::setw(24) << "HOST" << "  "
-       << std::right << std::setw(9) << "CORES" << "  " << std::setw(9) << "MEM" << "  " << std::setw(7) << "CPU"
-       << "  " << std::left << std::setw(10) << "STATE" << "  ADMITTED\n";
+       << std::right << std::setw(6) << "SLOTS" << "  " << std::setw(9) << "CORES" << "  " << std::setw(9) << "MEM"
+       << "  " << std::setw(7) << "CPU" << "  " << std::left << std::setw(10) << "STATE" << "  ADMITTED\n";
     for (const auto& p : peers.peers()) {
         if (p.is_self()) continue;
         std::string host = p.hostname() + " (" + p.address() + ":" + std::to_string(p.node_port()) + ")";
+        std::string slots = p.slots() > 0 ? std::to_string(p.slots()) : "-";  // "-": node predates slots
+        if (p.queue_depth() > 0) slots += "+" + std::to_string(p.queue_depth()) + "q";
         std::string cores = std::to_string(p.cores_free()) + "/" + std::to_string(p.cores_total());
         const char* state_color = p.state() == "active" ? green : yellow;
         std::string id8 = p.node_id().size() <= 8 ? p.node_id() : p.node_id().substr(0, 8);
-        os << "  " << std::left << std::setw(10) << id8 << "  " << std::setw(24) << Clip(host, 24)
-           << "  " << std::right << std::setw(9) << cores << "  " << std::setw(9) << Gib(p.mem_available()) << "  "
+        os << "  " << std::left << std::setw(10) << id8 << "  " << std::setw(24) << Clip(host, 24) << "  "
+           << std::right << std::setw(6) << slots << "  " << std::setw(9) << cores << "  " << std::setw(9)
+           << Gib(p.mem_available()) << "  "
            << std::setw(7) << Pct(p.cpu_load_pct()) << "  " << state_color << std::left << std::setw(10)
            << p.state() << reset << "  " << (p.admitted() ? "yes" : "no") << "\n";
     }

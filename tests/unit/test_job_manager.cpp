@@ -20,7 +20,8 @@ class FakeExecutor : public zeromesh::node::Executor {
 public:
     explicit FakeExecutor(std::shared_ptr<zeromesh::store::CasStore> cas) : cas_(std::move(cas)) {}
 
-    void Execute(const std::string&, const v1::TaskSpec& spec, zeromesh::node::TaskCallbacks cb) override {
+    void Execute(const std::string&, const v1::TaskSpec& spec, zeromesh::node::TaskCallbacks cb,
+                 zeromesh::node::ExecuteContext = {}) override {
         calls.push_back(spec);
         v1::TaskResult r;
         auto it = results.find(spec.name());
@@ -120,7 +121,8 @@ TEST(JobRunsDagInOrder) {
 // Holds the task after reporting placement, so ListActive can be observed mid-run.
 class HoldExecutor : public zeromesh::node::Executor {
 public:
-    void Execute(const std::string&, const v1::TaskSpec&, zeromesh::node::TaskCallbacks cb) override {
+    void Execute(const std::string&, const v1::TaskSpec&, zeromesh::node::TaskCallbacks cb,
+                 zeromesh::node::ExecuteContext = {}) override {
         cb.on_state(v1::PLACED, "node peer-bb");
         held = std::move(cb);
     }
@@ -284,7 +286,8 @@ TEST(JobDependencyFailurePropagates) {
 class VerboseExecutor : public FakeExecutor {
 public:
     using FakeExecutor::FakeExecutor;
-    void Execute(const std::string&, const v1::TaskSpec& spec, zeromesh::node::TaskCallbacks cb) override {
+    void Execute(const std::string&, const v1::TaskSpec& spec, zeromesh::node::TaskCallbacks cb,
+                 zeromesh::node::ExecuteContext = {}) override {
         v1::TaskResult r;
         auto it = results.find(spec.name());
         if (it != results.end()) r = it->second;

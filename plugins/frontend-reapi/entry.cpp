@@ -10,6 +10,7 @@ extern "C" const zeromesh::plugin::PluginEntry* zm_plugin_entry() {
         []() -> zeromesh::plugin::IFrontend* {
             return new zeromesh::frontend_reapi::Frontend();
         },
+        nullptr, // make_dispatch
     };
     return &entry;
 }

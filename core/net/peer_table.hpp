@@ -29,6 +29,8 @@ struct Peer {
     int node_port{8981};           // NodeApi TCP port
     int cores{1};
     int cores_free{0};
+    int slots{0};                  // announced worker slots; 0 = unknown (size by cores)
+    int queue_depth{0};
     uint64_t memory_bytes{0};
     uint64_t mem_available{0};
     double cpu_load_pct{0.0};     // 0.0 to 100.0%

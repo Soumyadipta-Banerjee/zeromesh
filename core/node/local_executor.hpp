@@ -22,24 +22,32 @@ namespace zeromesh::node {
 
 // Runs tasks on this node: a pool of `slots` workers, each resolving the task's environment
 // provider from the Registry (Check, Prepare, Release) and running it in the SandboxRunner.
+// With cores_per_slot > 0 each worker runs one task at a time with that many cores (a
+// task's resources.cores, when set, can only lower it). With cores_per_slot 0, `slots` is a
+// core budget and a task waits until resources.cores of it are free.
 using NodeClientFactory = std::function<std::shared_ptr<NodeClient>(const std::string& node_id)>;
 
 class LocalExecutor final : public Executor {
 public:
     LocalExecutor(std::shared_ptr<exec::SandboxRunner> runner, std::shared_ptr<plugin::Registry> registry,
                   std::string node_id, int slots, std::filesystem::path scratch_root,
-                  std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory);
+                  std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory,
+                  int cores_per_slot = 0);
     ~LocalExecutor() override;
 
     LocalExecutor(const LocalExecutor&) = delete;
     LocalExecutor& operator=(const LocalExecutor&) = delete;
 
-    void Execute(const std::string& task_id, const v1::TaskSpec& spec, TaskCallbacks cb) override;
+    void Execute(const std::string& task_id, const v1::TaskSpec& spec, TaskCallbacks cb,
+                 ExecuteContext ctx = {}) override;
     // A queued task completes at once as cancelled; a running one has its sandbox killed.
     void Cancel(const std::string& task_id) override;
 
     // Cores held by sandboxes that have started and not finished.
     [[nodiscard]] int CoresInUse() const;
+    // Tasks queued or running here, and whether `task_id` is one of them.
+    [[nodiscard]] int TaskCount() const;
+    [[nodiscard]] bool Has(const std::string& task_id) const;
 
     // Snapshot of sandboxes on this node for zm monitor (queued/running + recent finished).
     struct ActiveItem {
@@ -64,6 +72,7 @@ private:
         int cores_held{1};
     };
 
+    int CoresFor(const v1::TaskSpec& spec) const;
     void Worker(std::stop_token st);
     v1::TaskResult Run(Item& item);
     void RememberFinished(std::string task_id, v1::TaskSpec spec, v1::TaskState state);
@@ -72,6 +81,7 @@ private:
     std::shared_ptr<plugin::Registry> registry_;
     std::string node_id_;
     int core_capacity_{1};
+    int cores_per_slot_{0};
     int cores_in_use_{0};
     std::filesystem::path scratch_root_;
     std::shared_ptr<store::CasStore> cas_;

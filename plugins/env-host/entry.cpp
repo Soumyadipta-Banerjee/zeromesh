@@ -11,6 +11,7 @@ const zeromesh::plugin::PluginEntry kEntry{
     .name = "host",
     .make_env = &MakeHost,
     .make_frontend = nullptr,
+    .make_dispatch = nullptr,
 };
 
 } // namespace

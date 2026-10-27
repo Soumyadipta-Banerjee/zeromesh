@@ -17,6 +17,8 @@ struct Telemetry {
     bool on_ac{true};
     bool user_active{false};    // recent keyboard/mouse IRQ activity (M4 drain)
     std::string arch{};
+    int slots{0};               // worker slots (tasks at once); 0 = size by cores (older nodes)
+    int queue_depth{0};         // extra tasks queued on this donor beyond slots
 };
 
 // Reads telemetry from procfs/sysfs under `sysroot` (tests point it at a fake tree).

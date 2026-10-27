@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace zeromesh::node {
@@ -12,6 +13,11 @@ struct DaemonConfig {
     std::filesystem::path config_dir;   // donor.toml (Task 17)
     int node_port{8981};                // NodeApi TCP port (Task 17)
     int discovery_port{8988};           // discovery multicast UDP port (Task 17)
+    // Donor limits (unset = fall through to donor.toml then defaults).
+    std::optional<int> slots;
+    std::optional<int> cores_per_slot;
+    std::optional<int> queue_depth;
+    std::optional<int> max_per_requester;
 
     // Resolved from the environment:
     //   ZM_STATE_DIR      default ~/.local/share/zeromesh
@@ -19,6 +25,7 @@ struct DaemonConfig {
     //   ZM_CONFIG_DIR     default ~/.config/zeromesh
     //   ZM_NODE_PORT      default 8981
     //   ZM_DISCOVERY_PORT default 8988
+    //   ZM_SLOTS, ZM_CORES_PER_SLOT, ZM_QUEUE_DEPTH, ZM_MAX_PER_REQUESTER
     static DaemonConfig FromEnv();
 
     [[nodiscard]] std::filesystem::path socket_path() const { return runtime_dir / "zmd.sock"; }

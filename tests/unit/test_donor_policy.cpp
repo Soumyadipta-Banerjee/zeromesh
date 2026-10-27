@@ -32,35 +32,36 @@ zeromesh::v1::TaskSpec Echo() {
 TEST(DonorPolicyDefaults) {
     DonorPolicy p;
     ASSERT_EQ(p.allow_on_battery_above, 50);
-    ASSERT_EQ(p.CoreLimit(8), 7);
+    ASSERT_EQ(p.CoreLimit(8), 8);
     ASSERT_FALSE(p.allow_network);
     ASSERT_EQ(p.drain_below_battery, 20);
 
-    auto why = p.Refuses(Laptop(30, false), Echo(), 0);
+    auto why = p.Refuses(Laptop(30, false), Echo(), 0, 0);
     ASSERT_TRUE(why.has_value());
     ASSERT_TRUE(why->find("battery") != std::string::npos);
-    ASSERT_FALSE(p.Refuses(Laptop(30, true), Echo(), 0).has_value());
-    ASSERT_FALSE(p.Refuses(Laptop(80, false), Echo(), 0).has_value());
+    ASSERT_FALSE(p.Refuses(Laptop(30, true), Echo(), 0, 0).has_value());
+    ASSERT_FALSE(p.Refuses(Laptop(80, false), Echo(), 0, 0).has_value());
     ASSERT_TRUE(p.ShouldDrain(Laptop(10, false)));
     ASSERT_FALSE(p.ShouldDrain(Laptop(10, true)));
 
-    // At most cores_total - 1 cores, counting what is already promised.
-    ASSERT_FALSE(p.Refuses(Laptop(-1, true), Echo(), 6).has_value());
-    ASSERT_TRUE(p.Refuses(Laptop(-1, true), Echo(), 7).has_value());
+    // Donates all cores by default.
+    ASSERT_FALSE(p.Refuses(Laptop(-1, true), Echo(), 7, 0).has_value());
+    ASSERT_TRUE(p.Refuses(Laptop(-1, true), Echo(), 8, 0).has_value());
     auto big = Echo();
     big.mutable_resources()->set_cores(8);
-    ASSERT_TRUE(p.Refuses(Laptop(-1, true), big, 0).has_value());
+    ASSERT_FALSE(p.Refuses(Laptop(-1, true), big, 0, 0).has_value());
+    ASSERT_TRUE(p.Refuses(Laptop(-1, true), big, 1, 0).has_value());
 }
 
 TEST(DonorPolicyNetwork) {
     auto spec = Echo();
     spec.mutable_policy()->set_allow_network(true);
     DonorPolicy p;
-    auto why = p.Refuses(Laptop(-1, true), spec, 0);
+    auto why = p.Refuses(Laptop(-1, true), spec, 0, 0);
     ASSERT_TRUE(why.has_value());
     ASSERT_TRUE(why->find("network") != std::string::npos);
     p.allow_network = true;
-    ASSERT_FALSE(p.Refuses(Laptop(-1, true), spec, 0).has_value());
+    ASSERT_FALSE(p.Refuses(Laptop(-1, true), spec, 0, 0).has_value());
 }
 
 TEST(DonorPolicyParse) {
@@ -87,6 +88,30 @@ TEST(DonorPolicyParse) {
     ASSERT_TRUE(w.find("donor.toml:1: unknown key 'colour'") != std::string::npos);
     ASSERT_TRUE(w.find("donor.toml:2: bad value") != std::string::npos);
     ASSERT_TRUE(w.find("donor.toml:3:") != std::string::npos);
+}
+
+TEST(DonorPolicySlotsAndQueue) {
+    DonorPolicy p;
+    auto tel = Laptop(-1, true);
+    tel.slots = 1;
+    tel.queue_depth = 1;
+    ASSERT_FALSE(p.Refuses(tel, Echo(), 0, 0).has_value());
+    ASSERT_FALSE(p.Refuses(tel, Echo(), 0, 1).has_value());
+    auto why = p.Refuses(tel, Echo(), 0, 2);
+    ASSERT_TRUE(why.has_value());
+    ASSERT_TRUE(why->find("in use") != std::string::npos);
+
+    p.max_per_requester = 1;
+    ASSERT_FALSE(p.Refuses(tel, Echo(), 0, 0, 0).has_value());
+    why = p.Refuses(tel, Echo(), 0, 0, 1);
+    ASSERT_TRUE(why.has_value());
+    ASSERT_TRUE(why->find("in use") != std::string::npos);
+
+    std::ostringstream warn;
+    DonorPolicy q = DonorPolicy::Parse("slots = 2\nqueue_depth = 1\nmax_per_requester = 3\n", warn);
+    ASSERT_EQ(q.slots, 2);
+    ASSERT_EQ(q.queue_depth, 1);
+    ASSERT_EQ(q.max_per_requester, 3);
 }
 
 TEST(DonorPolicyParseM4Keys) {

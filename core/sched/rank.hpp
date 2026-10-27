@@ -23,14 +23,17 @@ struct Candidate {
     std::chrono::milliseconds latency{0};
     int64_t missing_bytes{-1};  // input bytes the node lacks; -1 = unknown
     int in_flight{0};           // tasks this node already runs for us
+    int slots{0};               // announced worker slots; 0 = size by cores_total/cores
+    int queue_depth{0};         // donor queue beyond running slots (batch/fast capacity)
 };
 
 // Keeps the candidates that can run `spec` and orders them best first.
 // Filter:
 //   - arch equals resources.arch; an empty resources.arch means the local candidate's
 //     arch (no arch filter when there is neither)
-//   - slots = cores_total/cores - in_flight >= 1 (cores 0 means 1). Uses cores_total so
-//     a busy Cycles job does not shrink capacity to zero mid-job.
+//   - free slots = slots - in_flight >= 1. A node that announces no slots gets
+//     cores_total/cores (cores 0 means 1); cores_total, not live cores_free, so a busy
+//     Cycles job does not shrink capacity to zero mid-job.
 //   - mem_available >= mem_bytes
 //   - policy.may_run_local / may_run_remote (unset = true)
 // Order: free slots descending, then missing_bytes, cpu_load_pct, AC, latency, node_id.

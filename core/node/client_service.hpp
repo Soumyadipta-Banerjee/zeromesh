@@ -32,6 +32,8 @@ struct ClientServiceOptions {
     std::string node_id;
     int node_port{8981};
     uint64_t upload_limit_bytes{kDefaultUploadLimitBytes};
+    int slots{1};        // this node's donor worker slots, reported as self in ListPeers
+    int queue_depth{0};
 };
 
 // Shared team membership state for ClientService Team* RPCs and NodeService Admit.

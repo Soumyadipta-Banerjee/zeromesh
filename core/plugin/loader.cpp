@@ -18,6 +18,8 @@ Registry::~Registry() {
     // Plugin objects must die before their code is unmapped.
     StopFrontends();
     envs_.clear();
+    dispatch_owned_.clear();
+    dispatch_by_name_.clear();
     frontends_.clear();
     for (void* h : handles_) dlclose(h);
 }
@@ -25,6 +27,14 @@ Registry::~Registry() {
 void Registry::RegisterEnv(std::unique_ptr<IEnvProvider> env) {
     if (!env || Env(env->Name()) != nullptr) return;
     envs_.push_back(std::move(env));
+}
+
+void Registry::RegisterDispatch(std::unique_ptr<IDispatchPolicy> policy) {
+    if (!policy) return;
+    const std::string name(policy->Name());
+    if (dispatch_by_name_.contains(name)) return;
+    dispatch_by_name_[name] = policy.get();
+    dispatch_owned_.push_back(std::move(policy));
 }
 
 void Registry::RegisterFrontend(std::unique_ptr<IFrontend> frontend) {
@@ -90,6 +100,7 @@ bool Registry::LoadFile(const std::filesystem::path& so, std::string* error) {
     handles_.push_back(handle);
     if (entry->make_env != nullptr) RegisterEnv(std::unique_ptr<IEnvProvider>(entry->make_env()));
     if (entry->make_frontend != nullptr) frontends_.emplace_back(entry->make_frontend());
+    if (entry->make_dispatch != nullptr) RegisterDispatch(std::unique_ptr<IDispatchPolicy>(entry->make_dispatch()));
     return true;
 }
 
@@ -131,6 +142,11 @@ std::vector<std::string> Registry::EnvNames() const {
     std::vector<std::string> names;
     for (const auto& e : envs_) names.emplace_back(e->Name());
     return names;
+}
+
+IDispatchPolicy* Registry::Dispatch(std::string_view name) const {
+    auto it = dispatch_by_name_.find(std::string(name));
+    return it == dispatch_by_name_.end() ? nullptr : it->second;
 }
 
 } // namespace zeromesh::plugin

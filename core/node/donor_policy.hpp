@@ -21,7 +21,11 @@ namespace zeromesh::node {
 
 struct DonorPolicy {
     int allow_on_battery_above{50};  // percent; on battery, accept only above this
-    int max_cores{-1};               // -1 = cores_total - 1
+    int max_cores{-1};               // -1 = donate all cores_total
+    int slots{-1};                   // -1 unset; resolved default 1
+    int cores_per_slot{-1};          // -1 unset; 0 after resolve = (CoreLimit/slots)
+    int queue_depth{-1};             // -1 unset; resolved default 0
+    int max_per_requester{-1};       // -1 unset; resolved default 0 = unlimited
     bool allow_network{false};       // tasks may ask for network only if this is true
     int drain_below_battery{20};     // percent; on battery below this, refuse and drain
     // Off by default: keyboard IRQs made demo nodes announce "draining" and
@@ -47,9 +51,12 @@ struct DonorPolicy {
     [[nodiscard]] bool ShouldDrain(const net::Telemetry& t) const;
 
     // nullopt when a task with `spec` is acceptable right now given the node's telemetry and
-    // the cores already promised to other tasks; otherwise a human-readable reason.
+    // the work already promised; otherwise a human-readable reason. With t.slots > 0 the
+    // node takes at most t.slots tasks (`tasks_in_use` counts them); otherwise the limit
+    // is CoreLimit cores (`cores_in_use` counts them).
     [[nodiscard]] std::optional<std::string> Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                     int cores_in_use) const;
+                                                     int cores_in_use, int tasks_in_use,
+                                                     int requester_tasks = 0) const;
 };
 
 // Sticky drain state machine. Call Update with each telemetry sample; it reports whether

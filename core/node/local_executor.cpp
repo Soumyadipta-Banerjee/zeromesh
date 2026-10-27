@@ -60,7 +60,8 @@ v1::TaskState StateFromResult(const v1::TaskResult& r) {
 
 LocalExecutor::LocalExecutor(std::shared_ptr<exec::SandboxRunner> runner, std::shared_ptr<plugin::Registry> registry,
                              std::string node_id, int slots, std::filesystem::path scratch_root,
-                             std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory)
+                             std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory,
+                             int cores_per_slot)
     : runner_(std::move(runner)),
       registry_(std::move(registry)),
       node_id_(std::move(node_id)),
@@ -68,6 +69,7 @@ LocalExecutor::LocalExecutor(std::shared_ptr<exec::SandboxRunner> runner, std::s
       cas_(std::move(cas)),
       client_factory_(std::move(client_factory)) {
     core_capacity_ = std::max(1, slots);
+    cores_per_slot_ = std::max(0, cores_per_slot);
     int n = core_capacity_;
     workers_.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
@@ -96,7 +98,8 @@ LocalExecutor::~LocalExecutor() {
     }
 }
 
-void LocalExecutor::Execute(const std::string& task_id, const v1::TaskSpec& spec, TaskCallbacks cb) {
+void LocalExecutor::Execute(const std::string& task_id, const v1::TaskSpec& spec, TaskCallbacks cb,
+                            ExecuteContext /*ctx*/) {
     auto item = std::make_shared<Item>();
     item->task_id = task_id;
     item->spec = spec;
@@ -156,6 +159,22 @@ int LocalExecutor::CoresInUse() const {
     return cores_in_use_;
 }
 
+int LocalExecutor::TaskCount() const {
+    std::lock_guard lock(mu_);
+    return static_cast<int>(items_.size());
+}
+
+bool LocalExecutor::Has(const std::string& task_id) const {
+    std::lock_guard lock(mu_);
+    return items_.contains(task_id);
+}
+
+int LocalExecutor::CoresFor(const v1::TaskSpec& spec) const {
+    const int asked = spec.resources().cores();
+    if (cores_per_slot_ > 0) return asked > 0 ? std::min(asked, cores_per_slot_) : cores_per_slot_;
+    return std::min(std::max(asked, 1), core_capacity_);
+}
+
 void LocalExecutor::Worker(std::stop_token st) {
     for (;;) {
         std::shared_ptr<Item> item;
@@ -163,16 +182,14 @@ void LocalExecutor::Worker(std::stop_token st) {
             std::unique_lock lock(mu_);
             if (!cv_.wait(lock, st, [this] {
                     if (queue_.empty()) return false;
-                    int need = std::max(queue_.front()->spec.resources().cores(), 1);
-                    if (need > core_capacity_) need = core_capacity_;
-                    return cores_in_use_ + need <= core_capacity_;
+                    if (cores_per_slot_ > 0) return true;  // this worker is the free slot
+                    return cores_in_use_ + CoresFor(queue_.front()->spec) <= core_capacity_;
                 })) {
                 return;
             }
             item = queue_.front();
             queue_.pop_front();
-            int need = std::max(item->spec.resources().cores(), 1);
-            if (need > core_capacity_) need = core_capacity_;
+            const int need = CoresFor(item->spec);
             item->cores_held = need;
             cores_in_use_ += need;
             item->started = true;
@@ -259,7 +276,7 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
         rs.allow_network = spec.policy().allow_network();
         rs.sandbox_env = std::move(*prepared.value);
         rs.node_id = node_id_;
-        rs.cores = spec.resources().cores();
+        rs.cores = cores_per_slot_ > 0 ? item.cores_held : spec.resources().cores();
         if (spec.resources().mem_bytes() > 0) {
             rs.mem_bytes = static_cast<uint64_t>(spec.resources().mem_bytes());
         }
