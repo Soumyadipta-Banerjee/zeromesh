@@ -94,9 +94,15 @@ public:
     [[nodiscard]] std::optional<Peer> Get(const std::string& id) const;
 
     /**
-     * @brief Returns a snapshot of all active peers (excluding draining ones).
+     * @brief Peers eligible for new work (Active only). Draining nodes are omitted.
      */
     [[nodiscard]] std::vector<Peer> ListActive(std::chrono::milliseconds max_age = std::chrono::seconds(10)) const;
+
+    /**
+     * @brief Recently seen peers for UI / admission (Active and Draining).
+     * Draining means "won't take new offers", not "invisible on the LAN".
+     */
+    [[nodiscard]] std::vector<Peer> ListPresent(std::chrono::milliseconds max_age = std::chrono::seconds(10)) const;
 
     /**
      * @brief Removes peers whose last heartbeat exceeded the timeout window.

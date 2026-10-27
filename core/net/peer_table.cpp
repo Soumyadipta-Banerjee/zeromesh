@@ -108,6 +108,24 @@ std::vector<Peer> PeerTable::ListActive(std::chrono::milliseconds max_age) const
     return active;
 }
 
+std::vector<Peer> PeerTable::ListPresent(std::chrono::milliseconds max_age) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto cutoff = std::chrono::steady_clock::now() - max_age;
+
+    std::vector<Peer> present;
+    for (const auto& [_, peer] : peers_) {
+        if (peer.last_seen < cutoff) continue;
+        if (peer.state != PeerState::Active && peer.state != PeerState::Draining) continue;
+        present.push_back(peer);
+    }
+
+    std::sort(present.begin(), present.end(), [](const Peer& a, const Peer& b) {
+        return a.id < b.id;
+    });
+
+    return present;
+}
+
 size_t PeerTable::PruneStale(std::chrono::milliseconds max_age) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto cutoff = std::chrono::steady_clock::now() - max_age;

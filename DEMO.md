@@ -2,30 +2,27 @@
 
 ## On other machines (donors)
 
-One script — branch, Blender check, build, `zmd`, monitor:
-
 ```bash
-./scripts/setup_donor.sh
+bash ./scripts/setup_donor.sh
 # with team phrase from the requester:
-./scripts/setup_donor.sh --join 'ZM-XXXX-…-XXC'
+bash ./scripts/setup_donor.sh --join 'ZM-XXXX-…-XXC'
 ```
 
-Order inside the script:
-1. `git checkout demo/m5-all` + pull  
-2. Blender on PATH + `demo_env.sh`  
-3. Build `zm` / `zmd` if missing (`ninja -j2`)  
-4. Start `zmd`  
-5. `zm monitor` (leave running)
+Order: `demo/m5-all` → Blender/env → build → `zmd` → `zm monitor`.
+
+Use `bash` even if your shell is fish (`source scripts/demo_env.sh` is bash).
 
 ## On the requester laptop
 
 ```bash
+cd ~/Desktop/HackMna/zeromesh-demo   # this machine's demo worktree
 source scripts/demo_env.sh
-zmd &                        # or already running
-zm team create               # share the printed phrase with donors
+./build-verify/zmd &
+./build-verify/zm team create        # share the printed phrase
+./build-verify/zm status             # wait until donors show ADMITTED
 zm-render apps/zm-render/tests/data/spin_cube.blend \
-  --frames 1-48 --chunk 8 -o /tmp/renders --remote-only
-zm monitor
+  --frames 1-96 --chunk 8 -o /tmp/renders --remote-only
+./build-verify/zm monitor
 ```
 
-Needs: build once, `pip install -e ./sdk/python -e ./apps/zm-render`, Blender on donors.
+Needs: build once, `pip install -e ./sdk/python -e ./apps/zm-render`. Donors need `blender` on PATH.
