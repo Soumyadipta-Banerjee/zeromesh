@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "grpcio-tools>=1.85.0"]
+requires = ["setuptools>=61.0", "wheel", "grpcio-tools>=1.84.0,<1.85"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,14 +9,14 @@ description = "ZeroMesh Python SDK for zero-setup compute mesh"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    "grpcio>=1.85.0",
-    "protobuf>=7.35.1",
+    "grpcio>=1.84.0",
+    "protobuf>=4.21.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "grpcio-tools>=1.85.0",
+    "grpcio-tools>=1.84.0,<1.85",
 ]
 
 [tool.setuptools.packages.find]
