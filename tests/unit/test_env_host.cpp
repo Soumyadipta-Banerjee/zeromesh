@@ -60,6 +60,9 @@ TEST(EnvHostMirrorsUsrMerge) {
     ASSERT_TRUE(std::any_of(env.env.begin(), env.env.end(), [](const auto& kv) {
         return kv.first == "PATH" && kv.second == "/usr/local/bin:/usr/bin:/bin";
     }));
+    ASSERT_TRUE(std::any_of(env.symlinks.begin(), env.symlinks.end(), [](const auto& s) {
+        return s.link == "/etc/mtab" && s.target == "/proc/self/mounts";
+    }));
 }
 
 TEST(EnvHostLoadsAsPlugin) {
