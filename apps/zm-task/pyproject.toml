@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zm-task"
+version = "0.1.0"
+description = "Distribute arbitrary tasks (folder + run.sh) across a ZeroMesh team"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "zeromesh",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+zm-task = "zm_task.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zm_task*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
