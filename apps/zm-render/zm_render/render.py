@@ -310,6 +310,12 @@ def run_render(
             if err:
                 lines = [ln for ln in err.splitlines() if ln.strip()]
                 err = " | ".join(lines[-3:]) if lines else err
+            else:
+                # Blender reports load errors (e.g. .blend from a newer version) on stdout.
+                out = (res.stdout_head or b"").decode("utf-8", errors="replace")
+                lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+                errors = [ln for ln in lines if ln.startswith("Error")]
+                err = " | ".join((errors or lines)[-3:])
             detail = f"exit {res.exit_code}: {err}" if err else f"exit code {res.exit_code}"
             if res.error:
                 detail = f"{detail} ({res.error})"

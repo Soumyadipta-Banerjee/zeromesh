@@ -9,6 +9,7 @@
 #include <future>
 #include <optional>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -55,11 +56,14 @@ bool OfferRejectionRetryable(const std::string& reason) {
     return reason.find("in use") != std::string::npos || reason.find("draining") != std::string::npos;
 }
 
-// Capability miss on one donor — keep that node in `tried` and try the next peer.
+// Capability miss on one donor: try the next peer, and offer this one again after
+// kCapabilityRecheck (a donor may install the command while the job runs).
 bool OfferRejectionTryNextPeer(const std::string& reason) {
     return reason.find("not found on this node") != std::string::npos ||
            reason.find("no env provider") != std::string::npos;
 }
+
+constexpr std::chrono::seconds kCapabilityRecheck{15};
 
 } // namespace
 
@@ -353,6 +357,12 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     int attempt = 0;  // completed failed attempts that consumed a retry
     std::unordered_set<std::string> skip;   // nodes skipped after a retryable infra failure
     std::unordered_set<std::string> tried;  // nodes already offered this placement round
+    // Nodes that lacked the command, and when they may be offered again.
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> missing_until;
+    auto lacks_command = [&](const std::string& id) {
+        auto it = missing_until.find(id);
+        return it != missing_until.end() && std::chrono::steady_clock::now() < it->second;
+    };
     std::string last_reason = "no eligible nodes";
     std::optional<v1::TaskResult> last_attempt_result;  // last real run, if any
     std::optional<std::vector<v1::Digest>> needed;
@@ -368,7 +378,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         task->is_local = false;
     };
 
-    auto blocked = [&](const std::string& id) { return skip.contains(id) || tried.contains(id); };
+    auto blocked = [&](const std::string& id) {
+        return skip.contains(id) || tried.contains(id) || lacks_command(id);
+    };
 
     auto reserve_next = [&]() -> std::optional<Reservation> {
         std::lock_guard lock(shared_->mu);
@@ -440,7 +452,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     // True when some node could take this task if nothing were in flight (capacity wait vs hard miss).
     auto any_eligible = [&] {
         std::vector<Candidate> candidates;
-        if (local_ && !skip.contains(local_id_)) {
+        if (local_ && !skip.contains(local_id_) && !lacks_command(local_id_)) {
             candidates.push_back(Candidate{.node_id = local_id_,
                                            .is_local = true,
                                            .cores_total = self.cores_total,
@@ -453,7 +465,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                                            .in_flight = 0});
         }
         for (const auto& p : peers_->ListActive()) {
-            if (p.id == local_id_ || skip.contains(p.id)) continue;
+            if (p.id == local_id_ || skip.contains(p.id) || lacks_command(p.id)) continue;
             candidates.push_back(Candidate{.node_id = p.id,
                                            .is_local = false,
                                            .cores_total = p.cores,
@@ -572,8 +584,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                 tried.erase(reserved->node_id);
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             } else if (OfferRejectionTryNextPeer(why)) {
-                // e.g. blender missing on this donor only — skip it, try other peers.
-                skip.insert(reserved->node_id);
+                missing_until[reserved->node_id] = std::chrono::steady_clock::now() + kCapabilityRecheck;
                 last_reason = "node " + reserved->node_id + ": " + why;
             } else {
                 return task->Done(
