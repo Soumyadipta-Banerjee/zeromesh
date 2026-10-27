@@ -30,3 +30,28 @@ zm-render apps/zm-render/tests/data/spin_cube.blend \
 ```
 
 Needs: build once, `pip install -e ./sdk/python -e ./apps/zm-render`.
+
+## CFD case-sweep demo
+
+Install the SDK and CFD adapter on the requester:
+
+```bash
+pip install -e ./sdk/python -e ./apps/zm-cfd
+```
+
+Each donor needs the same OpenFOAM release installed. Run the bundled short
+two-case lid-driven-cavity sweep on peer nodes:
+
+```bash
+zm-cfd tests/data/cfd-cavity-sweep \
+  --solver bash \
+  --solver-arg=-lc \
+  --solver-arg='blockMesh && icoFoam' \
+  --bashrc /path/to/OpenFOAM/etc/bashrc \
+  --remote-only \
+  -o /tmp/zm-cfd-results
+```
+
+Replace `/path/to/OpenFOAM/etc/bashrc` with the installed OpenFOAM setup script.
+`zm-cfd` submits one task per independent case, and `zm monitor` shows their
+placement and completion while the results are collected under `/tmp/zm-cfd-results`.

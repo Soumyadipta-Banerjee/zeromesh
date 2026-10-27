@@ -299,3 +299,25 @@ test('app_zm_render', python3,
   is_parallel: false,
 )
 
+test('app_zm_cfd', python3,
+  args: [files('apps/zm-cfd/tests/test_cases.py')],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.project_source_root() / 'apps/zm-cfd' + ':' + meson.project_source_root() / 'sdk/python',
+  },
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 120,
+  is_parallel: false,
+)
+
+test('integration_cfd', python3,
+  args: [files('tests/integration/test_cfd.py')],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.project_source_root() / 'apps/zm-cfd' + ':' + meson.project_source_root() / 'sdk/python' + ':' + meson.project_source_root() / 'tests/integration' + ':' + meson.current_build_dir() / 'proto',
+  },
+  depends: [zmd_bin, zm_bin, env_host_module] + zm_proto_py,
+  timeout: 180,
+  is_parallel: false,
+)
+
