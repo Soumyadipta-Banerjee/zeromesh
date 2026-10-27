@@ -146,6 +146,11 @@ std::vector<LocalExecutor::ActiveItem> LocalExecutor::ListActive() const {
     return out;
 }
 
+void LocalExecutor::ClearFinished() {
+    std::lock_guard lock(mu_);
+    recent_.clear();
+}
+
 int LocalExecutor::CoresInUse() const {
     std::lock_guard lock(mu_);
     return cores_in_use_;
