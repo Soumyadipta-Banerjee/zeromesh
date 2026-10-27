@@ -353,7 +353,9 @@ int Daemon::Run() {
                 auto team_key = team->Get();
                 if (team_key) {
                     peers->PruneStale();
-                    for (const auto& p : peers->ListActive()) {
+                    // Admit anyone we can hear (including draining). Hiding drainers
+                    // from ListActive made typing peers invisible and never pinable.
+                    for (const auto& p : peers->ListPresent()) {
                         if (p.id == node_id) continue;
                         if (pins->FingerprintFor(p.id)) {
                             (void)client_factory(p);

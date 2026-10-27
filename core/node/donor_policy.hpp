@@ -24,7 +24,9 @@ struct DonorPolicy {
     int max_cores{-1};               // -1 = cores_total - 1
     bool allow_network{false};       // tasks may ask for network only if this is true
     int drain_below_battery{20};     // percent; on battery below this, refuse and drain
-    bool drain_on_user_activity{true};
+    // Off by default: keyboard IRQs made demo nodes announce "draining" and
+    // vanish from peer lists. Re-enable via ~/.config/zeromesh/donor.toml when wanted.
+    bool drain_on_user_activity{false};
     int drain_hold_s{300};           // seconds the drain condition must stay clear
 
     // Reads <config_dir>/donor.toml: `key = value` lines, '#' starts a comment. A missing

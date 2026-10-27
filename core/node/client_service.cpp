@@ -553,7 +553,9 @@ v1::PeerInfo ClientService::SelfInfo() {
 grpc::Status ClientService::ListPeers(grpc::ServerContext*, const v1::Empty*, v1::PeerList* reply) {
     *reply->add_peers() = SelfInfo();
     if (peers_) {
-        for (const auto& p : peers_->ListActive()) {
+        // Present = Active + Draining. Draining peers stay visible in status/monitor;
+        // placement still uses ListActive() so they do not take new work.
+        for (const auto& p : peers_->ListPresent()) {
             if (p.id == options_.node_id) continue;
             v1::PeerInfo info = FromPeer(p);
             if (team_ && team_->pins) {
