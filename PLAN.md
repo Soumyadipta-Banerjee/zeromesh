@@ -16,7 +16,7 @@ small core, with features attached through narrow plugin interfaces.
 
 ```
    ┌──────────────────────── apps (out-of-process, any language) ────────────────────────┐
-   │  zm CLI (run, run --each, status, monitor)   zm-render   (future: zm-sweep, zm-sim)  │
+   │  zm CLI · zm-render · zm-cmake/zm-make   (future: zm-sweep, zm-sim)                  │
    └───────────────────────────────┬──────────────────────────────────────────────────────┘
                                    │ zeromesh.v1.ClientApi  (gRPC over a unix socket, owner-only)
    ┌───────────────────────────────▼─────────── zmd (daemon) ────────────────────────────┐

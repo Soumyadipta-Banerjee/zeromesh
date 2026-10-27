@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zm-build"
+version = "0.1.0"
+description = "Thin CMake/Make UX that offloads compiles through ZeroMesh REAPI (recc)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "zeromesh",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+zm-build = "zm_build.cli:main_build"
+zm-cmake = "zm_build.cli:main_cmake"
+zm-make = "zm_build.cli:main_make"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zm_build*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -125,7 +125,11 @@ size_t Registry::LoadSearchPath() {
         for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
             if (e.path().extension() != ".so") continue;
             std::string err;
-            if (LoadFile(e.path(), &err)) ++loaded;
+            if (LoadFile(e.path(), &err)) {
+                ++loaded;
+            } else if (!err.empty()) {
+                std::cerr << "zeromesh: plugin load failed: " << err << "\n";
+            }
         }
     }
     return loaded;

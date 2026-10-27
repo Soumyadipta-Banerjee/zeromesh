@@ -104,6 +104,8 @@ zmd_bin = executable('zmd', 'zmd/main.cpp',
   include_directories: inc,
   link_with: zm_core,
   dependencies: common_deps,
+  # Export daemon symbols so frontend plugins (REAPI) can resolve ClientApi protos.
+  link_args: ['-rdynamic'],
   install: true,
 )
 
@@ -299,5 +301,15 @@ test('app_zm_render', python3,
   depends: [zmd_bin, zm_bin] + zm_proto_py,
   timeout: 180,
   is_parallel: false,
+)
+
+test('app_zm_build', python3,
+  args: ['-m', 'pytest', '-v', meson.project_source_root() / 'apps/zm-build/tests'],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.project_source_root() / 'apps/zm-build' + ':' + meson.project_source_root() / 'sdk/python',
+  },
+  timeout: 60,
+  is_parallel: true,
 )
 
