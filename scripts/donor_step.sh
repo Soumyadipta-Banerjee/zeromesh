@@ -103,8 +103,8 @@ fi
 "$ZM" status || true
 
 echo
-echo "requester tip:  zm-render … --remote-only --blender $BLENDER_BIN"
-echo "               (or --blender /usr/local/bin/blender after the link above)"
+echo "requester tip:  zm-render … --remote-only --blender blender"
+echo "               (donors need blender on /usr/local/bin|/usr/bin — linked above)"
 
 step "5/5 zm monitor (q / Ctrl-C) — leave this up"
 exec "$ZM" monitor

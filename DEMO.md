@@ -21,10 +21,10 @@ source scripts/demo_env.sh
 ./build-verify/zm team create        # share the printed phrase
 ./build-verify/zm status             # wait until donors show ADMITTED
 
-# same blender path donors print (from command -v / realpath), or /usr/local/bin/blender
-BLENDER="$(command -v blender)"; BLENDER="$(realpath "$BLENDER")"
+# Use a path that exists on donors (env-host PATH). Do NOT realpath to /opt/...
+# unless every donor has the same install layout.
 zm-render apps/zm-render/tests/data/spin_cube.blend \
-  --frames 1-500 --chunk 16 -o /tmp/renders --remote-only --blender "$BLENDER"
+  --frames 1-500 --chunk 16 -o /tmp/renders --remote-only --blender blender
 
 ./build-verify/zm monitor
 ```
