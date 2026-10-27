@@ -2,27 +2,31 @@
 
 ## On other machines (donors)
 
+One script — Blender through `zm monitor`:
+
 ```bash
-bash ./scripts/setup_donor.sh
+bash ./scripts/donor_step.sh
 # with team phrase from the requester:
-bash ./scripts/setup_donor.sh --join 'ZM-XXXX-…-XXC'
+bash ./scripts/donor_step.sh --join 'ZM-XXXX-…-XXC'
 ```
 
-Order: `demo/m5-all` → Blender/env → build → `zmd` → `zm monitor`.
-
-Use `bash` even if your shell is fish (`source scripts/demo_env.sh` is bash).
+Use `bash` even if your shell is fish.
 
 ## On the requester laptop
 
 ```bash
-cd ~/Desktop/HackMna/zeromesh-demo   # this machine's demo worktree
+cd ~/Desktop/HackMna/zeromesh-demo
 source scripts/demo_env.sh
 ./build-verify/zmd &
 ./build-verify/zm team create        # share the printed phrase
 ./build-verify/zm status             # wait until donors show ADMITTED
+
+# same blender path donors print (from command -v / realpath), or /usr/local/bin/blender
+BLENDER="$(command -v blender)"; BLENDER="$(realpath "$BLENDER")"
 zm-render apps/zm-render/tests/data/spin_cube.blend \
-  --frames 1-96 --chunk 8 -o /tmp/renders --remote-only
+  --frames 1-500 --chunk 16 -o /tmp/renders --remote-only --blender "$BLENDER"
+
 ./build-verify/zm monitor
 ```
 
-Needs: build once, `pip install -e ./sdk/python -e ./apps/zm-render`. Donors need `blender` on PATH.
+Needs: build once, `pip install -e ./sdk/python -e ./apps/zm-render`.
