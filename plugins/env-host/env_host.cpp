@@ -76,7 +76,11 @@ public:
                 env.binds.push_back({p, p, true});
             }
         }
-        for (const char* p : {"/etc/alternatives", "/etc/ld.so.cache", "/etc/ssl"}) {
+        // Host /etc/mtab is usually a symlink to ../proc/self/mounts — recreate that
+        // inside the sandbox (bwrap already mounts --proc) instead of binding the host link.
+        env.symlinks.push_back({"/proc/self/mounts", "/etc/mtab"});
+        for (const char* p : {"/etc/alternatives", "/etc/ld.so.cache", "/etc/ssl", "/etc/passwd",
+                              "/etc/group", "/etc/nsswitch.conf", "/etc/resolv.conf"}) {
             if (fs::exists(p, ec)) env.binds.push_back({p, p, true});
         }
         env.env.emplace_back("PATH", std::string(SandboxPathEnv()));

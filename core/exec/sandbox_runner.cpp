@@ -399,15 +399,21 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
 
     BwrapBuilder b;
     b.SetBinary(bwrap_path_).ShareNetwork(spec.allow_network).AddDev("/dev").AddProc("/proc");
-    for (const auto& s : spec.sandbox_env.symlinks) b.AddSymlink(s.target, s.link);
+    // Binds before symlinks so parents exist (/usr before /bin→usr/bin, /etc binds before /etc/mtab).
     for (const auto& m : spec.sandbox_env.binds) {
         if (m.read_only) b.AddReadOnlyBind(m.host, m.sandbox);
         else b.AddReadWriteBind(m.host, m.sandbox);
     }
+    for (const auto& s : spec.sandbox_env.symlinks) b.AddSymlink(s.target, s.link);
     b.AddTmpfs("/tmp").AddReadWriteBind(work.string(), "/work");
+    // GLib/Wayland require XDG_RUNTIME_DIR mode 0700. Plain /tmp is not valid, and
+    // older Blender (e.g. Debian) aborts headless with only a mount-list warning first.
+    b.AddPerms(0700).AddDir("/tmp/xdg-runtime");
     b.AddEnv("HOME", "/tmp").AddEnv("ZM_NODE_ID", spec.node_id);
     for (const auto& [k, v] : spec.sandbox_env.env) b.AddEnv(k, v);
     for (const auto& [k, v] : spec.env) b.AddEnv(k, v);
+    // Force a valid runtime dir last so task env cannot point at /tmp (mode ≠ 0700).
+    b.AddEnv("XDG_RUNTIME_DIR", "/tmp/xdg-runtime");
     b.SetWorkingDirectory((fs::path("/work") / spec.working_dir).lexically_normal().string());
     auto args = b.Build(spec.argv);
 

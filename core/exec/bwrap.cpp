@@ -1,5 +1,7 @@
 #include "exec/bwrap.hpp"
 
+#include <cstdio>
+
 namespace zeromesh::exec {
 
 BwrapBuilder& BwrapBuilder::SetBinary(std::string path) { binary_ = std::move(path); return *this; }
@@ -22,6 +24,22 @@ BwrapBuilder& BwrapBuilder::AddSymlink(const std::string& target, const std::str
 
 BwrapBuilder& BwrapBuilder::AddTmpfs(const std::string& sandbox) {
     mounts_.push_back({"--tmpfs", sandbox});
+    return *this;
+}
+
+BwrapBuilder& BwrapBuilder::AddPerms(unsigned mode) {
+    pending_perms_ = mode;
+    return *this;
+}
+
+BwrapBuilder& BwrapBuilder::AddDir(const std::string& sandbox) {
+    if (pending_perms_) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%o", *pending_perms_);
+        mounts_.push_back({"--perms", buf});
+        pending_perms_.reset();
+    }
+    mounts_.push_back({"--dir", sandbox});
     return *this;
 }
 

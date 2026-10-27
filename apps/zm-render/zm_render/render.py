@@ -95,11 +95,12 @@ def blender_argv(
 
 
 # Sandbox has no PipeWire/Pulse; force null audio backends.
+# XDG_RUNTIME_DIR must be mode 0700 (sandbox creates /tmp/xdg-runtime) — not /tmp.
 _BLENDER_ENV = {
     "ALSOFT_DRIVERS": "null",
     "SDL_AUDIODRIVER": "dummy",
-    "PIPEWIRE_RUNTIME_DIR": "/tmp",
-    "XDG_RUNTIME_DIR": "/tmp",
+    "PIPEWIRE_RUNTIME_DIR": "/tmp/xdg-runtime",
+    "XDG_RUNTIME_DIR": "/tmp/xdg-runtime",
 }
 
 
@@ -305,7 +306,13 @@ def run_render(
             continue
         if res.exit_code != 0:
             err = (res.stderr_head or b"").decode("utf-8", errors="replace").strip()
-            detail = err or res.error or f"exit code {res.exit_code}"
+            # Prefer last lines — Blender often prints a harmless mount warning first.
+            if err:
+                lines = [ln for ln in err.splitlines() if ln.strip()]
+                err = " | ".join(lines[-3:]) if lines else err
+            detail = f"exit {res.exit_code}: {err}" if err else f"exit code {res.exit_code}"
+            if res.error:
+                detail = f"{detail} ({res.error})"
             chunk_failures.append(ChunkTaskFailure(ch, detail))
             continue
         if res.error:
