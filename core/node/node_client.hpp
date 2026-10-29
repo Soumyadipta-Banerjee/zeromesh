@@ -1,0 +1,138 @@
+#pragma once
+
+// NodeApi client, one per peer (spec §6.1, §9). Admit() runs the admission
+// handshake over a channel that accepts whichever server certificate it sees
+// first (and only that one for the rest of the handshake), then pins the peer.
+// Every other call goes through a channel whose TLS verifier accepts only the
+// fingerprint pinned for the peer's node id, with transport keepalive (pings every
+// 5 s, dead after 10 s without an answer). Unary RPCs have a 10 s deadline; blob
+// transfers get 10 s plus 1 s per MiB (120 s base when size is unknown); Run has no deadline and relies on keepalive.
+// Thread-safe: one client may serve many concurrent calls.
+
+#include "net/identity.hpp"
+#include "net/pin_store.hpp"
+#include "net/team.hpp"
+#include "store/store.hpp"
+
+#include "zeromesh/v1/node.grpc.pb.h"
+
+#include <grpcpp/channel.h>
+#include <grpcpp/server_builder.h>
+
+#include <chrono>
+#include <cstddef>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
+
+namespace zeromesh::node {
+
+inline constexpr std::chrono::seconds kNodeRpcTimeout{10};
+// OfferBatch carries every input-tree digest; large trees need a bigger gRPC frame than the default 4 MiB.
+inline constexpr int kNodeApiMaxMessageSize = 64 * 1024 * 1024;
+
+inline void ApplyNodeApiMessageLimits(grpc::ServerBuilder& builder) {
+    builder.SetMaxReceiveMessageSize(kNodeApiMaxMessageSize);
+    builder.SetMaxSendMessageSize(kNodeApiMaxMessageSize);
+}
+
+// Serialized size of an Offer RPC (for placer-side limits before calling the peer).
+[[nodiscard]] size_t EncodedOfferByteSize(const std::string& batch_id, const v1::BatchSpec& spec,
+                                          const std::vector<v1::Digest>& needed);
+
+class NodeClient {
+public:
+    // `address` is "ip:port". `expected_node_id`, when set, is the peer's node id as
+    // learned from discovery: admission fails if the server claims another id, and
+    // calls can use an existing pin without admitting first.
+    NodeClient(std::string address, net::Identity self, std::shared_ptr<net::PinStore> pins,
+               std::optional<std::string> expected_node_id = std::nullopt);
+
+    // Runs admission with `key`. On success both sides have pinned each other.
+    bool Admit(const net::TeamKey& key, std::string* error = nullptr);
+
+    std::optional<v1::PeerInfo> Ping(std::string* error = nullptr);
+
+    // Round-trip time of a Ping RPC (wall clock), or nullopt on failure.
+    std::optional<std::chrono::milliseconds> PingRtt(std::string* error = nullptr);
+
+    // Offers a batch; `needed` lists every blob it reads (the input tree's blobs).
+    // With cached_input, needed must be empty and the donor must acknowledge a leased tree;
+    // a missing tree requires an immediate full offer. Do not use it for checkpoints.
+    // nullopt (with *error) when the call itself failed.
+    std::optional<v1::OfferReply> Offer(const std::string& batch_id, const v1::BatchSpec& spec,
+                                        const std::vector<v1::Digest>& needed, std::string* error = nullptr,
+                                        bool cached_input = false);
+
+    // Uploads `digests` from `cas` to the peer, which verifies every object. When `bytes_sent`
+    // is given, the payload bytes written to the wire are added to it, even on failure.
+    bool Push(const store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error = nullptr,
+              uint64_t* bytes_sent = nullptr);
+
+    // Downloads `digests` into `cas` (payload bytes received are added to `bytes_received`).
+    // Every object is verified against its digest before it
+    // is stored, and the peer may send only what was asked for.
+    bool Pull(store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error = nullptr,
+              uint64_t* bytes_received = nullptr);
+
+    // Asks the peer to fetch `digests` from the team peer `source_node_id` rather than from us.
+    // `*fetched` (when given) lists the digests the peer now holds, even when the call as a
+    // whole failed. False with *error when the peer could not fetch everything (or does not
+    // know the RPC); the caller then pushes whatever is not in `*fetched` itself.
+    bool SeedBlobs(const std::string& source_node_id, const std::vector<v1::Digest>& digests,
+                   std::vector<v1::Digest>* fetched, std::string* error = nullptr);
+
+    // Runs a batch the peer accepted, calling on_event for every event before the final one, and
+    // blocks until that final event, which it returns. nullopt (with *error) when the stream broke
+    // first, e.g. the peer vanished (keepalive timeout) or refused the run. After Cancel(batch_id)
+    // it returns a cancelled outcome even if the peer could not be told.
+    std::optional<v1::BatchFinished> Run(const std::string& batch_id,
+                                         const std::function<void(const v1::BatchEvent&)>& on_event,
+                                         std::string* error = nullptr);
+
+    // Cancels the batch on the peer (CancelBatch); if the peer cannot be reached, aborts the local
+    // Run stream instead. A no-op for a batch with no Run in progress.
+    void Cancel(const std::string& batch_id);
+
+    // Team-wide item cache.
+    std::optional<v1::CacheLookupReply> LookupCache(const v1::CacheLookup& req, std::chrono::milliseconds timeout,
+                                                    std::string* error = nullptr);
+    bool ForgetCache(const v1::CacheForget& req, std::string* error = nullptr);
+
+    // Tells the peer this node is draining.
+    // With a `code` and ttl_ms > 0 the notice is freeze-first: the donor holds the peer's tasks
+    // frozen for up to ttl_ms instead of killing them, and the receiver should wait, not cancel.
+    bool Drain(const std::string& reason, std::string* error = nullptr,
+               v1::DepartureReason code = v1::DEPARTURE_UNSPECIFIED, uint32_t ttl_ms = 0, uint32_t grace_ms = 0);
+
+    const std::string& address() const { return address_; }
+    // The peer's node id once known (expected, or learned by Admit).
+    std::optional<std::string> peer_node_id() const;
+
+private:
+    // A stub on the pinned channel, or nullptr (with *error set) if the peer's node
+    // id is unknown or has no pin.
+    std::shared_ptr<v1::NodeApi::Stub> PinnedStub(std::string* error);
+    static void SetDeadline(grpc::ClientContext& ctx);
+
+    const std::string address_;
+    const net::Identity self_;
+    const std::shared_ptr<net::PinStore> pins_;
+
+    mutable std::mutex mu_;
+    std::optional<std::string> peer_node_id_;
+    std::shared_ptr<v1::NodeApi::Stub> pinned_stub_;
+    std::map<std::string, grpc::ClientContext*> runs_; // batch id -> its active Run call
+    std::set<std::string> cancelled_;                  // batches Cancel()ed during their Run
+};
+
+// Pulls whatever of `blobs`, and of the trees `trees` with everything under them, `cas` lacks.
+bool PullTrees(NodeClient& client, store::CasStore& cas, std::vector<v1::Digest> blobs, std::vector<v1::Digest> trees,
+               std::string* error = nullptr, uint64_t* bytes_received = nullptr);
+
+} // namespace zeromesh::node
