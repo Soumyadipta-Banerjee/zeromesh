@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace zeromesh::net {
@@ -16,6 +17,15 @@ enum class PeerState {
     Draining, // Node actively preempting due to low battery, thermal throttle, or user activity
     Offline
 };
+
+/**
+ * @brief Membership changes of a peer, for departure statistics (sched::HazardModel).
+ *  - Joined:  the peer appeared, or came back Active after a drain.
+ *  - Left:    an Active peer vanished without warning (removed or pruned): a departure.
+ *  - Drained: the peer announced a drain, or the table was cleared because we left the team.
+ *             Not a failure of the peer, so it ends the session as censored.
+ */
+enum class PresenceEvent { Joined, Left, Drained };
 
 /**
  * @brief Represents an active ZeroMesh peer discovered on the local network.
@@ -51,6 +61,7 @@ struct Peer {
 class PeerTable {
 public:
     using PreemptCallback = std::function<void(const std::string& node_id, const std::string& reason)>;
+    using PresenceCallback = std::function<void(const std::string& node_id, PresenceEvent event)>;
 
     PeerTable() = default;
     ~PeerTable() = default;
@@ -78,6 +89,12 @@ public:
      * @brief Registers a preemption listener to re-queue tasks immediately when a donor drains.
      */
     void RegisterPreemptCallback(PreemptCallback cb);
+
+    /**
+     * @brief Registers a listener for join / leave / drain events. Callbacks run on the
+     * calling thread after the table lock is released.
+     */
+    void RegisterPresenceCallback(PresenceCallback cb);
 
     /**
      * @brief Removes a peer by its unique node identifier.
@@ -119,6 +136,10 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, Peer> peers_;
     std::vector<PreemptCallback> preempt_callbacks_;
+    std::vector<PresenceCallback> presence_callbacks_;
+
+    using PresenceBatch = std::vector<std::pair<std::string, PresenceEvent>>;
+    void NotifyPresence(const PresenceBatch& events, const std::vector<PresenceCallback>& callbacks) const;
 };
 
 } // namespace zeromesh::net

@@ -21,6 +21,7 @@
 #include "node/state.hpp"
 #include "plugin/client_api_handle.hpp"
 #include "plugin/loader.hpp"
+#include "sched/hazard.hpp"
 #include "sched/placer.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
@@ -207,6 +208,8 @@ int Daemon::Run() {
     std::unique_ptr<ClientService> client_service;
     std::unique_ptr<NodeService> node_service;
     std::shared_ptr<net::PeerTable> peers;
+    std::shared_ptr<sched::HazardModel> hazard;      // departures of the peers we place work on
+    std::shared_ptr<sched::HazardModel> self_hazard; // this node's own restarts, reported to requesters
     std::shared_ptr<store::CasStore> cas;
     std::shared_ptr<ActionCache> cache;
     std::shared_ptr<net::Discovery> discovery;
@@ -256,6 +259,10 @@ int Daemon::Run() {
         registry->LoadSearchPath();
         cache = std::make_shared<ActionCache>(cas);
         peers = std::make_shared<net::PeerTable>();
+        hazard = std::make_shared<sched::HazardModel>(config_.state_dir / "hazard.log");
+        sched::ObservePeers(*peers, hazard);
+        self_hazard = std::make_shared<sched::HazardModel>(config_.state_dir / "hazard-self.log");
+        self_hazard->NoteJoin(node_id); // a session still open from a crashed run is closed as a departure here
 
         team = std::make_shared<TeamState>();
         team->state_dir = config_.state_dir;
@@ -304,6 +311,7 @@ int Daemon::Run() {
 
         placer =
             std::make_shared<sched::Placer>(local_executor, peers, client_factory, cas, merkle, node_id, telemetry_fn);
+        placer->SetHazardModel(hazard);
         jobs = std::make_shared<JobManager>(cas, merkle, cache, placer);
 
         ClientServiceOptions opts;
@@ -327,8 +335,13 @@ int Daemon::Run() {
             policy, peers);
         node_service->SetComfortLevelProvider([g = comfort.get()] { return g->level(); });
         node_service->SetPeerClientFactory(client_for_node); // lets this donor seed from peers
-        // max_copies from donor.toml; hedging stays off until a hazard model sets `survival`.
-        placer->SetHedging(sched::Placer::HedgeConfig::FromPolicy(policy));
+        // max_copies from donor.toml; the hazard model supplies each donor's survival odds.
+        auto hedge_cfg = sched::Placer::HedgeConfig::FromPolicy(policy);
+        hedge_cfg.survival = sched::MakeSurvivalFn(hazard);
+        placer->SetHedging(std::move(hedge_cfg));
+        node_service->SetHazardProvider([m = self_hazard, id = node_id] {
+            return m->Observations(id) > 0 ? m->HazardPerHour(id) : -1.0; // -1: no record yet
+        });
         comfort->Start();
 
         grpc::ServerBuilder client_builder;
@@ -364,6 +377,7 @@ int Daemon::Run() {
 
         admit_thread = std::thread([&]() {
             while (!admit_stop.load()) {
+                self_hazard->NoteAlive(node_id); // dates a later crash; logged at most once a minute
                 auto team_key = team->Get();
                 if (team_key) {
                     peers->PruneStale();
@@ -539,6 +553,7 @@ int Daemon::Run() {
     if (admit_thread.joinable()) admit_thread.join();
     if (drain_thread.joinable()) drain_thread.join();
     if (gc_thread.joinable()) gc_thread.join();
+    if (self_hazard) self_hazard->NoteDrain(node_id); // clean stop: censored, not a failure
     if (discovery) {
         discovery->BroadcastNodeDraining("shutting down");
         discovery->Stop();
