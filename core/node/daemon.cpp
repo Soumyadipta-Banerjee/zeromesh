@@ -398,7 +398,7 @@ int Daemon::Run() {
         node_service->SetPeerClientFactory(client_for_node); // lets this donor seed from peers
         // max_copies from donor.toml; the hazard model supplies each donor's survival odds.
         auto hedge_cfg = sched::Placer::HedgeConfig::FromPolicy(policy);
-        hedge_cfg.survival = sched::MakeSurvivalFn(hazard);
+        hedge_cfg.survival = sched::HazardModel::MakeSurvivalFn(hazard);
         placer->SetHedging(std::move(hedge_cfg));
         node_service->SetHazardProvider([m = self_hazard, id = node_id] {
             return m->Observations(id) > 0 ? m->HazardPerHour(id) : -1.0; // -1: no record yet
