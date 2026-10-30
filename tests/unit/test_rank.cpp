@@ -240,3 +240,57 @@ TEST(RankNearlyEqualLiveputFallsBackToMissingBytes) {
     Candidate cold = WithLife(Node("cold", 500), 151.0);
     ASSERT_EQ(Ids(Rank(spec, {cold, warm})), (std::vector<std::string>{"warm", "cold"}));
 }
+
+TEST(RankMissingInputOutweighsExtraSlots) {
+    zeromesh::v1::TaskSpec spec;
+    // Five more slots do not make up for 5 GB that must cross a 10 MB/s link before a 60 s task starts.
+    Candidate cold = Node("cold", 5'000'000'000LL);
+    cold.cores_total = 12;
+    Candidate warm = Node("warm", 0);
+    warm.cores_total = 7;
+    ASSERT_EQ(Ids(Rank(spec, {cold, warm}, 0, 60.0)), (std::vector<std::string>{"warm", "cold"}));
+    // The same transfer is nothing against a task that runs for hours, so the slots decide.
+    ASSERT_EQ(Ids(Rank(spec, {cold, warm}, 0, 100'000.0)), (std::vector<std::string>{"cold", "warm"}));
+}
+
+TEST(RankUsesMeasuredBandwidthForTransferCost) {
+    zeromesh::v1::TaskSpec spec;
+    Candidate slow = Node("slow", 200'000'000);
+    slow.cores_total = 8;
+    slow.bandwidth_bytes_per_s = 1'000'000.0; // 200 s
+    Candidate fast = Node("fast", 200'000'000);
+    fast.cores_total = 6;
+    fast.bandwidth_bytes_per_s = 100'000'000.0; // 2 s
+    ASSERT_EQ(Ids(Rank(spec, {slow, fast}, 0, 60.0)), (std::vector<std::string>{"fast", "slow"}));
+}
+
+TEST(RankDonatedCoreLimitCapsSlots) {
+    zeromesh::v1::TaskSpec spec;
+    spec.mutable_resources()->set_cores(4);
+    Candidate c = Node("donor", 0);
+    c.cores_total = 16;
+    c.core_limit = 2; // the donor's policy donates 2 cores: not even one 4-core task fits
+    ASSERT_TRUE(Rank(spec, {c}).empty());
+    c.core_limit = 8; // two 4-core tasks
+    c.in_flight = 1;
+    ASSERT_EQ(Ids(Rank(spec, {c})), (std::vector<std::string>{"donor"}));
+    c.in_flight = 2;
+    ASSERT_TRUE(Rank(spec, {c}).empty());
+    c.core_limit = -1; // unknown: the machine size applies (16/4 = 4 slots)
+    ASSERT_EQ(Ids(Rank(spec, {c})), (std::vector<std::string>{"donor"}));
+}
+
+TEST(RankHoldsCommittedMemoryAgainstTheDonorTotal) {
+    zeromesh::v1::TaskSpec spec;
+    spec.mutable_resources()->set_mem_bytes(4ll << 30);
+    Candidate c = Node("donor", 0);
+    c.cores_total = 16;
+    c.mem_total = 16ull << 30;
+    c.mem_available = 16ull << 30; // tasks placed earlier have not touched their memory yet
+    c.mem_committed = 12ll << 30;
+    ASSERT_EQ(Ids(Rank(spec, {c})), (std::vector<std::string>{"donor"})); // exactly 4 GB left
+    c.mem_committed = 13ll << 30;
+    ASSERT_TRUE(Rank(spec, {c}).empty());
+    c.mem_total = 0; // total unknown: the commitment cannot be judged and is ignored
+    ASSERT_EQ(Ids(Rank(spec, {c})), (std::vector<std::string>{"donor"}));
+}

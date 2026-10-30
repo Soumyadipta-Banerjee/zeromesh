@@ -71,7 +71,7 @@ zmd/        the daemon executable
 cli/        the zm command-line client
 proto/      zeromesh.v1 gRPC contracts
 sdk/        Python SDK (sdk/python)
-apps/       zm-render, zm-cfd
+apps/       zm-render, zm-cfd, zm-cc
 packaging/  Debian and Arch packaging, systemd unit
 scripts/    install helpers, demo scripts, baselines/ (rootless HTCondor for the v2 comparison)
 tests/      unit, integration and acceptance tests

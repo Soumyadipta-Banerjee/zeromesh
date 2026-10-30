@@ -25,13 +25,17 @@ _sym_db = _symbol_database.Default()
 from zeromesh.v1 import common_pb2 as zeromesh_dot_v1_dot_common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16zeromesh/v1/node.proto\x12\x0bzeromesh.v1\x1a\x18zeromesh/v1/common.proto\",\n\nAdmitHello\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05nonce\x18\x02 \x01(\x0c\"=\n\x0e\x41\x64mitChallenge\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05nonce\x18\x02 \x01(\x0c\x12\x0b\n\x03mac\x18\x03 \x01(\x0c\"\x19\n\nAdmitProof\x12\x0b\n\x03mac\x18\x01 \x01(\x0c\"b\n\x05Offer\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12#\n\x04spec\x18\x02 \x01(\x0b\x32\x15.zeromesh.v1.TaskSpec\x12#\n\x06needed\x18\x03 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"T\n\nOfferReply\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12$\n\x07missing\x18\x03 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"\x1d\n\nRunRequest\x12\x0f\n\x07task_id\x18\x01 \x01(\t\"\x1a\n\x07TaskRef\x12\x0f\n\x07task_id\x18\x01 \x01(\t\".\n\x0b\x44rainNotice\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t2\x8e\x04\n\x07NodeApi\x12=\n\x05\x41\x64mit\x12\x17.zeromesh.v1.AdmitHello\x1a\x1b.zeromesh.v1.AdmitChallenge\x12;\n\x0c\x41\x64mitConfirm\x12\x17.zeromesh.v1.AdmitProof\x1a\x12.zeromesh.v1.Empty\x12\x31\n\x04Ping\x12\x12.zeromesh.v1.Empty\x1a\x15.zeromesh.v1.PeerInfo\x12\x38\n\tOfferTask\x12\x12.zeromesh.v1.Offer\x1a\x17.zeromesh.v1.OfferReply\x12\x35\n\tPushBlobs\x12\x12.zeromesh.v1.Chunk\x1a\x12.zeromesh.v1.Empty(\x01\x12\x37\n\tPullBlobs\x12\x14.zeromesh.v1.Digests\x1a\x12.zeromesh.v1.Chunk0\x01\x12;\n\x07RunTask\x12\x17.zeromesh.v1.RunRequest\x1a\x15.zeromesh.v1.JobEvent0\x01\x12\x36\n\nCancelTask\x12\x14.zeromesh.v1.TaskRef\x1a\x12.zeromesh.v1.Empty\x12\x35\n\x05\x44rain\x12\x18.zeromesh.v1.DrainNotice\x1a\x12.zeromesh.v1.Emptyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16zeromesh/v1/node.proto\x12\x0bzeromesh.v1\x1a\x18zeromesh/v1/common.proto\",\n\nAdmitHello\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05nonce\x18\x02 \x01(\x0c\"=\n\x0e\x41\x64mitChallenge\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05nonce\x18\x02 \x01(\x0c\x12\x0b\n\x03mac\x18\x03 \x01(\x0c\"\x19\n\nAdmitProof\x12\x0b\n\x03mac\x18\x01 \x01(\x0c\"b\n\x05Offer\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12#\n\x04spec\x18\x02 \x01(\x0b\x32\x15.zeromesh.v1.TaskSpec\x12#\n\x06needed\x18\x03 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"\x8b\x02\n\nOfferReply\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12$\n\x07missing\x18\x03 \x03(\x0b\x32\x13.zeromesh.v1.Digest\x12\x15\n\rcomfort_level\x18\x04 \x01(\r\x12\x1c\n\x0fhazard_per_hour\x18\x05 \x01(\x01H\x00\x88\x01\x01\x12,\n\x0breject_kind\x18\x06 \x01(\x0e\x32\x17.zeromesh.v1.RejectKind\x12\x16\n\x0eretry_after_ms\x18\x07 \x01(\r\x12\x17\n\ncore_limit\x18\x08 \x01(\rH\x01\x88\x01\x01\x42\x12\n\x10_hazard_per_hourB\r\n\x0b_core_limit\"H\n\x0bSeedRequest\x12\x13\n\x0bsource_hint\x18\x01 \x01(\t\x12$\n\x07\x64igests\x18\x02 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"@\n\tSeedReply\x12$\n\x07\x66\x65tched\x18\x01 \x03(\x0b\x32\x13.zeromesh.v1.Digest\x12\r\n\x05\x65rror\x18\x02 \x01(\t\"1\n\nRunRequest\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12\x12\n\nprofile_id\x18\x02 \x01(\t\"\x1a\n\x07TaskRef\x12\x0f\n\x07task_id\x18\x01 \x01(\t\"|\n\x0b\x44rainNotice\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12*\n\x04\x63ode\x18\x03 \x01(\x0e\x32\x1c.zeromesh.v1.DepartureReason\x12\x0e\n\x06ttl_ms\x18\x04 \x01(\r\x12\x10\n\x08grace_ms\x18\x05 \x01(\r*b\n\nRejectKind\x12\x16\n\x12REJECT_UNSPECIFIED\x10\x00\x12\x13\n\x0fREJECT_DRAINING\x10\x01\x12\x0f\n\x0bREJECT_BUSY\x10\x02\x12\x16\n\x12REJECT_UNSUPPORTED\x10\x03*\x98\x01\n\x0f\x44\x65partureReason\x12\x19\n\x15\x44\x45PARTURE_UNSPECIFIED\x10\x00\x12\x14\n\x10\x44\x45PARTURE_UNPLUG\x10\x01\x12\x15\n\x11\x44\x45PARTURE_BATTERY\x10\x02\x12\x11\n\rDEPARTURE_LID\x10\x03\x12\x13\n\x0f\x44\x45PARTURE_OWNER\x10\x04\x12\x15\n\x11\x44\x45PARTURE_SUSPEND\x10\x05\x32\xcd\x04\n\x07NodeApi\x12=\n\x05\x41\x64mit\x12\x17.zeromesh.v1.AdmitHello\x1a\x1b.zeromesh.v1.AdmitChallenge\x12;\n\x0c\x41\x64mitConfirm\x12\x17.zeromesh.v1.AdmitProof\x1a\x12.zeromesh.v1.Empty\x12\x31\n\x04Ping\x12\x12.zeromesh.v1.Empty\x1a\x15.zeromesh.v1.PeerInfo\x12\x38\n\tOfferTask\x12\x12.zeromesh.v1.Offer\x1a\x17.zeromesh.v1.OfferReply\x12\x35\n\tPushBlobs\x12\x12.zeromesh.v1.Chunk\x1a\x12.zeromesh.v1.Empty(\x01\x12\x37\n\tPullBlobs\x12\x14.zeromesh.v1.Digests\x1a\x12.zeromesh.v1.Chunk0\x01\x12=\n\tSeedBlobs\x12\x18.zeromesh.v1.SeedRequest\x1a\x16.zeromesh.v1.SeedReply\x12;\n\x07RunTask\x12\x17.zeromesh.v1.RunRequest\x1a\x15.zeromesh.v1.JobEvent0\x01\x12\x36\n\nCancelTask\x12\x14.zeromesh.v1.TaskRef\x1a\x12.zeromesh.v1.Empty\x12\x35\n\x05\x44rain\x12\x18.zeromesh.v1.DrainNotice\x1a\x12.zeromesh.v1.Emptyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'zeromesh.v1.node_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
+  _globals['_REJECTKIND']._serialized_start=916
+  _globals['_REJECTKIND']._serialized_end=1014
+  _globals['_DEPARTUREREASON']._serialized_start=1017
+  _globals['_DEPARTUREREASON']._serialized_end=1169
   _globals['_ADMITHELLO']._serialized_start=65
   _globals['_ADMITHELLO']._serialized_end=109
   _globals['_ADMITCHALLENGE']._serialized_start=111
@@ -40,14 +44,18 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ADMITPROOF']._serialized_end=199
   _globals['_OFFER']._serialized_start=201
   _globals['_OFFER']._serialized_end=299
-  _globals['_OFFERREPLY']._serialized_start=301
-  _globals['_OFFERREPLY']._serialized_end=385
-  _globals['_RUNREQUEST']._serialized_start=387
-  _globals['_RUNREQUEST']._serialized_end=416
-  _globals['_TASKREF']._serialized_start=418
-  _globals['_TASKREF']._serialized_end=444
-  _globals['_DRAINNOTICE']._serialized_start=446
-  _globals['_DRAINNOTICE']._serialized_end=492
-  _globals['_NODEAPI']._serialized_start=495
-  _globals['_NODEAPI']._serialized_end=1021
+  _globals['_OFFERREPLY']._serialized_start=302
+  _globals['_OFFERREPLY']._serialized_end=569
+  _globals['_SEEDREQUEST']._serialized_start=571
+  _globals['_SEEDREQUEST']._serialized_end=643
+  _globals['_SEEDREPLY']._serialized_start=645
+  _globals['_SEEDREPLY']._serialized_end=709
+  _globals['_RUNREQUEST']._serialized_start=711
+  _globals['_RUNREQUEST']._serialized_end=760
+  _globals['_TASKREF']._serialized_start=762
+  _globals['_TASKREF']._serialized_end=788
+  _globals['_DRAINNOTICE']._serialized_start=790
+  _globals['_DRAINNOTICE']._serialized_end=914
+  _globals['_NODEAPI']._serialized_start=1172
+  _globals['_NODEAPI']._serialized_end=1761
 # @@protoc_insertion_point(module_scope)

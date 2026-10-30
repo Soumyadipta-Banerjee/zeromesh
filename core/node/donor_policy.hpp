@@ -19,6 +19,18 @@
 
 namespace zeromesh::node {
 
+// Why a donor refuses a task, in terms the requester can act on without reading the prose.
+enum class RefusalKind {
+    Busy,        // passing: cores or memory taken, battery low; retry after retry_after_ms
+    Unsupported, // never for this task on this node (needs network, other arch, more cores than donated)
+};
+
+struct Refusal {
+    RefusalKind kind{RefusalKind::Busy};
+    std::string reason;
+    int retry_after_ms{0}; // Busy only
+};
+
 struct DonorPolicy {
     int allow_on_battery_above{50}; // percent; on battery, accept only above this
     int max_cores{-1};              // -1 = cores_total - 1
@@ -67,6 +79,9 @@ struct DonorPolicy {
     // the cores already promised to other tasks; otherwise a human-readable reason.
     [[nodiscard]] std::optional<std::string> Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
                                                      int cores_in_use) const;
+    // Refuses with the kind of refusal attached.
+    [[nodiscard]] std::optional<Refusal> Evaluate(const net::Telemetry& t, const v1::TaskSpec& spec,
+                                                  int cores_in_use) const;
 };
 
 // Sticky drain state machine. Call Update with each telemetry sample; it reports whether

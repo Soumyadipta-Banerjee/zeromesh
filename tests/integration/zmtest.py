@@ -45,6 +45,15 @@ class Zmd:
             "ZM_PLUGIN_PATH": "",
         })
         self.env.update(env or {})
+        # The comfort governor reacts to the host's real PSI, so a busy desktop would freeze the
+        # test's donors and make results depend on what else the machine is doing. Tests that
+        # want it supply their own donor.toml before the daemon starts.
+        config_dir = self.env["ZM_CONFIG_DIR"]
+        os.makedirs(config_dir, exist_ok=True)
+        donor_toml = os.path.join(config_dir, "donor.toml")
+        if not os.path.exists(donor_toml):
+            with open(donor_toml, "w") as f:
+                f.write("# test default: comfort governor off\nmax_step = 0\n")
         self.log_path = os.path.join(self.root, "zmd.log")
         self._log = open(self.log_path, "wb")
         self.proc = subprocess.Popen([ZMD], env=self.env, stdout=self._log, stderr=subprocess.STDOUT)

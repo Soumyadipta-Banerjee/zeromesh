@@ -1,0 +1,29 @@
+[
+  {
+    "directory": ".",
+    "file": "src/hello.c",
+    "command": "cc -O2 -g -std=c11 -Iinclude -DGREETING=\"hi there\" -MD -MF build/hello.d -c src/hello.c -o build/hello.o",
+    "output": "build/hello.o"
+  },
+  {
+    "directory": ".",
+    "file": "src/util.cc",
+    "arguments": ["c++", "-O2", "-std=c++20", "-isystem", "third_party", "-Wall", "-DNDEBUG", "-c", "src/util.cc", "-o", "build/util.cc.o"],
+    "output": "build/util.cc.o"
+  },
+  {
+    "directory": "src",
+    "file": "main.cpp",
+    "command": "g++ -O3 -fPIC -march=x86-64-v2 -c main.cpp -o main.o"
+  },
+  {
+    "directory": ".",
+    "file": "src/asm_stub.c",
+    "command": "cc -S -O2 src/asm_stub.c -o build/asm_stub.s"
+  },
+  {
+    "directory": ".",
+    "file": "src/kernel.F90",
+    "command": "gfortran -O2 -fdefault-real-8 -c src/kernel.F90 -o build/kernel.o"
+  }
+]

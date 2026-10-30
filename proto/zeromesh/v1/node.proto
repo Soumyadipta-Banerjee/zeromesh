@@ -29,6 +29,24 @@ message OfferReply {
   // The donor's own departure hazard (expected abrupt departures per hour), when it has a
   // record to report one from. Absent = unknown. Informational for the placer.
   optional double hazard_per_hour = 5;
+  // Why the offer was rejected, so the placer need not parse `reason`. UNSPECIFIED (an older
+  // donor, or accepted) makes the placer fall back to matching the prose.
+  RejectKind reject_kind = 6;
+  // How long to wait before offering this donor work again. Set with DRAINING and BUSY.
+  uint32 retry_after_ms = 7;
+  // Cores this donor donates in total (its donor policy's limit, not the machine size). Absent
+  // = unknown (an older donor, or rejected before it was computed).
+  optional uint32 core_limit = 8;
+}
+enum RejectKind {
+  REJECT_UNSPECIFIED = 0;
+  // The donor is leaving; look again after retry_after_ms.
+  REJECT_DRAINING = 1;
+  // Passing: cores or memory taken, owner busy, battery low. Look again after retry_after_ms.
+  REJECT_BUSY = 2;
+  // This donor cannot run this task as specified (no such command or env, other toolchain,
+  // needs network or more cores than it donates). Try another donor.
+  REJECT_UNSUPPORTED = 3;
 }
 
 // Peer seeding (claim 1): asks the callee to fetch `digests` from another team peer
