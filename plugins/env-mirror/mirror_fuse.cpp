@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <sys/mount.h>
@@ -195,6 +196,18 @@ int FuseOpen(const char* path, struct fuse_file_info* fi) {
     if (!node) return -ENOENT;
     if (node->is_directory) return -EISDIR;
 
+    // Keep the file's chunk out of eviction until the task closes it; release() gets no path to look it up.
+    if (impl->cache) {
+        impl->cache->Pin(node->digest_hash);
+        fi->fh = reinterpret_cast<uint64_t>(new std::string(node->digest_hash));
+    }
+    return 0;
+}
+
+int FuseRelease(const char*, struct fuse_file_info* fi) {
+    std::unique_ptr<std::string> hash(reinterpret_cast<std::string*>(fi->fh));
+    auto* impl = GetImpl();
+    if (hash && impl && impl->cache) impl->cache->Unpin(*hash);
     return 0;
 }
 
@@ -283,6 +296,7 @@ struct fuse_operations MakeFuseOps() {
     ops.getattr = FuseGetattr;
     ops.readdir = FuseReaddir;
     ops.open = FuseOpen;
+    ops.release = FuseRelease;
     ops.read = FuseRead;
     ops.readlink = FuseReadlink;
     ops.write = FuseWrite;

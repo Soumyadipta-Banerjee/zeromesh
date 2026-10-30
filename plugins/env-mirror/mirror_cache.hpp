@@ -48,6 +48,13 @@ public:
     /// Reads up to `size` bytes at `offset` from a cached chunk file without loading the whole blob.
     [[nodiscard]] std::optional<size_t> ReadRange(const std::string& chunk_hash, off_t offset, char* buf, size_t size);
 
+    /// Protects a chunk from eviction while a running task holds it open. Reference-counted, and valid
+    /// before the chunk is cached: a pinned hash is skipped by eviction once it is inserted.
+    void Pin(const std::string& chunk_hash);
+
+    /// Drops one pin taken by Pin(); the chunk is evictable again after the last one.
+    void Unpin(const std::string& chunk_hash);
+
     /// Removes all cached chunk files (per-task cleanup).
     void Clear();
 
@@ -57,7 +64,8 @@ private:
         size_t size_bytes{0};
     };
 
-    void Evict();
+    /// Evicts the least recently used unpinned chunk; false when every chunk is pinned.
+    bool Evict();
 
     std::filesystem::path cache_dir_;
     size_t max_bytes_{512 * 1024 * 1024};
@@ -67,6 +75,7 @@ private:
     mutable std::mutex mutex_;
     std::list<CacheEntry> lru_list_;
     std::unordered_map<std::string, std::list<CacheEntry>::iterator> lru_map_;
+    std::unordered_map<std::string, size_t> pins_;
 };
 
 } // namespace zeromesh::mirror

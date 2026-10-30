@@ -270,3 +270,51 @@ TEST(EnvMirrorCacheLruEviction) {
     ASSERT_TRUE(cache.Contains("hash3"));
     ASSERT_EQ(cache.EvictionCount(), 1u);
 }
+
+TEST(EnvMirrorCacheEvictionSkipsPinnedChunks) {
+    TempDir cache_dir;
+    MirrorCache cache(cache_dir.path(), 100);
+
+    cache.Put("hash1", std::string(50, 'a'));
+    cache.Pin("hash1"); // oldest entry, but a running task has it open
+    cache.Put("hash2", std::string(40, 'b'));
+    cache.Put("hash3", std::string(30, 'c'));
+
+    ASSERT_TRUE(cache.Contains("hash1"));
+    ASSERT_FALSE(cache.Contains("hash2"));
+    ASSERT_TRUE(cache.Contains("hash3"));
+
+    cache.Unpin("hash1");
+    cache.Put("hash4", std::string(50, 'd'));
+    ASSERT_FALSE(cache.Contains("hash1"));
+    ASSERT_TRUE(cache.Contains("hash4"));
+}
+
+TEST(EnvMirrorCachePinsAreReferenceCounted) {
+    TempDir cache_dir;
+    MirrorCache cache(cache_dir.path(), 100);
+
+    cache.Put("hash1", std::string(60, 'a'));
+    cache.Pin("hash1");
+    cache.Pin("hash1");
+    cache.Unpin("hash1"); // still held by the second opener
+    cache.Put("hash2", std::string(60, 'b'));
+    ASSERT_TRUE(cache.Contains("hash1"));
+
+    cache.Unpin("hash1");
+    cache.Put("hash3", std::string(60, 'c'));
+    ASSERT_FALSE(cache.Contains("hash1"));
+}
+
+TEST(EnvMirrorCacheExceedsBudgetWhenEverythingPinned) {
+    TempDir cache_dir;
+    MirrorCache cache(cache_dir.path(), 100);
+
+    cache.Put("hash1", std::string(80, 'a'));
+    cache.Pin("hash1");
+    cache.Put("hash2", std::string(80, 'b')); // nothing evictable: overshoot rather than drop a live chunk
+
+    ASSERT_TRUE(cache.Contains("hash1"));
+    ASSERT_TRUE(cache.Contains("hash2"));
+    ASSERT_EQ(cache.CurrentBytes(), 160u);
+}
