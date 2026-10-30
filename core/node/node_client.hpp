@@ -98,7 +98,10 @@ public:
     void Cancel(const std::string& task_id);
 
     // Tells the peer this node is draining.
-    bool Drain(const std::string& reason, std::string* error = nullptr);
+    // With a `code` and ttl_ms > 0 the notice is freeze-first: the donor holds the peer's tasks
+    // frozen for up to ttl_ms instead of killing them, and the receiver should wait, not cancel.
+    bool Drain(const std::string& reason, std::string* error = nullptr,
+               v1::DepartureReason code = v1::DEPARTURE_UNSPECIFIED, uint32_t ttl_ms = 0, uint32_t grace_ms = 0);
 
     const std::string& address() const { return address_; }
     // The peer's node id once known (expected, or learned by Admit).

@@ -104,6 +104,26 @@ DonorPolicy DonorPolicy::Parse(std::string_view text, std::ostream& warn, std::s
                 p.comfort_hold_s = *v;
             else
                 bad();
+        } else if (key == "drain_grace_s") {
+            if (auto v = ParseInt(value, 0, 86400))
+                p.drain_grace_s = *v;
+            else
+                bad();
+        } else if (key == "freeze_ttl_s") {
+            if (auto v = ParseInt(value, 0, 86400))
+                p.freeze_ttl_s = *v;
+            else
+                bad();
+        } else if (key == "depart_on_lid") {
+            if (auto v = ParseBool(value))
+                p.depart_on_lid = *v;
+            else
+                bad();
+        } else if (key == "depart_on_unplug") {
+            if (auto v = ParseBool(value))
+                p.depart_on_unplug = *v;
+            else
+                bad();
         } else {
             warn << where() << "unknown key '" << key << "', ignored\n";
         }

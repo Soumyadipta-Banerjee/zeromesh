@@ -364,12 +364,16 @@ void NodeClient::Cancel(const std::string& task_id) {
     }
 }
 
-bool NodeClient::Drain(const std::string& reason, std::string* error) {
+bool NodeClient::Drain(const std::string& reason, std::string* error, v1::DepartureReason code, uint32_t ttl_ms,
+                       uint32_t grace_ms) {
     auto stub = PinnedStub(error);
     if (!stub) return false;
     v1::DrainNotice req;
     req.set_node_id(self_.node_id);
     req.set_reason(reason);
+    req.set_code(code);
+    req.set_ttl_ms(ttl_ms);
+    req.set_grace_ms(grace_ms);
     grpc::ClientContext ctx;
     SetDeadline(ctx);
     v1::Empty empty;
