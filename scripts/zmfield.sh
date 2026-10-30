@@ -123,8 +123,19 @@ iface_for() { # iface_for IP
     ip -4 route get "$1" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
 }
 
-ctr() { # container runtime
-    if have podman; then echo podman; elif have docker; then echo docker; else echo ""; fi
+ctr() { # container runtime; a docker the user cannot reach (not in the docker group) goes through sudo
+    if have podman; then echo podman
+    elif have docker; then
+        if docker info >/dev/null 2>&1; then echo docker
+        else
+            local w=$ZMF_HOME/bin/docker-sudo
+            if [ "$DRY" = 0 ]; then
+                mkdir -p "$ZMF_HOME/bin"
+                printf '#!/bin/sh\nexec sudo docker "$@"\n' >"$w"; chmod +x "$w"
+            fi
+            echo "$w"
+        fi
+    else echo ""; fi
 }
 
 # ---------------------------------------------------------------------------------------
@@ -423,13 +434,13 @@ condor_install() {
         log "HTCondor already installed natively"; tier=native
     else
         case "$PM" in
-        apt) as_root apt-get install -y htcondor || true ;;
+        apt) as_root apt-get install -y condor || as_root apt-get install -y htcondor || true ;;
         dnf) as_root dnf install -y condor || true ;;
         zypper) as_root zypper --non-interactive install condor || true ;;
         pacman) log "no HTCondor package in the official Arch repos; trying other tiers" ;;
         esac
         if condor_have_native; then tier=native
-        elif [ "$PM" = apt ] || [ "$PM" = dnf ]; then
+        elif { [ "$PM" = apt ] || [ "$PM" = dnf ]; } && case "$OS_ID" in debian|ubuntu|fedora|rhel|centos|rocky|almalinux|ol|amzn) true ;; *) false ;; esac; then
             log "trying HTCondor's official installer (get.htcondor.org, --minicondor)"
             local tmp=$ZMF_HOME/get-htcondor.sh
             run mkdir -p "$ZMF_HOME"
@@ -444,8 +455,8 @@ condor_install() {
         local c; c=$(ctr)
         if [ -n "$c" ]; then
             warn "falling back to the $c container ($CONDOR_IMAGE); the cross-host container path is UNTESTED"
-            run "$c" pull "$CONDOR_IMAGE"
-            tier=container
+            if run "$c" pull "$CONDOR_IMAGE"; then tier=container
+            else warn "could not pull $CONDOR_IMAGE; HTCondor runs will be skipped (try: sudo apt install condor)"; fi
         else
             warn "no HTCondor and no podman/docker: HTCondor runs will be skipped"
         fi
