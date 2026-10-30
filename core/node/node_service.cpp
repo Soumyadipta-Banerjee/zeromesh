@@ -245,6 +245,11 @@ grpc::Status NodeService::Ping(grpc::ServerContext* ctx, const v1::Empty* /*req*
     return grpc::Status::OK;
 }
 
+void NodeService::SetComfortLevelProvider(std::function<int()> provider) {
+    std::lock_guard lock(comfort_mu_);
+    comfort_level_ = std::move(provider);
+}
+
 grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* req, v1::OfferReply* resp) {
     std::string peer;
     if (auto st = RequirePinned(*ctx, &peer); !st.ok()) return st;
@@ -268,6 +273,13 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
         add(d);
     }
     if (!root.hash().empty()) add(root);
+
+    int comfort = 0;
+    {
+        std::lock_guard lock(comfort_mu_);
+        if (comfort_level_) comfort = std::clamp(comfort_level_(), 0, 4);
+    }
+    resp->set_comfort_level(static_cast<uint32_t>(comfort));
 
     auto reject = [&](std::string reason) {
         resp->set_accepted(false);
@@ -306,6 +318,9 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
     PurgeExpiredLocked();
     if (draining_) {
         return reject(drain_reason_.empty() ? "node is draining" : "node is draining: " + drain_reason_);
+    }
+    if (comfort >= kSqueezedLevel) {
+        return reject("owner busy: donated work is held at comfort level " + std::to_string(comfort));
     }
     const TaskKey key{peer, req->task_id()};
     if (running_.contains(key)) return reject("task " + req->task_id() + " is already running here");

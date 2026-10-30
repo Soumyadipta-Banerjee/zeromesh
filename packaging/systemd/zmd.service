@@ -8,7 +8,7 @@ Type=simple
 ExecStart=/usr/bin/zmd
 Restart=on-failure
 RestartSec=3s
-Delegate=cpu memory pids
+Delegate=cpu memory pids io
 
 # ZeroMesh sandboxes tasks using bubblewrap.
 # To donate resources while logged out, enable lingering for your user:

@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -67,6 +68,10 @@ struct ResourceEnforcementStatus {
 };
 [[nodiscard]] ResourceEnforcementStatus ProbeSandboxResourceEnforcement();
 
+// The deepest cgroup along our ancestry that this process may create limited children in
+// (nullopt without cgroup v2 delegation).
+[[nodiscard]] std::optional<std::filesystem::path> DelegatedCgroupParent();
+
 // fd is 1 (stdout) or 2 (stderr). May be empty.
 using LogSink = std::function<void(int fd, std::string_view chunk)>;
 
@@ -81,11 +86,17 @@ public:
 
     RunResult Run(const RunSpec& spec, const LogSink& sink, std::stop_token stop);
 
+    // Called with (cgroup dir, true) once a task's cgroup exists and (dir, false) just before
+    // it is removed, so the comfort governor can throttle running tasks.
+    using CgroupObserver = std::function<void(const std::filesystem::path&, bool added)>;
+    void SetCgroupObserver(CgroupObserver observer);
+
 private:
     std::shared_ptr<store::CasStore> store_;
     std::shared_ptr<store::MerkleBuilder> merkle_;
     std::filesystem::path scratch_base_;
     std::string bwrap_path_;
+    CgroupObserver cgroup_observer_;
     std::string bwrap_error_; // why bwrap_path_ was refused, if it was
 };
 
