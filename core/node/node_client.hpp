@@ -77,6 +77,13 @@ public:
     bool Pull(store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error = nullptr,
               uint64_t* bytes_received = nullptr);
 
+    // Asks the peer to fetch `digests` from the team peer `source_node_id` rather than from us.
+    // `*fetched` (when given) lists the digests the peer now holds, even when the call as a
+    // whole failed. False with *error when the peer could not fetch everything (or does not
+    // know the RPC); the caller then pushes whatever is not in `*fetched` itself.
+    bool SeedBlobs(const std::string& source_node_id, const std::vector<v1::Digest>& digests,
+                   std::vector<v1::Digest>* fetched, std::string* error = nullptr);
+
     // Runs a task the peer accepted, calling on_event for every event, and blocks until the
     // final event, whose result it returns. nullopt (with *error) when the stream broke
     // first, e.g. the peer vanished (keepalive timeout) or refused the run. After

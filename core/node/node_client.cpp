@@ -284,6 +284,25 @@ bool NodeClient::Pull(store::CasStore& cas, const std::vector<v1::Digest>& diges
     return true;
 }
 
+bool NodeClient::SeedBlobs(const std::string& source_node_id, const std::vector<v1::Digest>& digests,
+                           std::vector<v1::Digest>* fetched, std::string* error) {
+    if (fetched) fetched->clear();
+    if (digests.empty()) return true;
+    auto stub = PinnedStub(error);
+    if (!stub) return false;
+    v1::SeedRequest req;
+    req.set_source_hint(source_node_id);
+    for (const auto& d : digests) *req.add_digests() = d;
+    grpc::ClientContext ctx;
+    SetTransferDeadline(ctx, digests);
+    v1::SeedReply reply;
+    grpc::Status st = stub->SeedBlobs(&ctx, req, &reply);
+    if (!st.ok()) return SetError(error, Describe("SeedBlobs", st)), false;
+    if (fetched) fetched->assign(reply.fetched().begin(), reply.fetched().end());
+    if (!reply.error().empty()) return SetError(error, "SeedBlobs: " + reply.error()), false;
+    return true;
+}
+
 std::optional<v1::TaskResult> NodeClient::Run(const std::string& task_id,
                                               const std::function<void(const v1::JobEvent&)>& on_event,
                                               std::string* error) {

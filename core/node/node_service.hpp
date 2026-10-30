@@ -60,6 +60,7 @@ public:
     grpc::Status PushBlobs(grpc::ServerContext* ctx, grpc::ServerReader<v1::Chunk>* reader, v1::Empty* resp) override;
     grpc::Status PullBlobs(grpc::ServerContext* ctx, const v1::Digests* req,
                            grpc::ServerWriter<v1::Chunk>* writer) override;
+    grpc::Status SeedBlobs(grpc::ServerContext* ctx, const v1::SeedRequest* req, v1::SeedReply* resp) override;
     grpc::Status RunTask(grpc::ServerContext* ctx, const v1::RunRequest* req,
                          grpc::ServerWriter<v1::JobEvent>* writer) override;
     grpc::Status CancelTask(grpc::ServerContext* ctx, const v1::TaskRef* req, v1::Empty* resp) override;
@@ -74,6 +75,10 @@ public:
     static constexpr int kSqueezedLevel = 3;
     void SetComfortLevelProvider(std::function<int()> provider);
     [[nodiscard]] bool IsDraining() const;
+
+    // How this node reaches another team peer by node id, so SeedBlobs can fetch from it. Without
+    // one, every seed request is answered "no route" and the requester pushes the blobs itself.
+    void SetPeerClientFactory(NodeClientFactory factory);
 
     // Node ids of requesters that currently have a reserved or running task here.
     [[nodiscard]] std::vector<std::string> RequestersWithWork() const;
@@ -122,6 +127,8 @@ private:
     DonorPolicy policy_;
     std::shared_ptr<net::PeerTable> peers_;
 
+    mutable std::mutex peer_factory_mu_;
+    NodeClientFactory peer_client_factory_;
     mutable std::mutex comfort_mu_;
     std::function<int()> comfort_level_;
     mutable std::mutex mu_;
