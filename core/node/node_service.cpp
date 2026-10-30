@@ -192,6 +192,143 @@ int NodeService::CancelPreemptible() {
     return static_cast<int>(exec_ids.size());
 }
 
+void NodeService::SetTaskFreezer(TaskFreezer freezer) {
+    std::lock_guard lock(mu_);
+    freezer_ = std::move(freezer);
+}
+
+void NodeService::SetRuntimeHistory(std::shared_ptr<RuntimeHistory> history) {
+    std::lock_guard lock(mu_);
+    history_ = std::move(history);
+}
+
+bool NodeService::Departing() const {
+    std::lock_guard lock(mu_);
+    return departure_.active;
+}
+
+NodeService::DepartureReport NodeService::BeginDeparture(v1::DepartureReason reason, std::chrono::milliseconds ttl,
+                                                         std::chrono::milliseconds grace,
+                                                         std::chrono::steady_clock::time_point now) {
+    DepartureReport report;
+    std::vector<RunningTask> tasks;
+    std::shared_ptr<RuntimeHistory> history;
+    TaskFreezer freezer;
+    {
+        std::lock_guard lock(mu_);
+        draining_ = true;
+        const int64_t ttl_ms = std::clamp<int64_t>(ttl.count(), 0, UINT32_MAX);
+        drain_reason_ = FormatDepartureReason(reason, static_cast<uint32_t>(ttl_ms));
+        reserved_.clear(); // a requester must not start a run from an offer made before we left
+        departure_ = Departure{};
+        departure_.active = true;
+        departure_.ttl = ttl;
+        departure_.grace_ends = now + grace;
+        history = history_;
+        freezer = freezer_;
+        for (const auto& [key, r] : running_) {
+            RunningTask t;
+            t.id = r.exec_id;
+            t.elapsed_ms = std::max<int64_t>(
+                0, std::chrono::duration_cast<std::chrono::milliseconds>(now - r.started).count());
+            t.preemptible = r.preemptible;
+            if (history) t.expected_ms = history->Expected(r.spec);
+            tasks.push_back(std::move(t));
+        }
+    }
+
+    const DeparturePlan plan = PlanDeparture(tasks, grace);
+    std::set<std::string> preemptible;
+    for (const auto& t : tasks) {
+        if (t.preemptible) preemptible.insert(t.id);
+    }
+
+    std::vector<std::string> to_cancel;
+    for (const auto& id : plan.freeze) {
+        // ttl 0 means kill-first: freezing a task that is killed a moment later helps nobody.
+        if (ttl.count() > 0 && freezer && freezer(id, true)) {
+            std::lock_guard lock(mu_);
+            departure_.frozen[id] = now + ttl;
+            ++report.frozen;
+        } else {
+            to_cancel.push_back(id);
+        }
+    }
+    {
+        std::lock_guard lock(mu_);
+        for (const auto& id : plan.keep) {
+            ++report.kept;
+            if (preemptible.contains(id)) departure_.kept.insert(id);
+        }
+    }
+    for (const auto& id : to_cancel) {
+        if (executor_) executor_->Cancel(id);
+        ++report.cancelled;
+    }
+    return report;
+}
+
+int NodeService::TickDeparture(std::chrono::steady_clock::time_point now) {
+    std::vector<std::string> to_kill;
+    std::vector<std::string> to_freeze;
+    TaskFreezer freezer;
+    std::chrono::milliseconds ttl{0};
+    {
+        std::lock_guard lock(mu_);
+        if (!departure_.active) return 0;
+        freezer = freezer_;
+        ttl = departure_.ttl;
+        std::set<std::string> live;
+        for (const auto& [key, r] : running_) live.insert(r.exec_id);
+        std::erase_if(departure_.kept, [&](const std::string& id) { return !live.contains(id); });
+        for (auto it = departure_.frozen.begin(); it != departure_.frozen.end();) {
+            if (!live.contains(it->first)) {
+                it = departure_.frozen.erase(it); // finished (or already killed)
+            } else if (now >= it->second) {
+                to_kill.push_back(it->first);
+                it = departure_.frozen.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (now >= departure_.grace_ends) {
+            to_freeze.assign(departure_.kept.begin(), departure_.kept.end());
+            departure_.kept.clear();
+        }
+    }
+    for (const auto& id : to_freeze) {
+        if (freezer && freezer(id, true)) {
+            std::lock_guard lock(mu_);
+            departure_.frozen[id] = now + ttl; // the ttl counts from when it was frozen
+        } else {
+            to_kill.push_back(id);
+        }
+    }
+    for (const auto& id : to_kill) {
+        if (executor_) executor_->Cancel(id);
+    }
+    return static_cast<int>(to_kill.size());
+}
+
+int NodeService::EndDeparture() {
+    std::vector<std::string> frozen;
+    TaskFreezer freezer;
+    {
+        std::lock_guard lock(mu_);
+        if (!departure_.active) return 0;
+        for (const auto& [id, deadline] : departure_.frozen) frozen.push_back(id);
+        departure_ = Departure{};
+        draining_ = false;
+        drain_reason_.clear();
+        freezer = freezer_;
+    }
+    int thawed = 0;
+    for (const auto& id : frozen) {
+        if (freezer && freezer(id, false)) ++thawed;
+    }
+    return thawed;
+}
+
 grpc::Status NodeService::RequirePinned(const grpc::ServerContext& ctx, std::string* peer_node_id) const {
     std::string fp = net::PeerFingerprint(ctx);
     if (fp.empty()) return Denied("no client certificate");
@@ -399,6 +536,7 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
     }
 
     v1::TaskSpec spec;
+    std::shared_ptr<RuntimeHistory> history;
     const std::string exec_id = peer + "/" + req->task_id();
     {
         std::lock_guard lock(mu_);
@@ -409,6 +547,8 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
         reserved_.erase(it);
         const bool preemptible = !spec.policy().has_preemptible() || spec.policy().preemptible();
         running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible, spec, std::move(needed)};
+        running_[key].started = std::chrono::steady_clock::now();
+        history = history_;
     }
 
     auto stream = std::make_shared<RunStream>();
@@ -422,7 +562,21 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
         stream->Push(std::move(ev), false);
     };
     cb.on_log = [stream](int fd, std::string_view chunk) { stream->PushLog(fd, chunk); };
-    cb.on_done = [stream, task_name](v1::TaskResult result) {
+    cb.on_unit = [stream, task_name](const std::string& unit_id, const v1::Digest& digest) {
+        v1::JobEvent ev;
+        ev.set_task_name(task_name);
+        ev.set_state(v1::RUNNING);
+        auto* unit = ev.mutable_unit_committed();
+        unit->set_unit_id(unit_id);
+        *unit->mutable_digest() = digest;
+        stream->Push(std::move(ev), false);
+    };
+    cb.on_done = [stream, task_name, history, spec](v1::TaskResult result) {
+        // Remember how long this command took, for deciding what fits a departure's grace window.
+        if (history && result.exit_code() == 0 && result.error().empty() && !result.cancelled() &&
+            !result.timed_out()) {
+            history->Record(spec, result.duration_ms());
+        }
         v1::JobEvent ev;
         ev.set_task_name(task_name);
         auto [state, detail] = FinalState(result);
@@ -488,7 +642,13 @@ grpc::Status NodeService::Drain(grpc::ServerContext* ctx, const v1::DrainNotice*
     if (auto st = RequirePinned(*ctx, &peer); !st.ok()) return st;
     if (!peers_) return NotConfigured("drain notices");
     // The sender is the authenticated caller, whatever node id the notice names.
-    peers_->MarkDraining(peer, req->reason());
+    // A freeze-first notice (code + ttl) is stored in the reason string, so that the
+    // requester side, which also hears of drains through discovery, can tell it from a kill-first one.
+    std::string reason = req->reason();
+    if (req->code() != v1::DEPARTURE_UNSPECIFIED && req->ttl_ms() > 0) {
+        reason = FormatDepartureReason(req->code(), req->ttl_ms(), req->reason());
+    }
+    peers_->MarkDraining(peer, reason);
     return grpc::Status::OK;
 }
 

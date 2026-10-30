@@ -145,6 +145,19 @@ void CgroupActuator::Add(const std::filesystem::path& dir) {
 void CgroupActuator::Remove(const std::filesystem::path& dir) {
     std::lock_guard lock(mu_);
     dirs_.erase(std::remove(dirs_.begin(), dirs_.end(), dir), dirs_.end());
+    held_.erase(dir);
+}
+
+bool CgroupActuator::Hold(const std::filesystem::path& dir, bool frozen) {
+    std::lock_guard lock(mu_);
+    if (frozen)
+        held_.insert(dir);
+    else
+        held_.erase(dir);
+    const bool freeze = frozen || level_ >= 4;
+    const bool ok = WriteControl(dir / "cgroup.freeze", freeze ? "1" : "0");
+    if (ok) caps_.freeze = true;
+    return ok;
 }
 
 void CgroupActuator::Apply(int level) {
@@ -165,7 +178,8 @@ CgroupActuator::Caps CgroupActuator::Capabilities() const {
 
 void CgroupActuator::ApplyTo(const std::filesystem::path& dir, int level) {
     // Thaw first when stepping out of the freeze so the other limits take effect on a runnable task.
-    if (level < 4) caps_.freeze = WriteControl(dir / "cgroup.freeze", "0") || caps_.freeze;
+    const bool held = held_.contains(dir); // a departure freeze outranks the ladder
+    if (level < 4 && !held) caps_.freeze = WriteControl(dir / "cgroup.freeze", "0") || caps_.freeze;
 
     const bool squeezed = level >= 1;
     const bool w = WriteControl(dir / "cpu.weight", squeezed ? "1" : "100");
@@ -186,7 +200,7 @@ void CgroupActuator::ApplyTo(const std::filesystem::path& dir, int level) {
 
     caps_.io = WriteControl(dir / "io.weight", level >= 3 ? "default 1" : "default 100");
 
-    if (level >= 4) caps_.freeze = WriteControl(dir / "cgroup.freeze", "1");
+    if (level >= 4 || held) caps_.freeze = WriteControl(dir / "cgroup.freeze", "1");
 }
 
 ComfortGovernor::ComfortGovernor(ComfortConfig cfg) : cfg_(cfg), ladder_(cfg) {}

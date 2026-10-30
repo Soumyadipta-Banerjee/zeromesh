@@ -1,12 +1,15 @@
 #include "sched/placer.hpp"
 
+#include "exec/units.hpp"
 #include "node/convert.hpp"
+#include "node/departure.hpp"
 #include "sched/rank.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <exception>
 #include <future>
+#include <map>
 #include <optional>
 #include <thread>
 #include <unordered_map>
@@ -87,6 +90,13 @@ struct Placer::Task {
     bool is_local{false};
     std::string assigned_node; // node currently reserved / running
     std::shared_ptr<node::NodeClient> client;
+
+    // Partial commit: units the task has committed so far (their blobs are in our CAS). The
+    // next attempt gets them under .zm_units/ in its input, so it only redoes the rest.
+    std::mutex units_mu;
+    std::map<std::string, v1::Digest> units;
+    bool units_dirty{false};
+    std::function<void(const std::string&, const v1::Digest&)> unit_sink;
 
     bool IsLocal() {
         std::lock_guard lock(mu);
@@ -226,7 +236,10 @@ void Placer::ReapFinishedLocked() {
     std::erase_if(workers_, [](const Worker& w) { return w.task->worker_done.load(); });
 }
 
-void Placer::OnPeerDrain(const std::string& node_id, const std::string& /*reason*/) {
+void Placer::OnPeerDrain(const std::string& node_id, const std::string& reason) {
+    // A freeze-first donor keeps our task frozen (and kills it itself once its ttl runs out, which
+    // we then retry as a drain). Cancelling now would throw away the progress it is protecting.
+    if (node::ParseDepartureReason(reason)) return;
     std::vector<std::shared_ptr<Task>> hit;
     {
         std::lock_guard lock(shared_->mu);
@@ -302,6 +315,7 @@ v1::TaskResult Placer::RunLocal(const std::shared_ptr<Task>& task, const v1::Tas
     node::TaskCallbacks cb;
     cb.on_state = task->cb.on_state;
     cb.on_log = task->cb.on_log;
+    cb.on_unit = task->unit_sink;
     cb.on_done = [&done](v1::TaskResult r) { done.set_value(std::move(r)); };
     local_->Execute(task->id, spec, std::move(cb));
     if (task->cancelled) local_->Cancel(task->id);
@@ -371,6 +385,18 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     v1::TaskSpec spec = task->spec;
     const net::Telemetry self = telemetry_ ? telemetry_() : net::Telemetry{};
     if (spec.resources().arch().empty() && !self.arch.empty()) spec.mutable_resources()->set_arch(self.arch);
+
+    // Units reach the task through here, from a donor's event stream or from a local run. The
+    // sink never outlives Place(), which is the only thing that runs attempts of this task.
+    Task* const task_raw = task.get();
+    task->unit_sink = [task_raw](const std::string& unit_id, const v1::Digest& digest) {
+        {
+            std::lock_guard lock(task_raw->units_mu);
+            task_raw->units[unit_id] = digest;
+            task_raw->units_dirty = true;
+        }
+        if (task_raw->cb.on_unit) task_raw->cb.on_unit(unit_id, digest);
+    };
 
     const int max_retries = MaxRetries(spec);
     int attempt = 0;                       // completed failed attempts that consumed a retry
@@ -513,6 +539,25 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     while (true) {
         // User/job cancel always wins over drain preemption.
         if (task->cancelled.load()) return task->Done(Cancelled(local_id_));
+
+        // A retry starts from the units the last attempt committed.
+        {
+            std::lock_guard ulock(task->units_mu);
+            if (task->units_dirty) {
+                task->units_dirty = false;
+                try {
+                    store::Digest root = node::FromProto(task->spec.input_root());
+                    for (const auto& [unit_id, digest] : task->units) {
+                        root = merkle_->Overlay(root, std::string(exec::kUnitsDirName) + "/" + unit_id,
+                                                node::FromProto(digest), /*item_is_tree=*/false);
+                    }
+                    *spec.mutable_input_root() = node::ToProto(root);
+                    needed.reset(); // the input tree changed: offer the new one
+                } catch (const std::exception&) {
+                    // Units only save work; without them the attempt starts from scratch.
+                }
+            }
+        }
 
         auto reserved = reserve_next();
         if (!reserved) {
@@ -658,6 +703,20 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             if ((task->cancelled || task->drain_preempted) && !cancel_forwarded) {
                 cancel_forwarded = true;
                 client->Cancel(task->id);
+            }
+            if (ev.has_unit_committed()) {
+                const auto& u = ev.unit_committed();
+                const std::string& unit_hash = u.digest().hash();
+                if (exec::IsValidUnitId(u.unit_id()) && store::CasStore::IsValidHash(unit_hash) && task->unit_sink) {
+                    // Fetch it now: if this donor is lost next, the unit must already be safe here.
+                    std::string unit_err;
+                    uint64_t unit_bytes = 0;
+                    const bool have = cas_->HasBlob(unit_hash) ||
+                                      client->Pull(*cas_, std::vector<v1::Digest>{u.digest()}, &unit_err, &unit_bytes);
+                    AddTraffic(reserved->node_id, 0, unit_bytes);
+                    if (have) task->unit_sink(u.unit_id(), u.digest());
+                }
+                return;
             }
             if (ev.has_result()) return;
             if (ev.log_fd() != 0) {

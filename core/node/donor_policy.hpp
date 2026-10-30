@@ -35,6 +35,14 @@ struct DonorPolicy {
     int comfort_max_step{4};
     int comfort_hold_s{10};
 
+    // Freeze-first departure (claim 3): tasks expected to finish within drain_grace_s keep
+    // running when this node leaves; the rest are frozen for up to freeze_ttl_s before being
+    // killed. depart_on_lid / depart_on_unplug choose which signals start a departure.
+    int drain_grace_s{20};
+    int freeze_ttl_s{120};
+    bool depart_on_lid{true};
+    bool depart_on_unplug{false};
+
     // Reads <config_dir>/donor.toml: `key = value` lines, '#' starts a comment. A missing
     // file gives the defaults. Unknown keys and bad values are reported on stderr and ignored.
     static DonorPolicy Load(const std::filesystem::path& config_dir);
