@@ -15,7 +15,9 @@ namespace {
 
 std::atomic<bool> g_stop{false};
 
-void OnInterrupt(int) { g_stop.store(true); }
+void OnInterrupt(int) {
+    g_stop.store(true);
+}
 
 grpc::Status ListPeers(Client& client, v1::PeerList* out) {
     grpc::ClientContext ctx;
@@ -54,7 +56,7 @@ int StatusCommand(Client& client) {
 }
 
 int MonitorCommand(Client& client) {
-    struct sigaction sa {};
+    struct sigaction sa{};
     sa.sa_handler = OnInterrupt;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGINT, &sa, nullptr);
@@ -82,8 +84,8 @@ int MonitorCommand(Client& client) {
         [&client](std::string* error) {
             grpc::Status s = ClearActivity(client);
             if (s.ok()) return true;
-            *error = s.error_code() == grpc::StatusCode::UNIMPLEMENTED ? "daemon too old (restart zmd)"
-                                                                        : s.error_message();
+            *error =
+                s.error_code() == grpc::StatusCode::UNIMPLEMENTED ? "daemon too old (restart zmd)" : s.error_message();
             return false;
         },
         g_stop);

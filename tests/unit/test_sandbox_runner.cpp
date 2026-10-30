@@ -70,7 +70,10 @@ TEST(RunnerTimeoutAndCancel) {
     ASSERT_TRUE(r.duration < std::chrono::seconds(5));
 
     std::stop_source src;
-    std::thread t([&] { std::this_thread::sleep_for(std::chrono::milliseconds(200)); src.request_stop(); });
+    std::thread t([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        src.request_stop();
+    });
     RunSpec s2;
     s2.argv = {"sleep", "30"};
     s2.sandbox_env = *zeromesh::envhost::Make()->Prepare({}).value;
@@ -81,13 +84,13 @@ TEST(RunnerTimeoutAndCancel) {
 
 TEST(RunnerIsolation) {
     Fixture f;
-    ASSERT_EQ(f.Sh("wc -l < /proc/net/dev").stdout_head, std::string("3\n"));                  // no network
+    ASSERT_EQ(f.Sh("wc -l < /proc/net/dev").stdout_head, std::string("3\n")); // no network
     ASSERT_TRUE(f.Sh("echo z > /usr/zm_test || echo denied").stdout_head.find("denied") != std::string::npos);
     RunSpec spec;
     spec.node_id = "abc";
     ASSERT_EQ(f.Sh("printf %s \"$ZM_NODE_ID\"", spec).stdout_head, std::string("abc"));
-    ASSERT_EQ(f.Sh("cut -d' ' -f41 /proc/self/stat").stdout_head, std::string("5\n"));        // SCHED_IDLE
-    ASSERT_TRUE(f.Sh("printf %s \"$SSH_AUTH_SOCK\"").stdout_head.empty());                     // env cleared
+    ASSERT_EQ(f.Sh("cut -d' ' -f41 /proc/self/stat").stdout_head, std::string("5\n")); // SCHED_IDLE
+    ASSERT_TRUE(f.Sh("printf %s \"$SSH_AUTH_SOCK\"").stdout_head.empty());             // env cleared
 }
 
 TEST(RunnerCommandNotFoundAndHugeOutput) {

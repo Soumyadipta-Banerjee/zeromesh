@@ -46,8 +46,8 @@ void PeerTable::RecordMeasuredLatency(const std::string& id, std::chrono::millis
     }
     // EWMA with alpha = 0.25
     const double alpha = 0.25;
-    const double ms = alpha * static_cast<double>(sample_rtt.count()) +
-                      (1.0 - alpha) * static_cast<double>(prev.count());
+    const double ms =
+        alpha * static_cast<double>(sample_rtt.count()) + (1.0 - alpha) * static_cast<double>(prev.count());
     it->second.latency = std::chrono::milliseconds(static_cast<long long>(ms + 0.5));
 }
 
@@ -101,9 +101,7 @@ std::vector<Peer> PeerTable::ListActive(std::chrono::milliseconds max_age) const
         }
     }
 
-    std::sort(active.begin(), active.end(), [](const Peer& a, const Peer& b) {
-        return a.id < b.id;
-    });
+    std::sort(active.begin(), active.end(), [](const Peer& a, const Peer& b) { return a.id < b.id; });
 
     return active;
 }
@@ -119,9 +117,7 @@ std::vector<Peer> PeerTable::ListPresent(std::chrono::milliseconds max_age) cons
         present.push_back(peer);
     }
 
-    std::sort(present.begin(), present.end(), [](const Peer& a, const Peer& b) {
-        return a.id < b.id;
-    });
+    std::sort(present.begin(), present.end(), [](const Peer& a, const Peer& b) { return a.id < b.id; });
 
     return present;
 }

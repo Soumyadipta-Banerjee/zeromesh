@@ -4,8 +4,14 @@
 
 namespace zeromesh::exec {
 
-BwrapBuilder& BwrapBuilder::SetBinary(std::string path) { binary_ = std::move(path); return *this; }
-BwrapBuilder& BwrapBuilder::ShareNetwork(bool share) { share_net_ = share; return *this; }
+BwrapBuilder& BwrapBuilder::SetBinary(std::string path) {
+    binary_ = std::move(path);
+    return *this;
+}
+BwrapBuilder& BwrapBuilder::ShareNetwork(bool share) {
+    share_net_ = share;
+    return *this;
+}
 
 BwrapBuilder& BwrapBuilder::AddReadOnlyBind(const std::string& host, const std::string& sandbox) {
     mounts_.push_back({"--ro-bind", host, sandbox});
@@ -58,7 +64,10 @@ BwrapBuilder& BwrapBuilder::AddEnv(const std::string& key, const std::string& va
     return *this;
 }
 
-BwrapBuilder& BwrapBuilder::SetWorkingDirectory(const std::string& dir) { chdir_ = dir; return *this; }
+BwrapBuilder& BwrapBuilder::SetWorkingDirectory(const std::string& dir) {
+    chdir_ = dir;
+    return *this;
+}
 
 std::vector<std::string> BwrapBuilder::Build(const std::vector<std::string>& command) const {
     std::vector<std::string> args{binary_, "--unshare-all"};

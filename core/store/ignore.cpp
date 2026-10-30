@@ -21,8 +21,7 @@ std::vector<std::string> Split(std::string_view s) {
 }
 
 // Segment-wise glob: "**" matches zero or more whole segments.
-bool GlobSegments(const std::vector<std::string>& pat, size_t pi,
-                  const std::vector<std::string>& path, size_t si) {
+bool GlobSegments(const std::vector<std::string>& pat, size_t pi, const std::vector<std::string>& path, size_t si) {
     if (pi == pat.size()) return si == path.size();
     if (pat[pi] == "**") {
         for (size_t k = si; k <= path.size(); ++k) {
@@ -37,7 +36,9 @@ bool GlobSegments(const std::vector<std::string>& pat, size_t pi,
 
 } // namespace
 
-IgnoreRules IgnoreRules::None() { return IgnoreRules{}; }
+IgnoreRules IgnoreRules::None() {
+    return IgnoreRules{};
+}
 
 IgnoreRules IgnoreRules::FromLines(const std::vector<std::string>& lines) {
     IgnoreRules r;

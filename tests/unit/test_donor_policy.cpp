@@ -65,14 +65,13 @@ TEST(DonorPolicyNetwork) {
 
 TEST(DonorPolicyParse) {
     zeromesh::testing::TempDir dir;
-    ASSERT_EQ(DonorPolicy::Load(dir.path()).allow_on_battery_above, 50);  // no file: defaults
+    ASSERT_EQ(DonorPolicy::Load(dir.path()).allow_on_battery_above, 50); // no file: defaults
 
-    zeromesh::testing::WriteFile(dir / "donor.toml",
-                                 "# donate generously\n"
-                                 "allow_on_battery_above = 80   # trailing comment\n"
-                                 "\n"
-                                 "max_cores=3\n"
-                                 "allow_network = true\n");
+    zeromesh::testing::WriteFile(dir / "donor.toml", "# donate generously\n"
+                                                     "allow_on_battery_above = 80   # trailing comment\n"
+                                                     "\n"
+                                                     "max_cores=3\n"
+                                                     "allow_network = true\n");
     DonorPolicy p = DonorPolicy::Load(dir.path());
     ASSERT_EQ(p.allow_on_battery_above, 80);
     ASSERT_EQ(p.max_cores, 3);
@@ -91,10 +90,9 @@ TEST(DonorPolicyParse) {
 
 TEST(DonorPolicyParseM4Keys) {
     std::ostringstream warn;
-    DonorPolicy p = DonorPolicy::Parse(
-        "drain_on_user_activity = false\n"
-        "drain_hold_s = 60\n",
-        warn);
+    DonorPolicy p = DonorPolicy::Parse("drain_on_user_activity = false\n"
+                                       "drain_hold_s = 60\n",
+                                       warn);
     ASSERT_FALSE(p.drain_on_user_activity);
     ASSERT_EQ(p.drain_hold_s, 60);
     ASSERT_TRUE(warn.str().empty());

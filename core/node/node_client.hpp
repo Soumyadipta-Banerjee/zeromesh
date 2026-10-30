@@ -106,8 +106,8 @@ private:
     mutable std::mutex mu_;
     std::optional<std::string> peer_node_id_;
     std::shared_ptr<v1::NodeApi::Stub> pinned_stub_;
-    std::map<std::string, grpc::ClientContext*> runs_;  // task id -> its active Run call
-    std::set<std::string> cancelled_;                   // tasks Cancel()ed during their Run
+    std::map<std::string, grpc::ClientContext*> runs_; // task id -> its active Run call
+    std::set<std::string> cancelled_;                  // tasks Cancel()ed during their Run
 };
 
 } // namespace zeromesh::node

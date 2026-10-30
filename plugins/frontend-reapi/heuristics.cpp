@@ -14,15 +14,15 @@ bool IsCriticalPath(const std::vector<std::string>& command_args) {
     }
 
     // Linkers and fat archives are serial critical path bottlenecks
-    if (binary == "ld" || binary == "ld.lld" || binary == "lld" || binary == "gold" ||
-        binary == "ar" || binary == "gcc-ar" || binary == "llvm-ar" || binary == "ranlib" ||
-        binary == "gcc-ranlib" || binary == "llvm-ranlib") {
+    if (binary == "ld" || binary == "ld.lld" || binary == "lld" || binary == "gold" || binary == "ar" ||
+        binary == "gcc-ar" || binary == "llvm-ar" || binary == "ranlib" || binary == "gcc-ranlib" ||
+        binary == "llvm-ranlib") {
         return true;
     }
 
     // Direct compiler invocation performing final link step (no -c / -E / -S flag)
-    if (binary == "gcc" || binary == "g++" || binary == "c++" || binary == "cc" ||
-        binary == "clang" || binary == "clang++") {
+    if (binary == "gcc" || binary == "g++" || binary == "c++" || binary == "cc" || binary == "clang" ||
+        binary == "clang++") {
         bool has_compile_only = false;
         bool has_object_input = false;
         bool has_output = false;
@@ -31,7 +31,8 @@ bool IsCriticalPath(const std::vector<std::string>& command_args) {
                 has_compile_only = true;
             }
             if ((arg.size() > 2 && arg.substr(arg.size() - 2) == ".o") ||
-                (arg.size() > 4 && arg.substr(arg.size() - 4) == ".obj")) has_object_input = true;
+                (arg.size() > 4 && arg.substr(arg.size() - 4) == ".obj"))
+                has_object_input = true;
             if (arg == "-o") has_output = true;
         }
         if (!has_compile_only && has_object_input && has_output) {

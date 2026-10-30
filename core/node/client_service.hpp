@@ -21,8 +21,8 @@
 
 namespace zeromesh::node {
 
-inline constexpr uint64_t kDefaultUploadLimitBytes = 2ULL * 1024 * 1024 * 1024;  // 2 GiB
-inline constexpr size_t kObjectChunkBytes = 1024 * 1024;                          // 1 MiB
+inline constexpr uint64_t kDefaultUploadLimitBytes = 2ULL * 1024 * 1024 * 1024; // 2 GiB
+inline constexpr size_t kObjectChunkBytes = 1024 * 1024;                        // 1 MiB
 
 // kDefaultUploadLimitBytes, or $ZM_UPLOAD_LIMIT_BYTES when it is a positive integer.
 // The override exists for integration tests, so they need not upload 2 GiB.
@@ -55,9 +55,8 @@ struct TeamState {
 class ClientService final : public v1::ClientApi::Service {
 public:
     ClientService(std::shared_ptr<store::CasStore> cas, std::shared_ptr<store::MerkleBuilder> merkle,
-                  std::shared_ptr<JobManager> jobs, std::shared_ptr<net::PeerTable> peers,
-                  ClientServiceOptions options, std::shared_ptr<TeamState> team = nullptr,
-                  std::shared_ptr<LocalExecutor> local_executor = nullptr);
+                  std::shared_ptr<JobManager> jobs, std::shared_ptr<net::PeerTable> peers, ClientServiceOptions options,
+                  std::shared_ptr<TeamState> team = nullptr, std::shared_ptr<LocalExecutor> local_executor = nullptr);
 
     grpc::Status PutObjects(grpc::ServerContext* ctx, grpc::ServerReader<v1::Chunk>* reader,
                             v1::PutObjectsReply* reply) override;
@@ -73,8 +72,7 @@ public:
     grpc::Status CancelJob(grpc::ServerContext* ctx, const v1::JobRef* req, v1::Empty* reply) override;
     grpc::Status FetchOutputs(grpc::ServerContext* ctx, const v1::FetchRequest* req, v1::FetchReply* reply) override;
     grpc::Status ListPeers(grpc::ServerContext* ctx, const v1::Empty* req, v1::PeerList* reply) override;
-    grpc::Status ListActivity(grpc::ServerContext* ctx, const v1::Empty* req,
-                              v1::ActivitySnapshot* reply) override;
+    grpc::Status ListActivity(grpc::ServerContext* ctx, const v1::Empty* req, v1::ActivitySnapshot* reply) override;
     grpc::Status ClearActivity(grpc::ServerContext* ctx, const v1::Empty* req, v1::Empty* reply) override;
     grpc::Status TeamCreate(grpc::ServerContext* ctx, const v1::Empty* req, v1::TeamSecretReply* reply) override;
     grpc::Status TeamJoin(grpc::ServerContext* ctx, const v1::TeamJoinRequest* req, v1::Empty* reply) override;

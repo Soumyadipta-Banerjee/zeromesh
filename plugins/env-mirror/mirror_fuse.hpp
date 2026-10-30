@@ -35,8 +35,7 @@ struct VirtualNode {
  */
 class MirrorFuse {
 public:
-    MirrorFuse(std::filesystem::path mount_point,
-               std::shared_ptr<IChunkSource> chunk_source,
+    MirrorFuse(std::filesystem::path mount_point, std::shared_ptr<IChunkSource> chunk_source,
                std::shared_ptr<MirrorCache> cache);
     ~MirrorFuse();
 

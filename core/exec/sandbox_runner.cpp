@@ -69,7 +69,7 @@ bool SymlinkAmongParents(const fs::path& root, const fs::path& rel) {
         cur /= *it;
         auto next = std::next(it);
         if (next == end) break;
-        struct stat st {};
+        struct stat st{};
         if (lstat(cur.c_str(), &st) != 0) return true;
         if (S_ISLNK(st.st_mode)) return true;
         if (!S_ISDIR(st.st_mode)) return true;
@@ -86,7 +86,7 @@ bool SafeOutputPath(const fs::path& work, const std::string& rel) {
     if (SymlinkAmongParents(work, norm)) return false;
 
     const fs::path full = work / norm;
-    struct stat st {};
+    struct stat st{};
     if (lstat(full.c_str(), &st) != 0) return true;
 
     if (S_ISLNK(st.st_mode)) return true;
@@ -116,7 +116,7 @@ Snapshot TakeSnapshot(const fs::path& root) {
     for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (ec) break;
-        struct stat st {};
+        struct stat st{};
         if (lstat(it->path().c_str(), &st) != 0) continue;
         if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) continue;
         const auto rel = fs::relative(it->path(), root);
@@ -189,7 +189,9 @@ bool EnableSubtreeControllers(const fs::path& parent, const char* const* names, 
     return WriteSmallFile(parent / "cgroup.subtree_control", add);
 }
 
-bool CgroupFileWritable(const fs::path& p) { return access(p.c_str(), W_OK) == 0; }
+bool CgroupFileWritable(const fs::path& p) {
+    return access(p.c_str(), W_OK) == 0;
+}
 
 void JoinCgroup(const fs::path& dir);
 
@@ -401,8 +403,10 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     b.SetBinary(bwrap_path_).ShareNetwork(spec.allow_network).AddDev("/dev").AddProc("/proc");
     // Binds before symlinks so parents exist (/usr before /bin→usr/bin, /etc binds before /etc/mtab).
     for (const auto& m : spec.sandbox_env.binds) {
-        if (m.read_only) b.AddReadOnlyBind(m.host, m.sandbox);
-        else b.AddReadWriteBind(m.host, m.sandbox);
+        if (m.read_only)
+            b.AddReadOnlyBind(m.host, m.sandbox);
+        else
+            b.AddReadWriteBind(m.host, m.sandbox);
     }
     for (const auto& s : spec.sandbox_env.symlinks) b.AddSymlink(s.target, s.link);
     b.AddTmpfs("/tmp").AddReadWriteBind(work.string(), "/work");
@@ -483,8 +487,10 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
 
     while (open_fds > 0) {
         if (!killed && (stop.stop_requested() || std::chrono::steady_clock::now() >= deadline)) {
-            if (stop.stop_requested()) result.cancelled = true;
-            else result.timed_out = true;
+            if (stop.stop_requested())
+                result.cancelled = true;
+            else
+                result.timed_out = true;
             kill(-pid, SIGKILL);
             killed = true;
         }
@@ -509,8 +515,10 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
 
     int status = 0;
     waitpid(pid, &status, 0);
-    if (WIFEXITED(status)) result.exit_code = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status)) result.exit_code = 128 + WTERMSIG(status);
+    if (WIFEXITED(status))
+        result.exit_code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))
+        result.exit_code = 128 + WTERMSIG(status);
     // bwrap reports a missing command as exit 1 + "bwrap: execvp ..."; use the shell convention.
     if (result.exit_code == 1 && result.stderr_head.rfind("bwrap: execvp ", 0) == 0) result.exit_code = 127;
 
@@ -531,11 +539,13 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         const std::string under_work = fs::path(rel).lexically_normal().string();
         std::error_code ec;
         std::string use = under_work;
-        if (fs::exists(work / under_wd, ec)) use = under_wd;
-        else if (!fs::exists(work / under_work, ec) && SafeOutputPath(work, under_wd)) use = under_wd;
+        if (fs::exists(work / under_wd, ec))
+            use = under_wd;
+        else if (!fs::exists(work / under_work, ec) && SafeOutputPath(work, under_wd))
+            use = under_wd;
         if (!SafeOutputPath(work, use)) return;
         fs::path p = work / fs::path(use).lexically_normal();
-        struct stat st {};
+        struct stat st{};
         if (lstat(p.c_str(), &st) != 0) return;
         OutputEntry e;
         e.path = rel;
@@ -564,7 +574,8 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         if (spec.capture_changed) {
             for (const auto& [rel, stamp] : TakeSnapshot(work)) {
                 auto it = before.find(rel);
-                bool changed = it == before.end() || it->second.size != stamp.size || it->second.mtime_ns != stamp.mtime_ns;
+                bool changed =
+                    it == before.end() || it->second.size != stamp.size || it->second.mtime_ns != stamp.mtime_ns;
                 if (changed && seen.emplace(rel, true).second) capture(rel);
             }
         }

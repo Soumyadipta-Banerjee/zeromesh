@@ -61,7 +61,7 @@ struct ParsedAnnouncement {
 };
 
 std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, const TeamKey&,
-                                                   std::string_view self_node_id);
+                                                    std::string_view self_node_id);
 
 struct DrainNotice {
     std::string node_id;
@@ -73,18 +73,15 @@ struct DrainNotice {
 
 // ZM3D\t<team_id>\t<node_id>\t<boot_id>\t<seq>\t<timestamp_ms>\t<reason>\t<hex mac>
 std::string FormatDrain(const DrainFields&, const TeamKey&);
-std::optional<DrainNotice> ParseDrain(std::string_view packet, const TeamKey&,
-                                      std::string_view self_node_id);
+std::optional<DrainNotice> ParseDrain(std::string_view packet, const TeamKey&, std::string_view self_node_id);
 
-[[nodiscard]] bool TimestampAcceptable(int64_t unix_ms,
-                                       std::chrono::milliseconds max_skew = kDiscoveryReplaySkew);
+[[nodiscard]] bool TimestampAcceptable(int64_t unix_ms, std::chrono::milliseconds max_skew = kDiscoveryReplaySkew);
 
 // Per-sender replay filter: monotonic seq per boot_id; a new boot_id is accepted only
 // when the packet timestamp is within the skew window.
 class ReplayTracker {
 public:
-    [[nodiscard]] bool Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq,
-                              int64_t timestamp_ms);
+    [[nodiscard]] bool Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq, int64_t timestamp_ms);
     void Clear();
 
 private:
@@ -100,12 +97,12 @@ private:
 struct DiscoveryConfig {
     std::string node_id{};
     std::string hostname{};
-    int node_port{8981};                     // NodeApi TCP port we announce
-    int cores{4};                            // announced when `telemetry` is empty
+    int node_port{8981}; // NodeApi TCP port we announce
+    int cores{4};        // announced when `telemetry` is empty
     uint64_t ram_bytes{16ULL * 1024 * 1024 * 1024};
-    int discovery_port{8988};                // UDP; multicast send and listen
+    int discovery_port{8988}; // UDP; multicast send and listen
     std::string multicast_group{"239.255.42.99"};
-    std::optional<TeamKey> team{};           // no team: neither announce nor accept
+    std::optional<TeamKey> team{}; // no team: neither announce nor accept
     std::function<Telemetry()> telemetry{};
 };
 

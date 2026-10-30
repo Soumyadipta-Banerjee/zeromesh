@@ -18,8 +18,7 @@ namespace zeromesh::plugin {
 
 class ClientApiHandle {
 public:
-    ClientApiHandle(std::string socket_path,
-                    std::shared_ptr<grpc::Channel> channel);
+    ClientApiHandle(std::string socket_path, std::shared_ptr<grpc::Channel> channel);
 
     const std::string& socket_path() const { return socket_path_; }
     grpc::Channel& channel() const { return *channel_; }

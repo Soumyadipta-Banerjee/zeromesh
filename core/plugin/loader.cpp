@@ -80,8 +80,8 @@ bool Registry::LoadFile(const std::filesystem::path& so, std::string* error) {
     if (entry == nullptr || entry->abi_major != kAbiMajor) {
         if (error) {
             std::ostringstream ss;
-            ss << so.string() << ": plugin abi " << (entry ? entry->abi_major : 0)
-               << " does not match core abi " << kAbiMajor;
+            ss << so.string() << ": plugin abi " << (entry ? entry->abi_major : 0) << " does not match core abi "
+               << kAbiMajor;
             *error = ss.str();
         }
         dlclose(handle);

@@ -181,8 +181,7 @@ TEST(EnvMirrorReadContentThroughMount) {
     auto mount_path = scratch.path() / "mirror";
     std::ifstream in(mount_path / "code.c");
     ASSERT_TRUE(in.is_open());
-    std::string read_content((std::istreambuf_iterator<char>(in)),
-                             std::istreambuf_iterator<char>());
+    std::string read_content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     ASSERT_EQ(read_content, content);
 
     env->Release(ctx);

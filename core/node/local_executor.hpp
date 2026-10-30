@@ -80,9 +80,9 @@ private:
     mutable std::mutex mu_;
     std::condition_variable_any cv_;
     std::deque<std::shared_ptr<Item>> queue_;
-    std::unordered_map<std::string, std::shared_ptr<Item>> items_;  // queued and running
-    std::deque<ActiveItem> recent_;                                 // finished (monitor history)
-    std::vector<std::jthread> workers_;                             // last: joined first
+    std::unordered_map<std::string, std::shared_ptr<Item>> items_; // queued and running
+    std::deque<ActiveItem> recent_;                                // finished (monitor history)
+    std::vector<std::jthread> workers_;                            // last: joined first
 };
 
 } // namespace zeromesh::node

@@ -55,17 +55,35 @@ DonorPolicy DonorPolicy::Parse(std::string_view text, std::ostream& warn, std::s
         auto bad = [&] { warn << where() << "bad value for " << key << ": '" << value << "', ignored\n"; };
 
         if (key == "allow_on_battery_above") {
-            if (auto v = ParseInt(value, 0, 100)) p.allow_on_battery_above = *v; else bad();
+            if (auto v = ParseInt(value, 0, 100))
+                p.allow_on_battery_above = *v;
+            else
+                bad();
         } else if (key == "max_cores") {
-            if (auto v = ParseInt(value, -1, 1 << 20)) p.max_cores = *v; else bad();
+            if (auto v = ParseInt(value, -1, 1 << 20))
+                p.max_cores = *v;
+            else
+                bad();
         } else if (key == "allow_network") {
-            if (auto v = ParseBool(value)) p.allow_network = *v; else bad();
+            if (auto v = ParseBool(value))
+                p.allow_network = *v;
+            else
+                bad();
         } else if (key == "drain_below_battery") {
-            if (auto v = ParseInt(value, 0, 100)) p.drain_below_battery = *v; else bad();
+            if (auto v = ParseInt(value, 0, 100))
+                p.drain_below_battery = *v;
+            else
+                bad();
         } else if (key == "drain_on_user_activity") {
-            if (auto v = ParseBool(value)) p.drain_on_user_activity = *v; else bad();
+            if (auto v = ParseBool(value))
+                p.drain_on_user_activity = *v;
+            else
+                bad();
         } else if (key == "drain_hold_s") {
-            if (auto v = ParseInt(value, 0, 86400)) p.drain_hold_s = *v; else bad();
+            if (auto v = ParseInt(value, 0, 86400))
+                p.drain_hold_s = *v;
+            else
+                bad();
         } else {
             warn << where() << "unknown key '" << key << "', ignored\n";
         }
@@ -119,8 +137,8 @@ std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v
     const int need = std::max(spec.resources().cores(), 1);
     const int limit = CoreLimit(t.cores_total);
     if (cores_in_use + need > limit) {
-        return "task needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) +
-               " and " + std::to_string(cores_in_use) + " are in use";
+        return "task needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) + " and " +
+               std::to_string(cores_in_use) + " are in use";
     }
     const int64_t mem = spec.resources().mem_bytes();
     if (mem > 0 && static_cast<uint64_t>(mem) > t.mem_available) {
@@ -132,7 +150,9 @@ std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v
 
 DrainController::DrainController(DonorPolicy policy) : policy_(std::move(policy)) {}
 
-void DrainController::SetPolicy(DonorPolicy policy) { policy_ = std::move(policy); }
+void DrainController::SetPolicy(DonorPolicy policy) {
+    policy_ = std::move(policy);
+}
 
 DrainController::TickResult DrainController::Tick(const net::Telemetry& t, Clock::time_point now) {
     TickResult out;

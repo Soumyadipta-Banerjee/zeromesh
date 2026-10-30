@@ -60,7 +60,7 @@ TEST(RankPrefersMoreFreeSlots) {
     // Peer has more free slots despite unknown missing_bytes — do not pack local first.
     ASSERT_EQ(Ids(Rank(spec, {local, peer}, 1'000'000)), (std::vector<std::string>{"peer", "local"}));
 
-    peer.in_flight = 10;  // 10 slots left on peer, 12 on local
+    peer.in_flight = 10; // 10 slots left on peer, 12 on local
     ASSERT_EQ(Ids(Rank(spec, {local, peer}, 1'000'000)), (std::vector<std::string>{"local", "peer"}));
 }
 
@@ -68,10 +68,10 @@ TEST(RankIdleRemoteBeatsBusyLocalOnSmallInput) {
     zeromesh::v1::TaskSpec spec;
     Candidate local = Node("local", 0, true);
     local.cores_total = 8;
-    local.in_flight = 7;  // one slot left
+    local.in_flight = 7; // one slot left
     Candidate remote = Node("remote", -1);
     remote.cores_total = 8;
-    remote.in_flight = 0;  // eight slots
+    remote.in_flight = 0; // eight slots
     ASSERT_EQ(Ids(Rank(spec, {local, remote}, 512)), (std::vector<std::string>{"remote", "local"}));
 }
 
@@ -93,7 +93,7 @@ TEST(RankIgnoresLiveCoresFreeWhenBusy) {
     busy.cores_total = 20;
     busy.cores_free = 0;
     busy.cpu_load_pct = 100;
-    busy.in_flight = 1;  // one of two slots used (20/8=2)
+    busy.in_flight = 1; // one of two slots used (20/8=2)
     ASSERT_EQ(Ids(Rank(spec, {busy})), (std::vector<std::string>{"busy"}));
     busy.in_flight = 2;
     ASSERT_TRUE(Rank(spec, {busy}).empty());
@@ -104,7 +104,7 @@ TEST(RankFiltersArchAndRemoteOnly) {
     Candidate arm = Node("arm", 0);
     arm.arch = "aarch64";
     Candidate full = Node("full", 0);
-    full.in_flight = 4;  // 4 free cores, 4 tasks of 1 core in flight
+    full.in_flight = 4; // 4 free cores, 4 tasks of 1 core in flight
     Candidate small = Node("small-mem", 0);
     small.mem_available = 100;
     std::vector<Candidate> all{Node("local", 0, true), Node("peer", 100), arm, full, small};
@@ -137,12 +137,11 @@ TEST(RankInFlightCapUsesCoresTotal) {
     n.mem_available = 1ull << 30;
     n.arch = "x86_64";
     n.on_ac = true;
-    n.in_flight = 1;  // 4 - 1*2 = 2 >= 2: still room
+    n.in_flight = 1; // 4 - 1*2 = 2 >= 2: still room
     ASSERT_EQ(Rank(spec, {n}).size(), 1u);
-    n.in_flight = 2;  // 4 - 2*2 = 0 < 2: full
+    n.in_flight = 2; // 4 - 2*2 = 0 < 2: full
     ASSERT_TRUE(Rank(spec, {n}).empty());
 }
-
 
 TEST(RankCapacityIgnoresLoadDerivedCoresFree) {
     // Root cause of flaky local multi-task jobs: cores_free = round(cores_total*(1-load))
@@ -152,7 +151,7 @@ TEST(RankCapacityIgnoresLoadDerivedCoresFree) {
     Candidate hot;
     hot.node_id = "hot";
     hot.cores_total = 8;
-    hot.cores_free = 0;  // fully loaded by telemetry
+    hot.cores_free = 0; // fully loaded by telemetry
     hot.cpu_load_pct = 100;
     hot.mem_available = 1ull << 30;
     hot.arch = "x86_64";
@@ -160,7 +159,7 @@ TEST(RankCapacityIgnoresLoadDerivedCoresFree) {
     hot.in_flight = 0;
     ASSERT_EQ(Rank(spec, {hot}).size(), 1u);
 
-    hot.in_flight = 8;  // saturated on hardware capacity
+    hot.in_flight = 8; // saturated on hardware capacity
     ASSERT_TRUE(Rank(spec, {hot}).empty());
 
     Candidate idle = hot;

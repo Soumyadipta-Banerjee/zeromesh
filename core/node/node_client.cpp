@@ -63,8 +63,7 @@ struct FirstSeenFingerprint {
 };
 
 std::shared_ptr<grpc::Channel> MakeNodeApiChannel(const std::string& address,
-                                                  std::shared_ptr<grpc::ChannelCredentials> creds,
-                                                  bool keepalive) {
+                                                  std::shared_ptr<grpc::ChannelCredentials> creds, bool keepalive) {
     grpc::ChannelArguments args;
     args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
     args.SetMaxReceiveMessageSize(kNodeApiMaxMessageSize);
@@ -228,7 +227,7 @@ bool NodeClient::Push(const store::CasStore& cas, const std::vector<v1::Digest>&
         if (!local_err.empty()) break;
     }
     if (!transport_failed) {
-        if (!local_err.empty()) ctx.TryCancel();  // a local problem (e.g. blob missing): abort
+        if (!local_err.empty()) ctx.TryCancel(); // a local problem (e.g. blob missing): abort
         writer->WritesDone();
     }
     grpc::Status st = writer->Finish();
@@ -280,7 +279,7 @@ std::optional<v1::TaskResult> NodeClient::Run(const std::string& task_id,
                                               std::string* error) {
     auto stub = PinnedStub(error);
     if (!stub) return std::nullopt;
-    grpc::ClientContext ctx;  // no deadline: keepalive detects a vanished peer
+    grpc::ClientContext ctx; // no deadline: keepalive detects a vanished peer
     {
         std::lock_guard lock(mu_);
         if (runs_.contains(task_id)) return SetError(error, "task " + task_id + " is already running"), std::nullopt;
@@ -295,7 +294,7 @@ std::optional<v1::TaskResult> NodeClient::Run(const std::string& task_id,
     while (reader->Read(&ev)) {
         if (ev.has_result()) result = ev.result();
         if (on_event) on_event(ev);
-        if (result) break;  // the final event
+        if (result) break; // the final event
     }
     grpc::Status st = reader->Finish();
     bool cancelled = false;

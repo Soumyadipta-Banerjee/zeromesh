@@ -21,9 +21,7 @@ struct Digest {
     std::string hash;
     int64_t size_bytes{0};
 
-    bool operator==(const Digest& other) const {
-        return hash == other.hash && size_bytes == other.size_bytes;
-    }
+    bool operator==(const Digest& other) const { return hash == other.hash && size_bytes == other.size_bytes; }
 };
 
 /** Disk and ingest limits for a donor node's CAS. */
@@ -152,8 +150,7 @@ private:
     void TouchBlobLocked(const std::string& hash) const;
     void TouchBlobOnDisk(const std::filesystem::path& path) const;
     void PromoteLruLocked(const std::string& hash) const;
-    void RegisterBlobLocked(const std::string& hash, uint64_t size,
-                            std::chrono::steady_clock::time_point when) const;
+    void RegisterBlobLocked(const std::string& hash, uint64_t size, std::chrono::steady_clock::time_point when) const;
     bool DeleteBlobLocked(const std::string& hash);
     void DropFromMemCacheLocked(const std::string& hash) const;
     void EvictBlobMetadataLocked(const std::string& hash) const;

@@ -25,8 +25,7 @@ void RenderMonitor(const v1::PeerList& peers, const v1::ActivitySnapshot& activi
                    int tab = 0, int scroll = 0, int rows = 0, int cols = 0);
 
 using PeerFetcher = std::function<std::optional<v1::PeerList>(std::string* error, bool* unavailable)>;
-using ActivityFetcher =
-    std::function<std::optional<v1::ActivitySnapshot>(std::string* error, bool* unavailable)>;
+using ActivityFetcher = std::function<std::optional<v1::ActivitySnapshot>(std::string* error, bool* unavailable)>;
 // Returns false and sets `error` when the daemon could not clear its task history.
 using ActivityClearer = std::function<bool(std::string* error)>;
 

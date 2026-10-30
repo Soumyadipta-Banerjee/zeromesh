@@ -33,7 +33,7 @@ public:
     void Cancel(const std::string&) override {}
 
     std::vector<v1::TaskSpec> calls;
-    std::map<std::string, v1::TaskResult> results;  // by task name; default: exit 0
+    std::map<std::string, v1::TaskResult> results; // by task name; default: exit 0
 
 private:
     std::shared_ptr<zeromesh::store::CasStore> cas_;
@@ -81,8 +81,10 @@ public:
         zeromesh::plugin::SandboxEnv env;
         env.binds.push_back({"/usr", "/usr", true});
         for (const char* p : {"/bin", "/sbin", "/lib", "/lib64"}) {
-            if (fs::is_symlink(p)) env.symlinks.push_back({fs::read_symlink(p).string(), p});
-            else if (fs::is_directory(p)) env.binds.push_back({p, p, true});
+            if (fs::is_symlink(p))
+                env.symlinks.push_back({fs::read_symlink(p).string(), p});
+            else if (fs::is_directory(p))
+                env.binds.push_back({p, p, true});
         }
         env.env.push_back({"PATH", "/usr/local/bin:/usr/bin:/bin"});
         return {env, ""};
@@ -95,13 +97,25 @@ public:
 TEST(JobRejectsCycle) {
     Fixture f;
     bool threw = false;
-    try { f.jm.Submit(Job({Task("a", "a", {"b"}), Task("b", "b", {"a"})})); } catch (const std::invalid_argument&) { threw = true; }
+    try {
+        f.jm.Submit(Job({Task("a", "a", {"b"}), Task("b", "b", {"a"})}));
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
     ASSERT_TRUE(threw);
     threw = false;
-    try { f.jm.Submit(Job({Task("a", "a", {"nope"})})); } catch (const std::invalid_argument&) { threw = true; }
+    try {
+        f.jm.Submit(Job({Task("a", "a", {"nope"})}));
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
     ASSERT_TRUE(threw);
     threw = false;
-    try { f.jm.Submit(Job({Task("a", "a"), Task("a", "b")})); } catch (const std::invalid_argument&) { threw = true; }
+    try {
+        f.jm.Submit(Job({Task("a", "a"), Task("a", "b")}));
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
     ASSERT_TRUE(threw);
     ASSERT_TRUE(f.fake->calls.empty());
 }
@@ -201,7 +215,7 @@ TEST(JobClearFinishedHidesDoneKeepsRunning) {
     r2.set_exit_code(0);
     exec->held.on_done(std::move(r2));
     Drain(jm, running_id);
-    ASSERT_EQ(jm.ListActive().size(), static_cast<size_t>(1));  // finished after the clear: listed
+    ASSERT_EQ(jm.ListActive().size(), static_cast<size_t>(1)); // finished after the clear: listed
 }
 
 TEST(JobListActiveOrdersWorkingBeforeDone) {
@@ -214,7 +228,7 @@ TEST(JobListActiveOrdersWorkingBeforeDone) {
     Drain(f.jm, second);
     auto rows = f.jm.ListActive();
     ASSERT_EQ(rows.size(), static_cast<size_t>(2));
-    ASSERT_EQ(rows[0].task_name(), std::string("b"));  // newer finished job first among done
+    ASSERT_EQ(rows[0].task_name(), std::string("b")); // newer finished job first among done
     ASSERT_EQ(rows[1].task_name(), std::string("a"));
     ASSERT_EQ(rows[0].state(), v1::SUCCEEDED);
     ASSERT_EQ(rows[1].state(), v1::SUCCEEDED);
@@ -256,7 +270,7 @@ TEST(JobCacheHitAndNoFalseHit) {
         if (ev.state() == v1::SUCCEEDED && ev.result().cache_hit()) hit = true;
     }
     ASSERT_TRUE(hit);
-    ASSERT_FALSE(f.jm.Get(second)->results().at("t").stdout().hash().empty());  // the real stored result
+    ASSERT_FALSE(f.jm.Get(second)->results().at("t").stdout().hash().empty()); // the real stored result
 
     f.jm.Submit(Job({Task("t", "b")}));
     ASSERT_EQ(f.fake->calls.size(), static_cast<size_t>(2));

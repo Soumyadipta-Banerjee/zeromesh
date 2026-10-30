@@ -50,7 +50,7 @@ int g_sigpipe[2] = {-1, -1};
 std::atomic<int> g_interrupts{0};
 
 void OnInterrupt(int) {
-    if (g_interrupts.fetch_add(1) >= 1) _exit(130);  // second Ctrl-C: give up at once
+    if (g_interrupts.fetch_add(1) >= 1) _exit(130); // second Ctrl-C: give up at once
     char c = 1;
     ssize_t n = write(g_sigpipe[1], &c, 1);
     (void)n;
@@ -63,7 +63,7 @@ public:
     CancelOnInterrupt(v1::ClientApi::Stub& stub, std::string job_id) {
         if (pipe2(g_sigpipe, O_CLOEXEC | O_NONBLOCK) != 0) return;
         done_ = eventfd(0, EFD_CLOEXEC);
-        struct sigaction sa {};
+        struct sigaction sa{};
         sa.sa_handler = OnInterrupt;
         sigemptyset(&sa.sa_mask);
         sigaction(SIGINT, &sa, &old_int_);
@@ -106,8 +106,8 @@ public:
 
 private:
     int done_{-1};
-    struct sigaction old_int_ {};
-    struct sigaction old_term_ {};
+    struct sigaction old_int_{};
+    struct sigaction old_term_{};
     std::thread thread_;
 };
 
@@ -179,8 +179,8 @@ std::string ReplaceBraces(std::string_view s, std::string_view replacement) {
     return out;
 }
 
-bool ExpandEachGlob(const std::string& pattern, const std::filesystem::path& cwd,
-                    std::vector<std::string>* matches, std::string* error) {
+bool ExpandEachGlob(const std::string& pattern, const std::filesystem::path& cwd, std::vector<std::string>* matches,
+                    std::string* error) {
     if (pattern.empty()) {
         *error = "--each needs a non-empty glob";
         return false;
@@ -188,7 +188,7 @@ bool ExpandEachGlob(const std::string& pattern, const std::filesystem::path& cwd
     const std::filesystem::path abs =
         (std::filesystem::path(pattern).is_absolute()) ? std::filesystem::path(pattern) : cwd / pattern;
 
-    glob_t g {};
+    glob_t g{};
     const int rc = glob(abs.c_str(), GLOB_NOSORT | GLOB_ERR, nullptr, &g);
     if (rc == GLOB_NOMATCH) {
         globfree(&g);
@@ -235,12 +235,18 @@ std::optional<int64_t> ParseSize(const std::string& s) {
     std::string unit;
     for (char c : s.substr(i)) unit.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
     double mult = 1;
-    if (unit.empty() || unit == "B") mult = 1;
-    else if (unit == "K" || unit == "KB" || unit == "KIB") mult = 1024.0;
-    else if (unit == "M" || unit == "MB" || unit == "MIB") mult = 1024.0 * 1024;
-    else if (unit == "G" || unit == "GB" || unit == "GIB") mult = 1024.0 * 1024 * 1024;
-    else if (unit == "T" || unit == "TB" || unit == "TIB") mult = 1024.0 * 1024 * 1024 * 1024;
-    else return std::nullopt;
+    if (unit.empty() || unit == "B")
+        mult = 1;
+    else if (unit == "K" || unit == "KB" || unit == "KIB")
+        mult = 1024.0;
+    else if (unit == "M" || unit == "MB" || unit == "MIB")
+        mult = 1024.0 * 1024;
+    else if (unit == "G" || unit == "GB" || unit == "GIB")
+        mult = 1024.0 * 1024 * 1024;
+    else if (unit == "T" || unit == "TB" || unit == "TIB")
+        mult = 1024.0 * 1024 * 1024 * 1024;
+    else
+        return std::nullopt;
     double bytes = v * mult;
     if (bytes > 9.0e18) return std::nullopt;
     return static_cast<int64_t>(bytes);
@@ -313,7 +319,7 @@ std::optional<RunOptions> ParseRunArgs(const std::vector<std::string>& args, std
             *error = "unknown option '" + a + "'";
             return std::nullopt;
         } else {
-            break;  // the command starts here (no "--")
+            break; // the command starts here (no "--")
         }
     }
     o.argv.assign(args.begin() + static_cast<std::ptrdiff_t>(std::min(i, args.size())), args.end());
@@ -364,12 +370,11 @@ int RunCommand(Client& client, const RunOptions& opts) {
 
     struct TaskSlot {
         std::string name;
-        std::string label;  // shown in failure lists (--each path, else "run")
+        std::string label; // shown in failure lists (--each path, else "run")
     };
     std::vector<TaskSlot> slots;
 
-    auto add_task = [&](const std::string& name, const std::string& label,
-                        const std::vector<std::string>& argv) {
+    auto add_task = [&](const std::string& name, const std::string& label, const std::vector<std::string>& argv) {
         v1::TaskSpec* t = job.add_tasks();
         t->set_name(name);
         for (const auto& a : argv) t->add_argv(a);

@@ -31,8 +31,7 @@ public:
  */
 class BlobSourceChunkSource final : public IChunkSource {
 public:
-    explicit BlobSourceChunkSource(plugin::IBlobSource* blob_source)
-        : blob_source_(blob_source) {}
+    explicit BlobSourceChunkSource(plugin::IBlobSource* blob_source) : blob_source_(blob_source) {}
 
     std::optional<std::string> FetchChunk(const std::string& hash) override {
         if (!blob_source_) return std::nullopt;
@@ -50,9 +49,7 @@ class MemoryChunkSource final : public IChunkSource {
 public:
     MemoryChunkSource() = default;
 
-    void Put(const std::string& hash, std::string data) {
-        chunks_[hash] = std::move(data);
-    }
+    void Put(const std::string& hash, std::string data) { chunks_[hash] = std::move(data); }
 
     std::optional<std::string> FetchChunk(const std::string& hash) override {
         auto it = chunks_.find(hash);
@@ -60,9 +57,7 @@ public:
         return std::nullopt;
     }
 
-    bool HasChunk(const std::string& hash) const {
-        return chunks_.contains(hash);
-    }
+    bool HasChunk(const std::string& hash) const { return chunks_.contains(hash); }
 
 private:
     std::unordered_map<std::string, std::string> chunks_;
@@ -73,8 +68,7 @@ private:
  */
 class CasChunkSource final : public IChunkSource {
 public:
-    explicit CasChunkSource(std::shared_ptr<store::CasStore> store)
-        : store_(std::move(store)) {}
+    explicit CasChunkSource(std::shared_ptr<store::CasStore> store) : store_(std::move(store)) {}
 
     std::optional<std::string> FetchChunk(const std::string& hash) override {
         if (!store_) return std::nullopt;

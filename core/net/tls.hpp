@@ -40,8 +40,7 @@ inline constexpr int kKeepaliveTimeoutMs = 10000;
 // A channel to "ip:port" with its own subchannel pool, so connections made under
 // different credentials (admission vs pinned) are never shared. With `keepalive`,
 // the channel sends the pings above, also while no call is active.
-std::shared_ptr<grpc::Channel> PeerChannel(const std::string& address,
-                                           std::shared_ptr<grpc::ChannelCredentials> creds,
+std::shared_ptr<grpc::Channel> PeerChannel(const std::string& address, std::shared_ptr<grpc::ChannelCredentials> creds,
                                            bool keepalive = false);
 
 // Server arguments that accept the client keepalive pings above (by default a gRPC

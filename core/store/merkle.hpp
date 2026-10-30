@@ -87,8 +87,8 @@ private:
                                    const IgnoreRules& rules, uint64_t* total_bytes);
     DirectoryManifest LoadManifest(const Digest& tree);
     Digest MergeTrees(const Digest& base, const Digest& item);
-    Digest OverlayRecursive(const Digest& base, const std::vector<std::string>& segs, size_t i,
-                            const Digest& item, bool item_is_tree, bool item_executable);
+    Digest OverlayRecursive(const Digest& base, const std::vector<std::string>& segs, size_t i, const Digest& item,
+                            bool item_is_tree, bool item_executable);
     bool MaterializeDirectoryRecursive(const Digest& dir_digest, const std::filesystem::path& current_path);
 
     std::shared_ptr<CasStore> store_;

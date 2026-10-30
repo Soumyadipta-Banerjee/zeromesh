@@ -6,7 +6,9 @@
 namespace {
 using Args = std::vector<std::string>;
 
-bool Has(const Args& a, const std::string& flag) { return std::find(a.begin(), a.end(), flag) != a.end(); }
+bool Has(const Args& a, const std::string& flag) {
+    return std::find(a.begin(), a.end(), flag) != a.end();
+}
 size_t Pos(const Args& a, const std::string& flag) {
     return static_cast<size_t>(std::find(a.begin(), a.end(), flag) - a.begin());
 }
@@ -37,10 +39,10 @@ TEST(BwrapShareNetwork) {
 TEST(BwrapMountOrderPreserved) {
     zeromesh::exec::BwrapBuilder b;
     b.AddReadOnlyBind("/usr", "/usr")
-     .AddSymlink("usr/bin", "/bin")
-     .AddTmpfs("/tmp")
-     .AddReadWriteBind("/scratch/work", "/work")
-     .SetBinary("/usr/bin/bwrap");
+        .AddSymlink("usr/bin", "/bin")
+        .AddTmpfs("/tmp")
+        .AddReadWriteBind("/scratch/work", "/work")
+        .SetBinary("/usr/bin/bwrap");
     auto args = b.Build({"true"});
     ASSERT_EQ(args[0], std::string("/usr/bin/bwrap"));
     auto ro = Pos(args, "--ro-bind");

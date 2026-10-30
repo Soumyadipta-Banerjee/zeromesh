@@ -42,7 +42,9 @@ unsigned Mod37(const std::array<uint8_t, 16>& v) {
     return r;
 }
 
-fs::path TeamPath(const fs::path& state_dir) { return state_dir / "team"; }
+fs::path TeamPath(const fs::path& state_dir) {
+    return state_dir / "team";
+}
 
 [[noreturn]] void ThrowErrno(const std::string& what) {
     throw std::system_error(errno, std::generic_category(), what);
@@ -159,8 +161,7 @@ void TeamFile::Save(const fs::path& state_dir, const TeamKey& key) {
     int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0) ThrowErrno("create " + tmp.string());
     const std::string body = FormatPhrase(key) + "\n";
-    bool ok = ::fchmod(fd, 0600) == 0 &&
-              ::write(fd, body.data(), body.size()) == static_cast<ssize_t>(body.size()) &&
+    bool ok = ::fchmod(fd, 0600) == 0 && ::write(fd, body.data(), body.size()) == static_cast<ssize_t>(body.size()) &&
               ::fsync(fd) == 0;
     int saved = errno;
     ::close(fd);

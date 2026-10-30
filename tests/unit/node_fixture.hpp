@@ -66,12 +66,9 @@ struct TestNodeFull {
     int port = 0;
 
     TestNodeFull(std::string name, net::TeamKey key)
-        : node_id(std::move(name)),
-          id(net::Identity::LoadOrCreate(dir / "state", node_id)),
-          pins(std::make_shared<net::PinStore>(dir / "state")),
-          team(key),
-          cas(std::make_shared<store::CasStore>(dir / "cas")),
-          merkle(std::make_shared<store::MerkleBuilder>(cas)),
+        : node_id(std::move(name)), id(net::Identity::LoadOrCreate(dir / "state", node_id)),
+          pins(std::make_shared<net::PinStore>(dir / "state")), team(key),
+          cas(std::make_shared<store::CasStore>(dir / "cas")), merkle(std::make_shared<store::MerkleBuilder>(cas)),
           registry(std::make_shared<plugin::Registry>()) {
         registry->RegisterEnv(envhost::Make());
         runner = std::make_shared<exec::SandboxRunner>(cas, merkle, dir / "scratch");

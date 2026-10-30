@@ -8,8 +8,7 @@
 namespace zeromesh::mirror {
 
 MirrorCache::MirrorCache(std::filesystem::path cache_dir, size_t max_bytes)
-    : cache_dir_(std::move(cache_dir))
-    , max_bytes_(max_bytes) {
+    : cache_dir_(std::move(cache_dir)), max_bytes_(max_bytes) {
     std::filesystem::create_directories(cache_dir_);
 
     // Rebuild LRU from existing cached files on startup.
@@ -23,18 +22,13 @@ MirrorCache::MirrorCache(std::filesystem::path cache_dir, size_t max_bytes)
 
         for (const auto& entry : std::filesystem::directory_iterator(cache_dir_)) {
             if (entry.is_regular_file()) {
-                existing.push_back({
-                    entry.path().filename().string(),
-                    static_cast<size_t>(entry.file_size()),
-                    entry.last_write_time()
-                });
+                existing.push_back({entry.path().filename().string(), static_cast<size_t>(entry.file_size()),
+                                    entry.last_write_time()});
             }
         }
 
         std::sort(existing.begin(), existing.end(),
-                  [](const CachedFile& a, const CachedFile& b) {
-                      return a.mtime < b.mtime;
-                  });
+                  [](const CachedFile& a, const CachedFile& b) { return a.mtime < b.mtime; });
 
         for (const auto& cf : existing) {
             CacheEntry ce{cf.hash, cf.size};

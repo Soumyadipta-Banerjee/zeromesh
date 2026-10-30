@@ -9,9 +9,9 @@
 namespace zeromesh::node {
 
 struct TaskCallbacks {
-    std::function<void(v1::TaskState, std::string detail)> on_state;  // non-terminal states only
-    std::function<void(int fd, std::string_view chunk)> on_log;       // fd 1 = stdout, 2 = stderr
-    std::function<void(v1::TaskResult)> on_done;                      // exactly once per Execute
+    std::function<void(v1::TaskState, std::string detail)> on_state; // non-terminal states only
+    std::function<void(int fd, std::string_view chunk)> on_log;      // fd 1 = stdout, 2 = stderr
+    std::function<void(v1::TaskResult)> on_done;                     // exactly once per Execute
 };
 
 // Runs tasks somewhere. Execute is asynchronous (an implementation may also finish synchronously)

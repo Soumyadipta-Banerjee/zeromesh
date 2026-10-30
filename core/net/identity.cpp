@@ -29,18 +29,30 @@ namespace fs = std::filesystem;
 constexpr int kValidityDays = 3650;
 constexpr int kSerialBytes = 16;
 
-struct BioFree { void operator()(BIO* b) const { BIO_free(b); } };
-struct X509Free { void operator()(X509* x) const { X509_free(x); } };
-struct PkeyFree { void operator()(EVP_PKEY* k) const { EVP_PKEY_free(k); } };
-struct BnFree { void operator()(BIGNUM* b) const { BN_free(b); } };
-struct ExtFree { void operator()(X509_EXTENSION* e) const { X509_EXTENSION_free(e); } };
+struct BioFree {
+    void operator()(BIO* b) const { BIO_free(b); }
+};
+struct X509Free {
+    void operator()(X509* x) const { X509_free(x); }
+};
+struct PkeyFree {
+    void operator()(EVP_PKEY* k) const { EVP_PKEY_free(k); }
+};
+struct BnFree {
+    void operator()(BIGNUM* b) const { BN_free(b); }
+};
+struct ExtFree {
+    void operator()(X509_EXTENSION* e) const { X509_EXTENSION_free(e); }
+};
 using BioPtr = std::unique_ptr<BIO, BioFree>;
 using X509Ptr = std::unique_ptr<X509, X509Free>;
 using PkeyPtr = std::unique_ptr<EVP_PKEY, PkeyFree>;
 using BnPtr = std::unique_ptr<BIGNUM, BnFree>;
 using ExtPtr = std::unique_ptr<X509_EXTENSION, ExtFree>;
 
-[[noreturn]] void SslFail(const std::string& what) { throw std::runtime_error("identity: " + what); }
+[[noreturn]] void SslFail(const std::string& what) {
+    throw std::runtime_error("identity: " + what);
+}
 
 void Check(int ok, const char* what) {
     if (ok != 1) SslFail(what);
@@ -160,8 +172,8 @@ bool IsFingerprint(std::string_view fp) {
 bool IsValidNodeId(std::string_view id) {
     if (id.empty() || id.size() > 64) return false;
     for (char c : id) {
-        bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  c == '.' || c == '_' || c == '-';
+        bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '_' ||
+                  c == '-';
         if (!ok) return false;
     }
     return true;
@@ -182,8 +194,10 @@ void WritePrivateFileAtomic(const fs::path& path, std::string_view content) {
     while (ok && off < content.size()) {
         ssize_t n = ::write(fd, content.data() + off, content.size() - off);
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) ok = false;
-        else off += static_cast<size_t>(n);
+        if (n <= 0)
+            ok = false;
+        else
+            off += static_cast<size_t>(n);
     }
     ok = ok && ::fsync(fd) == 0;
     int saved = errno;

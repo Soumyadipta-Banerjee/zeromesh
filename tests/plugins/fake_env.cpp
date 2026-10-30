@@ -20,7 +20,9 @@ public:
     void Release(const zeromesh::plugin::TaskContext&) override {}
 };
 
-zeromesh::plugin::IEnvProvider* MakeFake() { return new FakeEnv(); }
+zeromesh::plugin::IEnvProvider* MakeFake() {
+    return new FakeEnv();
+}
 
 const zeromesh::plugin::PluginEntry kEntry{
     .abi_major = FAKE_ABI,
@@ -31,4 +33,6 @@ const zeromesh::plugin::PluginEntry kEntry{
 
 } // namespace
 
-extern "C" const zeromesh::plugin::PluginEntry* zm_plugin_entry() { return &kEntry; }
+extern "C" const zeromesh::plugin::PluginEntry* zm_plugin_entry() {
+    return &kEntry;
+}

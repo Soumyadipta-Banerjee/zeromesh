@@ -157,8 +157,8 @@ int FuseGetattr(const char* path, struct stat* stbuf, struct fuse_file_info* fi)
     return 0;
 }
 
-int FuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler,
-                off_t offset, struct fuse_file_info* fi, enum fuse_readdir_flags flags) {
+int FuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi,
+                enum fuse_readdir_flags flags) {
     (void)offset;
     (void)fi;
     (void)flags;
@@ -247,46 +247,63 @@ int FuseReadlink(const char* path, char* buf, size_t size) {
 }
 
 // All modifying operations strictly return -EROFS
-int FuseWrite(const char*, const char*, size_t, off_t, struct fuse_file_info*) { return -EROFS; }
-int FuseCreate(const char*, mode_t, struct fuse_file_info*) { return -EROFS; }
-int FuseMkdir(const char*, mode_t) { return -EROFS; }
-int FuseUnlink(const char*) { return -EROFS; }
-int FuseRmdir(const char*) { return -EROFS; }
-int FuseRename(const char*, const char*, unsigned int) { return -EROFS; }
-int FuseTruncate(const char*, off_t, struct fuse_file_info*) { return -EROFS; }
-int FuseChmod(const char*, mode_t, struct fuse_file_info*) { return -EROFS; }
-int FuseChown(const char*, uid_t, gid_t, struct fuse_file_info*) { return -EROFS; }
-int FuseUtimens(const char*, const struct timespec[2], struct fuse_file_info*) { return -EROFS; }
+int FuseWrite(const char*, const char*, size_t, off_t, struct fuse_file_info*) {
+    return -EROFS;
+}
+int FuseCreate(const char*, mode_t, struct fuse_file_info*) {
+    return -EROFS;
+}
+int FuseMkdir(const char*, mode_t) {
+    return -EROFS;
+}
+int FuseUnlink(const char*) {
+    return -EROFS;
+}
+int FuseRmdir(const char*) {
+    return -EROFS;
+}
+int FuseRename(const char*, const char*, unsigned int) {
+    return -EROFS;
+}
+int FuseTruncate(const char*, off_t, struct fuse_file_info*) {
+    return -EROFS;
+}
+int FuseChmod(const char*, mode_t, struct fuse_file_info*) {
+    return -EROFS;
+}
+int FuseChown(const char*, uid_t, gid_t, struct fuse_file_info*) {
+    return -EROFS;
+}
+int FuseUtimens(const char*, const struct timespec[2], struct fuse_file_info*) {
+    return -EROFS;
+}
 
 struct fuse_operations MakeFuseOps() {
     struct fuse_operations ops{};
-    ops.getattr  = FuseGetattr;
-    ops.readdir  = FuseReaddir;
-    ops.open     = FuseOpen;
-    ops.read     = FuseRead;
+    ops.getattr = FuseGetattr;
+    ops.readdir = FuseReaddir;
+    ops.open = FuseOpen;
+    ops.read = FuseRead;
     ops.readlink = FuseReadlink;
-    ops.write    = FuseWrite;
-    ops.create   = FuseCreate;
-    ops.mkdir    = FuseMkdir;
-    ops.unlink   = FuseUnlink;
-    ops.rmdir    = FuseRmdir;
-    ops.rename   = FuseRename;
+    ops.write = FuseWrite;
+    ops.create = FuseCreate;
+    ops.mkdir = FuseMkdir;
+    ops.unlink = FuseUnlink;
+    ops.rmdir = FuseRmdir;
+    ops.rename = FuseRename;
     ops.truncate = FuseTruncate;
-    ops.chmod    = FuseChmod;
-    ops.chown    = FuseChown;
-    ops.utimens  = FuseUtimens;
+    ops.chmod = FuseChmod;
+    ops.chown = FuseChown;
+    ops.utimens = FuseUtimens;
     return ops;
 }
 
 } // namespace
 
-MirrorFuse::MirrorFuse(std::filesystem::path mount_point,
-                       std::shared_ptr<IChunkSource> chunk_source,
+MirrorFuse::MirrorFuse(std::filesystem::path mount_point, std::shared_ptr<IChunkSource> chunk_source,
                        std::shared_ptr<MirrorCache> cache)
-    : mount_point_(std::move(mount_point))
-    , chunk_source_(std::move(chunk_source))
-    , cache_(std::move(cache))
-    , impl_(std::make_unique<Impl>()) {
+    : mount_point_(std::move(mount_point)), chunk_source_(std::move(chunk_source)), cache_(std::move(cache)),
+      impl_(std::make_unique<Impl>()) {
     impl_->mount_point = mount_point_;
     impl_->chunk_source = chunk_source_;
     impl_->cache = cache_;
@@ -385,9 +402,7 @@ bool MirrorFuse::MountWithRoot(std::shared_ptr<VirtualNode> root_node) {
     }
 
     impl_->mounted.store(true);
-    impl_->fuse_thread = std::thread([this]() {
-        fuse_loop(impl_->fuse_handle);
-    });
+    impl_->fuse_thread = std::thread([this]() { fuse_loop(impl_->fuse_handle); });
 
     // Wait briefly for mount to settle
     for (int i = 0; i < 50; ++i) {

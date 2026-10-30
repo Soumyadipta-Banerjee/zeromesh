@@ -7,11 +7,11 @@ namespace zeromesh::node {
 
 // Paths and ports of one zmd instance (Global Constraints / spec §12).
 struct DaemonConfig {
-    std::filesystem::path state_dir;    // node id, CAS at cas/, scratch at scratch/
-    std::filesystem::path runtime_dir;  // zmd.sock
-    std::filesystem::path config_dir;   // donor.toml (Task 17)
-    int node_port{8981};                // NodeApi TCP port (Task 17)
-    int discovery_port{8988};           // discovery multicast UDP port (Task 17)
+    std::filesystem::path state_dir;   // node id, CAS at cas/, scratch at scratch/
+    std::filesystem::path runtime_dir; // zmd.sock
+    std::filesystem::path config_dir;  // donor.toml (Task 17)
+    int node_port{8981};               // NodeApi TCP port (Task 17)
+    int discovery_port{8988};          // discovery multicast UDP port (Task 17)
 
     // Resolved from the environment:
     //   ZM_STATE_DIR      default ~/.local/share/zeromesh
@@ -48,7 +48,7 @@ public:
 
 private:
     DaemonConfig config_;
-    int wake_fd_{-1};  // eventfd written by Shutdown()
+    int wake_fd_{-1}; // eventfd written by Shutdown()
 };
 
 } // namespace zeromesh::node

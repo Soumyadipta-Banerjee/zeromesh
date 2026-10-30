@@ -6,17 +6,15 @@
 TEST(PeerTable_UpsertAndRetrieve) {
     zeromesh::net::PeerTable table;
 
-    zeromesh::net::Peer p1{
-        .id = "node-alpha",
-        .hostname = "laptop-1",
-        .ip_address = "192.168.1.50",
-        .grpc_port = 8980,
-        .cores = 8,
-        .memory_bytes = 16ULL * 1024 * 1024 * 1024,
-        .cpu_load_pct = 15.0,
-        .battery_pct = 95,
-        .is_charging = true
-    };
+    zeromesh::net::Peer p1{.id = "node-alpha",
+                           .hostname = "laptop-1",
+                           .ip_address = "192.168.1.50",
+                           .grpc_port = 8980,
+                           .cores = 8,
+                           .memory_bytes = 16ULL * 1024 * 1024 * 1024,
+                           .cpu_load_pct = 15.0,
+                           .battery_pct = 95,
+                           .is_charging = true};
 
     table.Upsert(p1);
     ASSERT_EQ(table.Count(), 1);
@@ -45,7 +43,7 @@ TEST(PeerTable_MeasuredLatencySurvivesUpsert) {
     table.RecordMeasuredLatency("node-beta", std::chrono::milliseconds(42));
     ASSERT_EQ(table.Get("node-beta")->latency, std::chrono::milliseconds(42));
 
-    p.latency = std::chrono::milliseconds(1);  // discovery placeholder
+    p.latency = std::chrono::milliseconds(1); // discovery placeholder
     p.cores = 16;
     table.Upsert(p);
     ASSERT_EQ(table.Get("node-beta")->latency, std::chrono::milliseconds(42));
@@ -55,16 +53,14 @@ TEST(PeerTable_MeasuredLatencySurvivesUpsert) {
 TEST(PeerTable_FastPreemptionSignal) {
     zeromesh::net::PeerTable table;
 
-    table.Upsert(zeromesh::net::Peer{
-        .id = "node-donor",
-        .hostname = "donor-laptop",
-        .ip_address = "192.168.1.100",
-        .grpc_port = 8980,
-        .cores = 8,
-        .cpu_load_pct = 20.0,
-        .battery_pct = 80,
-        .is_charging = true
-    });
+    table.Upsert(zeromesh::net::Peer{.id = "node-donor",
+                                     .hostname = "donor-laptop",
+                                     .ip_address = "192.168.1.100",
+                                     .grpc_port = 8980,
+                                     .cores = 8,
+                                     .cpu_load_pct = 20.0,
+                                     .battery_pct = 80,
+                                     .is_charging = true});
 
     bool callback_fired = false;
     std::string drained_id;

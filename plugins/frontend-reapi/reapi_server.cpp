@@ -37,7 +37,9 @@ static reapi::Digest ToReapi(const zm::Digest& d) {
 }
 
 ReapiServer::ReapiServer(plugin::ClientApiHandle& api) : api_(api) {}
-ReapiServer::~ReapiServer() { Stop(); }
+ReapiServer::~ReapiServer() {
+    Stop();
+}
 
 bool ReapiServer::Start() {
     cas_ = std::make_shared<CasServiceImpl>(api_);
@@ -47,7 +49,10 @@ bool ReapiServer::Start() {
     caps_ = std::make_shared<CapabilitiesServiceImpl>();
     int port = 8980;
     if (const char* p = std::getenv("ZM_REAPI_PORT")) {
-        try { port = std::stoi(p); } catch (...) {}
+        try {
+            port = std::stoi(p);
+        } catch (...) {
+        }
     }
     grpc::ServerBuilder builder;
     builder.AddListeningPort("127.0.0.1:" + std::to_string(port), grpc::InsecureServerCredentials());
@@ -70,9 +75,8 @@ void ReapiServer::Stop() {
 
 // ---- ContentAddressableStorage ----
 
-grpc::Status CasServiceImpl::FindMissingBlobs(grpc::ServerContext*,
-    const reapi::FindMissingBlobsRequest* req,
-    reapi::FindMissingBlobsResponse* resp) {
+grpc::Status CasServiceImpl::FindMissingBlobs(grpc::ServerContext*, const reapi::FindMissingBlobsRequest* req,
+                                              reapi::FindMissingBlobsResponse* resp) {
     zm::Digests zreq;
     for (const auto& d : req->blob_digests()) {
         *zreq.add_digests() = ToZm(d);
@@ -89,9 +93,8 @@ grpc::Status CasServiceImpl::FindMissingBlobs(grpc::ServerContext*,
     return grpc::Status::OK;
 }
 
-grpc::Status CasServiceImpl::BatchUpdateBlobs(grpc::ServerContext*,
-    const reapi::BatchUpdateBlobsRequest* req,
-    reapi::BatchUpdateBlobsResponse* resp) {
+grpc::Status CasServiceImpl::BatchUpdateBlobs(grpc::ServerContext*, const reapi::BatchUpdateBlobsRequest* req,
+                                              reapi::BatchUpdateBlobsResponse* resp) {
     grpc::ClientContext ctx;
     zm::PutObjectsReply reply;
     auto writer = api_.stub().PutObjects(&ctx, &reply);
@@ -117,9 +120,8 @@ grpc::Status CasServiceImpl::BatchUpdateBlobs(grpc::ServerContext*,
     return grpc::Status::OK;
 }
 
-grpc::Status CasServiceImpl::BatchReadBlobs(grpc::ServerContext*,
-    const reapi::BatchReadBlobsRequest* req,
-    reapi::BatchReadBlobsResponse* resp) {
+grpc::Status CasServiceImpl::BatchReadBlobs(grpc::ServerContext*, const reapi::BatchReadBlobsRequest* req,
+                                            reapi::BatchReadBlobsResponse* resp) {
     std::cerr << "[frontend-reapi] BatchReadBlobs called with " << req->digests_size() << " digests\n";
     if (req->digests().empty()) return grpc::Status::OK;
 
@@ -187,9 +189,8 @@ grpc::Status CasServiceImpl::BatchReadBlobs(grpc::ServerContext*,
     return grpc::Status::OK;
 }
 
-grpc::Status CasServiceImpl::GetTree(grpc::ServerContext*,
-    const reapi::GetTreeRequest* req,
-    reapi::GetTreeResponse* resp) {
+grpc::Status CasServiceImpl::GetTree(grpc::ServerContext*, const reapi::GetTreeRequest* req,
+                                     reapi::GetTreeResponse* resp) {
     if (!req->has_root_digest() || req->root_digest().hash().empty()) {
         return grpc::Status::OK;
     }
@@ -222,8 +223,8 @@ grpc::Status CasServiceImpl::GetTree(grpc::ServerContext*,
 
 // ---- ActionCache ----
 
-grpc::Status ActionCacheServiceImpl::GetActionResult(grpc::ServerContext*,
-    const reapi::GetActionResultRequest* req, reapi::ActionResult* resp) {
+grpc::Status ActionCacheServiceImpl::GetActionResult(grpc::ServerContext*, const reapi::GetActionResultRequest* req,
+                                                     reapi::ActionResult* resp) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = cache_.find(req->action_digest().hash());
     if (it == cache_.end()) {
@@ -234,7 +235,8 @@ grpc::Status ActionCacheServiceImpl::GetActionResult(grpc::ServerContext*,
 }
 
 grpc::Status ActionCacheServiceImpl::UpdateActionResult(grpc::ServerContext*,
-    const reapi::UpdateActionResultRequest* req, reapi::ActionResult* resp) {
+                                                        const reapi::UpdateActionResultRequest* req,
+                                                        reapi::ActionResult* resp) {
     std::lock_guard<std::mutex> lk(mu_);
     cache_[req->action_digest().hash()] = req->action_result();
     *resp = req->action_result();
@@ -253,7 +255,10 @@ std::string ExecutionServiceImpl::FetchBlob(const reapi::Digest& d) {
     zm::Chunk chunk;
     while (reader->Read(&chunk)) {
         cur += chunk.data();
-        if (chunk.last()) { out += cur; cur.clear(); }
+        if (chunk.last()) {
+            out += cur;
+            cur.clear();
+        }
     }
     reader->Finish();
     return out;
@@ -275,14 +280,13 @@ void ExecutionServiceImpl::MaterializeDir(const reapi::Digest& dirDigest, const 
     std::string bytes = FetchBlob(dirDigest);
     reapi::Directory dir;
     if (!dir.ParseFromString(bytes)) {
-        std::cerr << "[frontend-reapi] failed to parse Directory for " << dirDigest.hash() << " (bytes=" << bytes.size() << ")\n";
+        std::cerr << "[frontend-reapi] failed to parse Directory for " << dirDigest.hash() << " (bytes=" << bytes.size()
+                  << ")\n";
         return;
     }
     std::filesystem::create_directories(base);
-    std::cerr << "[frontend-reapi] MaterializeDir at " << base.string()
-              << " files=" << dir.files_size()
-              << " dirs=" << dir.directories_size()
-              << " symlinks=" << dir.symlinks_size() << "\n";
+    std::cerr << "[frontend-reapi] MaterializeDir at " << base.string() << " files=" << dir.files_size()
+              << " dirs=" << dir.directories_size() << " symlinks=" << dir.symlinks_size() << "\n";
     for (const auto& f : dir.files()) {
         if (!SafeEntryName(f.name())) {
             std::cerr << "[frontend-reapi] refusing unsafe file name '" << f.name() << "'\n";
@@ -295,8 +299,7 @@ void ExecutionServiceImpl::MaterializeDir(const reapi::Digest& dirDigest, const 
         ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
         ofs.close();
         if (f.is_executable()) {
-            std::filesystem::permissions(p, std::filesystem::perms::owner_exec,
-                std::filesystem::perm_options::add);
+            std::filesystem::permissions(p, std::filesystem::perms::owner_exec, std::filesystem::perm_options::add);
         }
     }
     for (const auto& sd : dir.directories()) {
@@ -323,8 +326,8 @@ void ExecutionServiceImpl::MaterializeDir(const reapi::Digest& dirDigest, const 
     }
 }
 
-grpc::Status ExecutionServiceImpl::Execute(grpc::ServerContext*,
-    const reapi::ExecuteRequest* req, grpc::ServerWriter<reapi::Operation>* writer) {
+grpc::Status ExecutionServiceImpl::Execute(grpc::ServerContext*, const reapi::ExecuteRequest* req,
+                                           grpc::ServerWriter<reapi::Operation>* writer) {
     reapi::Operation op;
     op.set_name("operations/" + req->action_digest().hash());
 
@@ -411,7 +414,6 @@ grpc::Status ExecutionServiceImpl::Execute(grpc::ServerContext*,
     rs->set_mem_bytes(0);
     rs->set_arch("");
 
-
     bool critical = IsCriticalPath(argv);
     zm::Policy* pol = spec.mutable_policy();
     pol->set_may_run_local(critical);
@@ -450,12 +452,9 @@ grpc::Status ExecutionServiceImpl::Execute(grpc::ServerContext*,
     }
     reader->Finish();
 
-    std::cerr << "[frontend-reapi] task " << (argv.empty() ? "" : argv[0])
-              << " critical=" << critical
-              << " executed_by=" << result.executed_by()
-              << " exit=" << result.exit_code()
-              << " error=" << result.error()
-              << " stderr=" << result.stderr_head() << "\n";
+    std::cerr << "[frontend-reapi] task " << (argv.empty() ? "" : argv[0]) << " critical=" << critical
+              << " executed_by=" << result.executed_by() << " exit=" << result.exit_code()
+              << " error=" << result.error() << " stderr=" << result.stderr_head() << "\n";
 
     // Build ActionResult.
     reapi::ActionResult ar;
@@ -463,7 +462,8 @@ grpc::Status ExecutionServiceImpl::Execute(grpc::ServerContext*,
     if (!result.stdout().hash().empty()) *ar.mutable_stdout_digest() = ToReapi(result.stdout());
     if (!result.stderr().hash().empty()) *ar.mutable_stderr_digest() = ToReapi(result.stderr());
     for (const auto& o : result.outputs()) {
-        std::cerr << "[frontend-reapi] OUT: " << o.path() << " digest=" << o.digest().hash() << " size=" << o.digest().size_bytes() << "\n";
+        std::cerr << "[frontend-reapi] OUT: " << o.path() << " digest=" << o.digest().hash()
+                  << " size=" << o.digest().size_bytes() << "\n";
         if (o.is_dir()) {
             auto* od = ar.add_output_directories();
             od->set_path(o.path());
@@ -496,8 +496,8 @@ grpc::Status ExecutionServiceImpl::Execute(grpc::ServerContext*,
     return grpc::Status::OK;
 }
 
-grpc::Status ExecutionServiceImpl::WaitExecution(grpc::ServerContext*,
-    const reapi::WaitExecutionRequest* req, grpc::ServerWriter<reapi::Operation>* writer) {
+grpc::Status ExecutionServiceImpl::WaitExecution(grpc::ServerContext*, const reapi::WaitExecutionRequest* req,
+                                                 grpc::ServerWriter<reapi::Operation>* writer) {
     reapi::Operation op;
     op.set_name(req->name());
     op.set_done(true);
@@ -528,9 +528,8 @@ static bool ParseResourceName(std::string_view res, std::string* hash, int64_t* 
     return true;
 }
 
-grpc::Status ByteStreamServiceImpl::Read(grpc::ServerContext*,
-    const google::bytestream::ReadRequest* req,
-    grpc::ServerWriter<google::bytestream::ReadResponse>* writer) {
+grpc::Status ByteStreamServiceImpl::Read(grpc::ServerContext*, const google::bytestream::ReadRequest* req,
+                                         grpc::ServerWriter<google::bytestream::ReadResponse>* writer) {
     std::cerr << "[frontend-reapi] ByteStream::Read req: " << req->resource_name() << "\n";
     std::string hash;
     int64_t size = 0;
@@ -566,8 +565,8 @@ grpc::Status ByteStreamServiceImpl::Read(grpc::ServerContext*,
 }
 
 grpc::Status ByteStreamServiceImpl::Write(grpc::ServerContext*,
-    grpc::ServerReader<google::bytestream::WriteRequest>* reader,
-    google::bytestream::WriteResponse* resp) {
+                                          grpc::ServerReader<google::bytestream::WriteRequest>* reader,
+                                          google::bytestream::WriteResponse* resp) {
     google::bytestream::WriteRequest req;
     std::string hash;
     int64_t size = 0;
@@ -604,8 +603,8 @@ grpc::Status ByteStreamServiceImpl::Write(grpc::ServerContext*,
 }
 
 grpc::Status ByteStreamServiceImpl::QueryWriteStatus(grpc::ServerContext*,
-    const google::bytestream::QueryWriteStatusRequest* req,
-    google::bytestream::QueryWriteStatusResponse* resp) {
+                                                     const google::bytestream::QueryWriteStatusRequest* req,
+                                                     google::bytestream::QueryWriteStatusResponse* resp) {
     std::string hash;
     int64_t size = 0;
     ParseResourceName(req->resource_name(), &hash, &size);
@@ -616,9 +615,8 @@ grpc::Status ByteStreamServiceImpl::QueryWriteStatus(grpc::ServerContext*,
 
 // ---- Capabilities ----
 
-grpc::Status CapabilitiesServiceImpl::GetCapabilities(grpc::ServerContext*,
-    const reapi::GetCapabilitiesRequest*,
-    reapi::ServerCapabilities* resp) {
+grpc::Status CapabilitiesServiceImpl::GetCapabilities(grpc::ServerContext*, const reapi::GetCapabilitiesRequest*,
+                                                      reapi::ServerCapabilities* resp) {
     auto* cc = resp->mutable_cache_capabilities();
     cc->add_digest_functions(reapi::DigestFunction::SHA256);
     cc->mutable_action_cache_update_capabilities()->set_update_enabled(true);

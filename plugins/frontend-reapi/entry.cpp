@@ -7,9 +7,7 @@ extern "C" const zeromesh::plugin::PluginEntry* zm_plugin_entry() {
         zeromesh::plugin::kAbiMajor,
         "frontend-reapi",
         nullptr, // make_env
-        []() -> zeromesh::plugin::IFrontend* {
-            return new zeromesh::frontend_reapi::Frontend();
-        },
+        []() -> zeromesh::plugin::IFrontend* { return new zeromesh::frontend_reapi::Frontend(); },
     };
     return &entry;
 }

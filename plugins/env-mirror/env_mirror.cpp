@@ -30,7 +30,9 @@ std::string RootDigestFromParams(const std::map<std::string, std::string>& param
     return {};
 }
 
-std::string RootDigest(const plugin::TaskContext& ctx) { return RootDigestFromParams(ctx.env.params); }
+std::string RootDigest(const plugin::TaskContext& ctx) {
+    return RootDigestFromParams(ctx.env.params);
+}
 
 class MirrorEnv final : public plugin::IEnvProvider {
 public:
@@ -78,8 +80,7 @@ public:
             return {.value = std::nullopt, .error = "mirror env has no root_digest"};
         }
         if (!ctx.blob_source) {
-            return {.value = std::nullopt,
-                    .error = "mirror env has no blob source to fetch files from the requester"};
+            return {.value = std::nullopt, .error = "mirror env has no blob source to fetch files from the requester"};
         }
 
         fs::path base_scratch = MirrorScratchBase(ctx);

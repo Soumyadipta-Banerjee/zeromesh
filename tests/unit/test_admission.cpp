@@ -39,16 +39,15 @@ struct TestNode {
     int port = 0;
 
     TestNode(std::string name, TeamKey key)
-        : node_id(std::move(name)),
-          id(Identity::LoadOrCreate(dir.path(), node_id)),
-          pins(std::make_shared<PinStore>(dir.path())),
-          team(key) {}
+        : node_id(std::move(name)), id(Identity::LoadOrCreate(dir.path(), node_id)),
+          pins(std::make_shared<PinStore>(dir.path())), team(key) {}
 
     ~TestNode() { Stop(); }
 
     void Start(int want_port = 0) {
         service = std::make_unique<NodeService>(
-            node_id, pins, [k = team] { return std::optional<TeamKey>(k); }, id.fingerprint, [n = node_id] {
+            node_id, pins, [k = team] { return std::optional<TeamKey>(k); }, id.fingerprint,
+            [n = node_id] {
                 zeromesh::v1::PeerInfo info;
                 info.set_node_id(n);
                 return info;
@@ -75,8 +74,8 @@ struct TestNode {
 // Calls Ping on `peer` through a channel that accepts any server certificate, so the
 // result shows only the server-side pin gate.
 grpc::StatusCode RawPing(const TestNode& from, const TestNode& peer) {
-    auto channel = zeromesh::net::PeerChannel(peer.address(),
-                                              zeromesh::net::ClientCreds(from.id, [](std::string_view) { return true; }));
+    auto channel = zeromesh::net::PeerChannel(
+        peer.address(), zeromesh::net::ClientCreds(from.id, [](std::string_view) { return true; }));
     auto stub = zeromesh::v1::NodeApi::NewStub(channel);
     grpc::ClientContext ctx;
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));

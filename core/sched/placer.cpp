@@ -72,13 +72,13 @@ struct Placer::Task {
     v1::TaskSpec spec;
     node::TaskCallbacks cb;
     std::atomic<bool> cancelled{false};       // user/job cancel: final
-    std::atomic<bool> drain_preempted{false};  // donor drain: retryable cancel
+    std::atomic<bool> drain_preempted{false}; // donor drain: retryable cancel
     std::atomic<bool> finished{false};
     std::atomic<bool> worker_done{false};
 
     std::mutex mu;
     bool is_local{false};
-    std::string assigned_node;  // node currently reserved / running
+    std::string assigned_node; // node currently reserved / running
     std::shared_ptr<node::NodeClient> client;
 
     bool IsLocal() {
@@ -95,7 +95,7 @@ struct Placer::Task {
 struct Placer::Shared {
     std::mutex mu;
     std::map<std::string, std::shared_ptr<Task>> tasks;
-    std::map<std::string, int> in_flight;  // node id -> tasks we run there
+    std::map<std::string, int> in_flight; // node id -> tasks we run there
 
     int InFlightLocked(const std::string& node) const {
         auto it = in_flight.find(node);
@@ -112,22 +112,15 @@ struct Placer::Shared {
     }
 };
 
-Placer::Placer(std::shared_ptr<node::LocalExecutor> local, std::shared_ptr<net::PeerTable> peers,
-               ClientFactory factory, std::shared_ptr<store::CasStore> cas,
-               std::shared_ptr<store::MerkleBuilder> merkle, std::string local_node_id,
-               std::function<net::Telemetry()> telemetry)
-    : local_(std::move(local)),
-      peers_(std::move(peers)),
-      factory_(std::move(factory)),
-      cas_(std::move(cas)),
-      merkle_(std::move(merkle)),
-      local_id_(std::move(local_node_id)),
-      telemetry_(std::move(telemetry)),
+Placer::Placer(std::shared_ptr<node::LocalExecutor> local, std::shared_ptr<net::PeerTable> peers, ClientFactory factory,
+               std::shared_ptr<store::CasStore> cas, std::shared_ptr<store::MerkleBuilder> merkle,
+               std::string local_node_id, std::function<net::Telemetry()> telemetry)
+    : local_(std::move(local)), peers_(std::move(peers)), factory_(std::move(factory)), cas_(std::move(cas)),
+      merkle_(std::move(merkle)), local_id_(std::move(local_node_id)), telemetry_(std::move(telemetry)),
       shared_(std::make_shared<Shared>()) {
     if (!peers_ || !factory_ || !cas_ || !merkle_) throw std::invalid_argument("Placer: missing dependency");
-    peers_->RegisterPreemptCallback([this](const std::string& node_id, const std::string& reason) {
-        OnPeerDrain(node_id, reason);
-    });
+    peers_->RegisterPreemptCallback(
+        [this](const std::string& node_id, const std::string& reason) { OnPeerDrain(node_id, reason); });
 }
 
 int64_t Placer::InputTreeBytes(const v1::TaskSpec& spec) const {
@@ -164,8 +157,7 @@ void Placer::NoteInputsPushed(const std::string& node_id, const std::string& inp
     std::lock_guard lock(push_cache_mu_);
     int64_t prev = 0;
     if (auto it = push_cache_.find(key); it != push_cache_.end()) prev = it->second;
-    const int64_t on_peer =
-        std::min(total_bytes, prev + std::max<int64_t>(0, bytes_pushed));
+    const int64_t on_peer = std::min(total_bytes, prev + std::max<int64_t>(0, bytes_pushed));
     push_cache_[key] = on_peer;
     push_cache_lru_.remove(key);
     push_cache_lru_.push_front(key);
@@ -354,9 +346,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     if (spec.resources().arch().empty() && !self.arch.empty()) spec.mutable_resources()->set_arch(self.arch);
 
     const int max_retries = MaxRetries(spec);
-    int attempt = 0;  // completed failed attempts that consumed a retry
-    std::unordered_set<std::string> skip;   // nodes skipped after a retryable infra failure
-    std::unordered_set<std::string> tried;  // nodes already offered this placement round
+    int attempt = 0;                       // completed failed attempts that consumed a retry
+    std::unordered_set<std::string> skip;  // nodes skipped after a retryable infra failure
+    std::unordered_set<std::string> tried; // nodes already offered this placement round
     // Nodes that lacked the command, and when they may be offered again.
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> missing_until;
     auto lacks_command = [&](const std::string& id) {
@@ -364,7 +356,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         return it != missing_until.end() && std::chrono::steady_clock::now() < it->second;
     };
     std::string last_reason = "no eligible nodes";
-    std::optional<v1::TaskResult> last_attempt_result;  // last real run, if any
+    std::optional<v1::TaskResult> last_attempt_result; // last real run, if any
     std::optional<std::vector<v1::Digest>> needed;
     const std::string input_root_hash = spec.input_root().hash();
     const int64_t input_tree_bytes = InputTreeBytes(spec);
@@ -378,9 +370,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         task->is_local = false;
     };
 
-    auto blocked = [&](const std::string& id) {
-        return skip.contains(id) || tried.contains(id) || lacks_command(id);
-    };
+    auto blocked = [&](const std::string& id) { return skip.contains(id) || tried.contains(id) || lacks_command(id); };
 
     auto reserve_next = [&]() -> std::optional<Reservation> {
         std::lock_guard lock(shared_->mu);
@@ -400,18 +390,18 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         }
         for (const auto& p : peers_->ListActive()) {
             if (p.id == local_id_ || blocked(p.id)) continue;
-            candidates.push_back(Candidate{.node_id = p.id,
-                                           .is_local = false,
-                                           .cores_total = p.cores,
-                                           .cores_free = p.cores_free,
-                                           .mem_available = p.mem_available,
-                                           .cpu_load_pct = p.cpu_load_pct,
-                                           .on_ac = p.is_charging,
-                                           .arch = p.arch,
-                                           .latency = p.latency,
-                                           .missing_bytes =
-                                               EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
-                                           .in_flight = shared_->InFlightLocked(p.id)});
+            candidates.push_back(
+                Candidate{.node_id = p.id,
+                          .is_local = false,
+                          .cores_total = p.cores,
+                          .cores_free = p.cores_free,
+                          .mem_available = p.mem_available,
+                          .cpu_load_pct = p.cpu_load_pct,
+                          .on_ac = p.is_charging,
+                          .arch = p.arch,
+                          .latency = p.latency,
+                          .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
+                          .in_flight = shared_->InFlightLocked(p.id)});
         }
         for (const Candidate& c : Rank(spec, std::move(candidates), input_tree_bytes)) {
             shared_->AddLocked(c.node_id, 1);
@@ -429,7 +419,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         ++attempt;
         skip.insert(node);
         tried.clear();
-        task->drain_preempted = false;  // fresh attempt
+        task->drain_preempted = false; // fresh attempt
         const std::string detail =
             "retry " + std::to_string(attempt) + "/" + std::to_string(max_retries) + ": " + reason;
         if (task->cb.on_state) task->cb.on_state(v1::QUEUED, detail);
@@ -466,18 +456,18 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         }
         for (const auto& p : peers_->ListActive()) {
             if (p.id == local_id_ || skip.contains(p.id) || lacks_command(p.id)) continue;
-            candidates.push_back(Candidate{.node_id = p.id,
-                                           .is_local = false,
-                                           .cores_total = p.cores,
-                                           .cores_free = p.cores_free,
-                                           .mem_available = p.mem_available,
-                                           .cpu_load_pct = p.cpu_load_pct,
-                                           .on_ac = p.is_charging,
-                                           .arch = p.arch,
-                                           .latency = p.latency,
-                                           .missing_bytes =
-                                               EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
-                                           .in_flight = 0});
+            candidates.push_back(
+                Candidate{.node_id = p.id,
+                          .is_local = false,
+                          .cores_total = p.cores,
+                          .cores_free = p.cores_free,
+                          .mem_available = p.mem_available,
+                          .cpu_load_pct = p.cpu_load_pct,
+                          .on_ac = p.is_charging,
+                          .arch = p.arch,
+                          .latency = p.latency,
+                          .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
+                          .in_flight = 0});
         }
         return !Rank(spec, std::move(candidates), input_tree_bytes).empty();
     };
@@ -564,11 +554,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         }
 
         std::string err;
-        if (node::EncodedOfferByteSize(task->id, spec, *needed) >
-            static_cast<size_t>(node::kNodeApiMaxMessageSize)) {
+        if (node::EncodedOfferByteSize(task->id, spec, *needed) > static_cast<size_t>(node::kNodeApiMaxMessageSize)) {
             release(*reserved);
-            return fail_placement("input tree too large to offer: " + std::to_string(needed->size()) +
-                                  " digests");
+            return fail_placement("input tree too large to offer: " + std::to_string(needed->size()) + " digests");
         }
         auto reply = client->Offer(task->id, spec, *needed, &err);
         if (!reply) {
