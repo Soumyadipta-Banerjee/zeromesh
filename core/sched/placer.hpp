@@ -16,9 +16,11 @@
 
 #include "net/peer_table.hpp"
 #include "net/telemetry.hpp"
+#include "node/donor_policy.hpp"
 #include "node/executor.hpp"
 #include "node/local_executor.hpp"
 #include "node/node_client.hpp"
+#include "sched/seed_gate.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
@@ -69,8 +71,44 @@ public:
     struct NodeTraffic {
         uint64_t bytes_pushed{0};
         uint64_t bytes_pulled{0};
+        uint64_t bytes_seeded{0}; // input bytes the node fetched from another donor instead of from us
     };
     [[nodiscard]] std::map<std::string, NodeTraffic> Traffic() const;
+
+    // Peer seeding: a donor that misses a blob fetches it from the least-busy donor already holding
+    // it (SeedBlobs) instead of the requester uploading it again. Anything not seeded is pushed.
+    struct SeedConfig {
+        bool enabled{true};
+        int per_source_cap{SeedGate::kDefaultPerSource}; // concurrent sends from one donor
+        int lan_cap{SeedGate::kDefaultLanWide};          // concurrent seed transfers on the whole LAN
+        std::chrono::milliseconds acquire_timeout{2000}; // wait this long for a slot, then push instead
+    };
+    void SetSeeding(SeedConfig cfg);
+
+    // Tail hedging: near the end of a job, copy a task that sits on a donor unlikely to
+    // outlive it onto a second donor. The first copy to succeed wins and the others are
+    // cancelled. Off until `survival` is set (the hazard model supplies it).
+    struct HedgeConfig {
+        // P(the donor is still here `horizon_s` seconds from now); unset means never hedge.
+        std::function<double(const std::string& node_id, double horizon_s)> survival;
+        double survive_below{0.5};  // hedge when the odds fall below this
+        int max_copies{2};          // simultaneous copies of one task, original included
+        int tail_max_running{4};    // "tail": nothing waiting for a slot and at most this many tasks running
+        double default_horizon_s{120.0}; // assumed remaining runtime; capped by the task's timeout
+        std::chrono::milliseconds check_interval{200};
+        std::chrono::milliseconds retry_after{1000}; // pause between two hedge launches for one task
+
+        static HedgeConfig FromPolicy(const node::DonorPolicy& policy);
+    };
+    struct HedgeStats {
+        uint64_t launched{0};  // hedge copies that obtained a donor slot
+        uint64_t won{0};       // hedge copies whose result was used
+        uint64_t cancelled{0}; // hedge copies stopped because another copy finished first
+        double cpu_seconds{0};        // run time x cores of every hedge copy
+        double wasted_cpu_seconds{0}; // the part of it spent by copies that did not win
+    };
+    void SetHedging(HedgeConfig cfg);
+    [[nodiscard]] HedgeStats Hedging() const;
 
     struct Task;
     struct Shared;
@@ -80,6 +118,17 @@ private:
     // Runs locally and waits for the result (so Place can decide on retry).
     v1::TaskResult RunLocal(const std::shared_ptr<Task>& task, const v1::TaskSpec& spec);
     void OnPeerDrain(const std::string& node_id, const std::string& reason);
+    void LaunchWorker(const std::shared_ptr<Task>& task);
+    // Lets `target` fetch what it misses from donors known to hold it; returns what is still missing.
+    std::vector<v1::Digest> SeedFromPeers(const std::string& target, node::NodeClient& client,
+                                          std::vector<v1::Digest> missing);
+    void NoteHolders(const std::string& node_id, const std::vector<v1::Digest>& digests);
+    void AddSeeded(const std::string& node_id, uint64_t bytes);
+    void HedgeScan();
+    void LaunchHedge(const std::shared_ptr<Task>& primary, std::unordered_set<std::string> exclude,
+                     const HedgeConfig& cfg);
+    void OnHedgeDone(const std::shared_ptr<Task>& primary, const std::shared_ptr<Task>& hedge, v1::TaskResult r);
+    void CancelHedges(const std::shared_ptr<Task>& primary);
     void ReapFinishedLocked();
 
     [[nodiscard]] int64_t InputTreeBytes(const v1::TaskSpec& spec) const;
@@ -102,6 +151,19 @@ private:
 
     std::mutex sent_mu_;
     std::map<std::string, std::shared_ptr<DonorSent>> sent_;
+
+    mutable std::mutex seed_mu_;
+    SeedConfig seed_cfg_;
+    SeedGate seed_gate_;
+    std::mutex holders_mu_;
+    std::unordered_map<std::string, std::vector<std::string>> holders_; // blob hash -> donors known to hold it
+    static constexpr size_t kHoldersMaxBlobs = 200000;
+    static constexpr size_t kHoldersPerBlob = 8;
+
+    mutable std::mutex hedge_mu_;
+    HedgeConfig hedge_cfg_;
+    HedgeStats hedge_stats_;
+    std::jthread hedge_thread_;
 
     mutable std::mutex traffic_mu_;
     std::map<std::string, NodeTraffic> traffic_;
