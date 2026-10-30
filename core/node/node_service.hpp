@@ -75,6 +75,10 @@ public:
     // The donor's current comfort-ladder step (0..4), reported in every OfferReply. From step
     // kSqueezedLevel on, new offers are refused: the owner is being held back already.
     static constexpr int kSqueezedLevel = 3;
+    // Milliseconds a requester is told to wait before offering again, per passing refusal.
+    static constexpr int kRetryDrainingMs = 5000;
+    static constexpr int kRetryOwnerBusyMs = 5000;
+    static constexpr int kRetryDuplicateMs = 100;
     void SetComfortLevelProvider(std::function<int()> provider);
 
     // The donor's own departure hazard (departures per hour), reported in every OfferReply as

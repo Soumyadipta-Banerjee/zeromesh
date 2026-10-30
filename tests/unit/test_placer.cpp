@@ -420,3 +420,56 @@ TEST(PlacerInFlightCapSpread) {
     ASSERT_TRUE(peak <= 1);
     ASSERT_TRUE(peak >= 1);
 }
+
+TEST(PlacerRoutesAroundADonorThatRefusesOnPolicy) {
+    // The donor ranked first is on a low battery and refuses by policy. That is its answer, not
+    // the task's: the idle donor behind it must get the task.
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), weak("node-weak", key), ok("node-ok", key);
+    weak.telemetry.on_ac = false;
+    weak.telemetry.battery_pct = 30;
+    a.Start();
+    weak.Start();
+    ok.Start();
+    a.Admit(weak);
+    a.Admit(ok);
+    auto weak_peer = weak.AsPeer();
+    weak_peer.cores = 16; // looks like the better donor, so it is offered first
+    weak_peer.cores_free = 16;
+    a.peers->Upsert(weak_peer);
+    a.peers->Upsert(ok.AsPeer());
+    Requester req(a);
+
+    const std::string id = req.jm->Submit(RemoteOnly("echo ran"));
+    WaitDone(*req.jm, id);
+    auto st = req.jm->Get(id);
+    ASSERT_TRUE(st->done());
+    const v1::TaskResult& r = st->results().at("t");
+    Expect(st->tasks().at("t") == v1::SUCCEEDED, "task failed: " + r.error());
+    ASSERT_EQ(r.executed_by(), std::string("node-ok"));
+}
+
+TEST(PlacerFailsATaskLargerThanEveryDonorsLimit) {
+    // The donor donates 2 cores; the task needs 4. It used to be offered again every 50 ms for as
+    // long as the job lived. Now the donor says "unsupported" and the task fails with its reason.
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), small("node-small", key);
+    small.policy.max_cores = 2;
+    a.Start();
+    small.Start();
+    a.Admit(small);
+    a.peers->Upsert(small.AsPeer());
+    Requester req(a);
+
+    auto job = RemoteOnly("true");
+    job.mutable_tasks(0)->mutable_resources()->set_cores(4);
+    const std::string id = req.jm->Submit(job);
+    WaitDone(*req.jm, id, std::chrono::seconds(10));
+    auto st = req.jm->Get(id);
+    ASSERT_TRUE(st->done());
+    ASSERT_EQ(st->tasks().at("t"), v1::FAILED);
+    const std::string& err = st->results().at("t").error();
+    Expect(err.find("no node can run this task: node node-small: ") == 0 &&
+               err.find("donor policy allows only 2") != std::string::npos,
+           err);
+}

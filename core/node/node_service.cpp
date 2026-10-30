@@ -427,9 +427,11 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
     resp->set_comfort_level(static_cast<uint32_t>(comfort));
     if (std::isfinite(hazard) && hazard >= 0.0) resp->set_hazard_per_hour(hazard);
 
-    auto reject = [&](std::string reason) {
+    auto reject = [&](std::string reason, v1::RejectKind kind = v1::REJECT_UNSUPPORTED, int retry_after_ms = 0) {
         resp->set_accepted(false);
         resp->set_reason(std::move(reason));
+        resp->set_reject_kind(kind);
+        if (retry_after_ms > 0) resp->set_retry_after_ms(static_cast<uint32_t>(retry_after_ms));
         return grpc::Status::OK;
     };
 
@@ -455,6 +457,7 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
     }
 
     const net::Telemetry telemetry = telemetry_();
+    resp->set_core_limit(static_cast<uint32_t>(policy_.CoreLimit(telemetry.cores_total)));
     std::vector<v1::Digest> missing;
     for (const auto& d : needed) {
         if (!cas_->HasBlob(d.hash)) missing.push_back(ToProto(d));
@@ -463,15 +466,22 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
     std::lock_guard lock(mu_);
     PurgeExpiredLocked();
     if (draining_) {
-        return reject(drain_reason_.empty() ? "node is draining" : "node is draining: " + drain_reason_);
+        return reject(drain_reason_.empty() ? "node is draining" : "node is draining: " + drain_reason_,
+                      v1::REJECT_DRAINING, kRetryDrainingMs);
     }
     if (comfort >= kSqueezedLevel) {
-        return reject("owner busy: donated work is held at comfort level " + std::to_string(comfort));
+        return reject("owner busy: donated work is held at comfort level " + std::to_string(comfort),
+                      v1::REJECT_BUSY, kRetryOwnerBusyMs);
     }
     const TaskKey key{peer, req->task_id()};
-    if (running_.contains(key)) return reject("task " + req->task_id() + " is already running here");
+    if (running_.contains(key)) {
+        return reject("task " + req->task_id() + " is already running here", v1::REJECT_BUSY, kRetryDuplicateMs);
+    }
     reserved_.erase(key); // a repeated offer replaces the old reservation
-    if (auto why = policy_.Refuses(telemetry, spec, CoresInUseLocked())) return reject(*why);
+    if (auto why = policy_.Evaluate(telemetry, spec, CoresInUseLocked())) {
+        return reject(std::move(why->reason),
+                      why->kind == RefusalKind::Busy ? v1::REJECT_BUSY : v1::REJECT_UNSUPPORTED, why->retry_after_ms);
+    }
 
     resp->set_accepted(true);
     for (auto& d : missing) *resp->add_missing() = std::move(d);

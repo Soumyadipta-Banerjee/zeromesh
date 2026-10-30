@@ -134,14 +134,16 @@ TEST(RankUsesTheDefaultBandwidthForNodesNeverMeasured) {
     ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"unmeasured", "measured-slow"}));
 }
 
-TEST(RankStillPutsFreeSlotsAheadOfTransferTime) {
+TEST(RankWeighsTransferTimeAgainstTheTasksOwnLength) {
     v1::TaskSpec spec;
     Candidate roomy = Peer("roomy", 500'000'000, 1e6); // 500 s of transfer, but more free slots
     roomy.cores_total = 16;
     Candidate snug = Peer("snug", 0, 100e6);
     snug.cores_total = 4;
-    auto ranked = Rank(spec, {snug, roomy});
-    ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"roomy", "snug"}));
+    // A 60 s task would spend most of its time waiting for the input: the idle-but-ready donor wins.
+    ASSERT_EQ(Ids(Rank(spec, {snug, roomy}, 0, 60.0)), (std::vector<std::string>{"snug", "roomy"}));
+    // Against a task that runs for hours the same 500 s is noise, so the extra slots decide.
+    ASSERT_EQ(Ids(Rank(spec, {snug, roomy}, 0, 36'000.0)), (std::vector<std::string>{"roomy", "snug"}));
 }
 
 TEST(RankTreatsAnAlreadyHeldInputAsFreeWhateverTheLink) {

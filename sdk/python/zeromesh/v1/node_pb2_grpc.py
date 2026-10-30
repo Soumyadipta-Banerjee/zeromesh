@@ -6,7 +6,7 @@ import warnings
 from zeromesh.v1 import common_pb2 as zeromesh_dot_v1_dot_common__pb2
 from zeromesh.v1 import node_pb2 as zeromesh_dot_v1_dot_node__pb2
 
-GRPC_GENERATED_VERSION = '1.84.0'
+GRPC_GENERATED_VERSION = '1.84.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -66,6 +66,11 @@ class NodeApiStub:
                 request_serializer=zeromesh_dot_v1_dot_common__pb2.Digests.SerializeToString,
                 response_deserializer=zeromesh_dot_v1_dot_common__pb2.Chunk.FromString,
                 _registered_method=True)
+        self.SeedBlobs = channel.unary_unary(
+                '/zeromesh.v1.NodeApi/SeedBlobs',
+                request_serializer=zeromesh_dot_v1_dot_node__pb2.SeedRequest.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_node__pb2.SeedReply.FromString,
+                _registered_method=True)
         self.RunTask = channel.unary_stream(
                 '/zeromesh.v1.NodeApi/RunTask',
                 request_serializer=zeromesh_dot_v1_dot_node__pb2.RunRequest.SerializeToString,
@@ -123,6 +128,12 @@ class NodeApiServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SeedBlobs(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def RunTask(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -173,6 +184,11 @@ def add_NodeApiServicer_to_server(servicer, server):
                     servicer.PullBlobs,
                     request_deserializer=zeromesh_dot_v1_dot_common__pb2.Digests.FromString,
                     response_serializer=zeromesh_dot_v1_dot_common__pb2.Chunk.SerializeToString,
+            ),
+            'SeedBlobs': grpc.unary_unary_rpc_method_handler(
+                    servicer.SeedBlobs,
+                    request_deserializer=zeromesh_dot_v1_dot_node__pb2.SeedRequest.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_node__pb2.SeedReply.SerializeToString,
             ),
             'RunTask': grpc.unary_stream_rpc_method_handler(
                     servicer.RunTask,
@@ -353,6 +369,33 @@ class NodeApi:
             '/zeromesh.v1.NodeApi/PullBlobs',
             zeromesh_dot_v1_dot_common__pb2.Digests.SerializeToString,
             zeromesh_dot_v1_dot_common__pb2.Chunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SeedBlobs(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/zeromesh.v1.NodeApi/SeedBlobs',
+            zeromesh_dot_v1_dot_node__pb2.SeedRequest.SerializeToString,
+            zeromesh_dot_v1_dot_node__pb2.SeedReply.FromString,
             options,
             channel_credentials,
             insecure,
