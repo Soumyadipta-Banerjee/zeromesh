@@ -213,6 +213,7 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
 
     std::unique_ptr<plugin::IBlobSource> blob_source;
     if (env_name == "mirror") {
+        if (cas_) ctx.profile_dir = cas_->GetBasePath() / "profiles";
         if (requester.empty() || ctx.requester_node_id == node_id_) {
             blob_source = std::make_unique<LocalCasBlobSource>(cas_);
         } else {

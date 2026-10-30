@@ -19,6 +19,18 @@ message Chunk {
   bool last = 3;
 }
 
+// Recorded read order of an environment (env-mirror): which chunk of which file a task touched,
+// first touch first. Stored beside the CAS under the environment's root hash and used to prefetch.
+message ProfileEntry {
+  string blob = 1;    // file digest (SHA-256 hex)
+  uint32 chunk = 2;   // 1 MiB piece of the blob
+  uint64 offset = 3;  // first byte read within the blob
+}
+message EnvProfile {
+  string root_hash = 1;
+  repeated ProfileEntry entries = 2;
+}
+
 // Which environment provider prepares the task's software, e.g. "host" or "mirror".
 message EnvSpec {
   string name = 1;

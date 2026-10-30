@@ -1,5 +1,7 @@
 #include "sched/rank.hpp"
 
+#include "sched/bandwidth.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <tuple>
@@ -30,6 +32,12 @@ constexpr double kLiveputBucketRatio = 1.05;
 bool KnownLife(const Candidate& c) { return std::isfinite(c.expected_min_s) && c.expected_min_s > 0.0; }
 
 } // namespace
+
+double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes) {
+    const double bandwidth =
+        c.bandwidth_bytes_per_s > 0.0 ? c.bandwidth_bytes_per_s : BandwidthEstimator::kDefaultBytesPerSecond;
+    return static_cast<double>(MissingForRank(c, unknown_missing_bytes)) / bandwidth;
+}
 
 std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates,
                             int64_t unknown_missing_bytes) {
@@ -83,8 +91,8 @@ std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> can
     // (free slots, discounted by how long the donor is expected to stay) so work spreads
     // across peers instead of packing the requester first.
     auto key = [&](const Candidate& c) {
-        return std::tuple<int64_t, int64_t, double, bool, std::chrono::milliseconds, const std::string&>(
-            -work(c), MissingForRank(c, unknown_missing_bytes), c.cpu_load_pct, !c.on_ac, c.latency, c.node_id);
+        return std::tuple<int64_t, double, double, bool, std::chrono::milliseconds, const std::string&>(
+            -work(c), TransferCostSeconds(c, unknown_missing_bytes), c.cpu_load_pct, !c.on_ac, c.latency, c.node_id);
     };
     std::sort(candidates.begin(), candidates.end(),
               [&](const Candidate& a, const Candidate& b) { return key(a) < key(b); });
