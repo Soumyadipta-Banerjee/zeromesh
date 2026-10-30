@@ -216,7 +216,10 @@ TEST(SeedingDonorFetchesSharedInputFromPeerNotRequester) {
 
     // Job 2 shares big.bin but differs in one small file. c joins and b is busy, so c runs it.
     auto loaded_b = b.AsPeer();
-    loaded_b.cpu_load_pct = 90;
+    // Placement ranks transfer time ahead of load, and b already holds the big blob, so "busy" must
+    // mean "no free slot" for c to be chosen.
+    loaded_b.cores = 0;
+    loaded_b.cores_free = 0;
     a.peers->Upsert(loaded_b);
     auto idle_c = c.AsPeer();
     idle_c.cpu_load_pct = 1;
@@ -253,7 +256,10 @@ TEST(SeedingFallsBackToRequesterWhenPeerCannotBeReached) {
     ASSERT_EQ(RunAndWait(req, OneTask(TreeWithBigFile(a, src.path(), "one\n"))), std::string("node-b"));
 
     auto loaded_b = b.AsPeer();
-    loaded_b.cpu_load_pct = 90;
+    // Placement ranks transfer time ahead of load, and b already holds the big blob, so "busy" must
+    // mean "no free slot" for c to be chosen.
+    loaded_b.cores = 0;
+    loaded_b.cores_free = 0;
     a.peers->Upsert(loaded_b);
     auto idle_c = c.AsPeer();
     idle_c.cpu_load_pct = 1;
@@ -286,7 +292,10 @@ TEST(SeedingCanBeDisabled) {
     TempDir src;
     ASSERT_EQ(RunAndWait(req, OneTask(TreeWithBigFile(a, src.path(), "one\n"))), std::string("node-b"));
     auto loaded_b = b.AsPeer();
-    loaded_b.cpu_load_pct = 90;
+    // Placement ranks transfer time ahead of load, and b already holds the big blob, so "busy" must
+    // mean "no free slot" for c to be chosen.
+    loaded_b.cores = 0;
+    loaded_b.cores_free = 0;
     a.peers->Upsert(loaded_b);
     auto idle_c = c.AsPeer();
     idle_c.cpu_load_pct = 1;
