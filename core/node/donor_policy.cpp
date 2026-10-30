@@ -84,6 +84,21 @@ DonorPolicy DonorPolicy::Parse(std::string_view text, std::ostream& warn, std::s
                 p.drain_hold_s = *v;
             else
                 bad();
+        } else if (key == "comfort_target_ms") {
+            if (auto v = ParseInt(value, 1, 1000))
+                p.comfort_target_ms = *v;
+            else
+                bad();
+        } else if (key == "max_step") {
+            if (auto v = ParseInt(value, 0, 4))
+                p.comfort_max_step = *v;
+            else
+                bad();
+        } else if (key == "hold_s") {
+            if (auto v = ParseInt(value, 0, 86400))
+                p.comfort_hold_s = *v;
+            else
+                bad();
         } else {
             warn << where() << "unknown key '" << key << "', ignored\n";
         }

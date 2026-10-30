@@ -29,6 +29,12 @@ struct DonorPolicy {
     bool drain_on_user_activity{false};
     int drain_hold_s{300}; // seconds the drain condition must stay clear
 
+    // Owner comfort governor (claim 2): tolerated owner stall per second of wall time (ms),
+    // the highest ladder step it may take (4 = freeze), and seconds of calm before a step up.
+    int comfort_target_ms{50};
+    int comfort_max_step{4};
+    int comfort_hold_s{10};
+
     // Reads <config_dir>/donor.toml: `key = value` lines, '#' starts a comment. A missing
     // file gives the defaults. Unknown keys and bad values are reported on stderr and ignored.
     static DonorPolicy Load(const std::filesystem::path& config_dir);

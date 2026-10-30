@@ -65,6 +65,13 @@ bool OfferRejectionTryNextPeer(const std::string& reason) {
 
 constexpr std::chrono::seconds kCapabilityRecheck{15};
 
+// The donor's owner is busy and the comfort governor is holding donated work back; send
+// elsewhere and look again soon.
+bool OfferRejectionOwnerBusy(const std::string& reason) {
+    return reason.find("owner busy") != std::string::npos;
+}
+constexpr std::chrono::seconds kOwnerBusyRecheck{5};
+
 } // namespace
 
 struct Placer::Task {
@@ -591,6 +598,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             if (OfferRejectionRetryable(why)) {
                 tried.erase(reserved->node_id);
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            } else if (OfferRejectionOwnerBusy(why)) {
+                missing_until[reserved->node_id] = std::chrono::steady_clock::now() + kOwnerBusyRecheck;
+                last_reason = "node " + reserved->node_id + ": " + why;
             } else if (OfferRejectionTryNextPeer(why)) {
                 missing_until[reserved->node_id] = std::chrono::steady_clock::now() + kCapabilityRecheck;
                 last_reason = "node " + reserved->node_id + ": " + why;

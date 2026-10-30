@@ -24,6 +24,8 @@ message OfferReply {
   bool accepted = 1;
   string reason = 2;
   repeated Digest missing = 3;
+  // Owner-comfort ladder step on the donor (0 = unthrottled .. 4 = frozen). Set on accept and reject.
+  uint32 comfort_level = 4;
 }
 
 message RunRequest { string task_id = 1; }

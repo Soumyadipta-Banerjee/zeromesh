@@ -12,6 +12,7 @@
 #include "net/tls.hpp"
 #include "node/action_cache.hpp"
 #include "node/client_service.hpp"
+#include "node/comfort_governor.hpp"
 #include "node/donor_policy.hpp"
 #include "node/job_manager.hpp"
 #include "node/local_executor.hpp"
@@ -234,6 +235,7 @@ int Daemon::Run() {
         return telemetry_sampler.Sample();
     };
     DrainController drain_controller;
+    std::unique_ptr<ComfortGovernor> comfort; // outlives the runner whose observer points at it
 
     try {
         auto state = NodeState::LoadOrCreate(config_.state_dir);
@@ -312,10 +314,19 @@ int Daemon::Run() {
 
         DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
         drain_controller.SetPolicy(policy);
+        comfort = std::make_unique<ComfortGovernor>(ComfortConfig::FromPolicy(policy));
+        runner->SetCgroupObserver([g = comfort.get()](const std::filesystem::path& dir, bool added) {
+            if (added)
+                g->AddTaskCgroup(dir);
+            else
+                g->RemoveTaskCgroup(dir);
+        });
         node_service = std::make_unique<NodeService>(
             node_id, pins, [team]() { return team->Get(); }, identity.fingerprint,
             [svc = client_service.get()]() { return svc->SelfInfo(); }, cas, registry, local_executor, telemetry_fn,
             policy, peers);
+        node_service->SetComfortLevelProvider([g = comfort.get()] { return g->level(); });
+        comfort->Start();
 
         grpc::ServerBuilder client_builder;
         client_builder.AddListeningPort("unix:" + sock.string(), grpc::InsecureServerCredentials());
@@ -521,6 +532,7 @@ int Daemon::Run() {
 
     // Stop admission and drain monitor, then discovery; Drain peers with tasks in flight.
     admit_stop = true;
+    if (comfort) comfort->Stop();
     if (admit_thread.joinable()) admit_thread.join();
     if (drain_thread.joinable()) drain_thread.join();
     if (gc_thread.joinable()) gc_thread.join();

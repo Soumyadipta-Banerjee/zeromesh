@@ -68,6 +68,11 @@ public:
     // Sticky donor drain: refuse new offers while draining. Entering drain cancels
     // preemptible running tasks; non-preemptible ones keep running.
     void SetDraining(bool draining, std::string reason = {});
+
+    // The donor's current comfort-ladder step (0..4), reported in every OfferReply. From step
+    // kSqueezedLevel on, new offers are refused: the owner is being held back already.
+    static constexpr int kSqueezedLevel = 3;
+    void SetComfortLevelProvider(std::function<int()> provider);
     [[nodiscard]] bool IsDraining() const;
 
     // Node ids of requesters that currently have a reserved or running task here.
@@ -117,6 +122,8 @@ private:
     DonorPolicy policy_;
     std::shared_ptr<net::PeerTable> peers_;
 
+    mutable std::mutex comfort_mu_;
+    std::function<int()> comfort_level_;
     mutable std::mutex mu_;
     std::map<TaskKey, Reservation> reserved_;
     std::map<TaskKey, Running> running_;

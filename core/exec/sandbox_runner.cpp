@@ -243,8 +243,8 @@ std::optional<fs::path> FindTaskCgroupParent() {
         auto parent = FindDelegatableCgroupParent();
         if (!parent) return;
 
-        static const char* kCtrls[] = {"memory", "cpu", "pids"};
-        if (!EnableSubtreeControllers(*parent, kCtrls, 3)) return;
+        static const char* kCtrls[] = {"memory", "cpu", "pids", "io"};
+        if (!EnableSubtreeControllers(*parent, kCtrls, 4)) return;
 
         const fs::path daemon_cg = *parent / kDaemonCgroupName;
         std::error_code ec;
@@ -264,8 +264,8 @@ struct PreparedCgroup {
 };
 
 std::optional<PreparedCgroup> PrepareTaskCgroup(const fs::path& parent, int cores, uint64_t mem_bytes) {
-    static const char* kCtrls[] = {"memory", "cpu", "pids"};
-    if (!EnableSubtreeControllers(parent, kCtrls, 3)) return std::nullopt;
+    static const char* kCtrls[] = {"memory", "cpu", "pids", "io"};
+    if (!EnableSubtreeControllers(parent, kCtrls, 4)) return std::nullopt;
 
     PreparedCgroup out;
     out.dir = parent / ("zm-task-" + RandomHex(8));
@@ -352,6 +352,14 @@ ResourceEnforcementStatus ProbeSandboxResourceEnforcement() {
     st.cgroup_cpu = cg->cpu;
     RemoveTaskCgroup(cg->dir);
     return st;
+}
+
+std::optional<fs::path> DelegatedCgroupParent() {
+    return FindDelegatableCgroupParent();
+}
+
+void SandboxRunner::SetCgroupObserver(CgroupObserver observer) {
+    cgroup_observer_ = std::move(observer);
 }
 
 SandboxRunner::SandboxRunner(std::shared_ptr<store::CasStore> store, std::shared_ptr<store::MerkleBuilder> merkle,
@@ -447,6 +455,7 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     if (want_mem || want_cpu) {
         if (auto parent = FindTaskCgroupParent()) task_cgroup = PrepareTaskCgroup(*parent, spec.cores, spec.mem_bytes);
     }
+    if (task_cgroup && cgroup_observer_) cgroup_observer_(task_cgroup->dir, true);
     if (task_cgroup) {
         result.memory_enforced = task_cgroup->memory;
         result.cpu_enforced = task_cgroup->cpu;
@@ -530,7 +539,10 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         CgroupHadOomKill(task_cgroup->dir)) {
         result.error = "task exceeded memory limit (killed)";
     }
-    if (task_cgroup) RemoveTaskCgroup(task_cgroup->dir);
+    if (task_cgroup) {
+        if (cgroup_observer_) cgroup_observer_(task_cgroup->dir, false);
+        RemoveTaskCgroup(task_cgroup->dir);
+    }
 
     out_file.close();
     err_file.close();
