@@ -28,7 +28,12 @@ message OfferReply {
   uint32 comfort_level = 4;
 }
 
-message RunRequest { string task_id = 1; }
+message RunRequest {
+  string task_id = 1;
+  // Optional: id (SHA-256 of its serialization) of an EnvProfile in the donor's profile
+  // directory to prefetch from; empty = use the profile recorded for the environment, if any.
+  string profile_id = 2;
+}
 message TaskRef { string task_id = 1; }
 message DrainNotice {
   string node_id = 1;

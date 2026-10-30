@@ -1,5 +1,7 @@
 #include "sched/rank.hpp"
 
+#include "sched/bandwidth.hpp"
+
 #include <algorithm>
 #include <tuple>
 
@@ -23,6 +25,12 @@ int64_t MissingForRank(const Candidate& c, int64_t unknown_missing_bytes) {
 }
 
 } // namespace
+
+double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes) {
+    const double bandwidth =
+        c.bandwidth_bytes_per_s > 0.0 ? c.bandwidth_bytes_per_s : BandwidthEstimator::kDefaultBytesPerSecond;
+    return static_cast<double>(MissingForRank(c, unknown_missing_bytes)) / bandwidth;
+}
 
 std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates,
                             int64_t unknown_missing_bytes) {
@@ -50,8 +58,8 @@ std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> can
     // Flamenco-style: fill the mesh. Prefer the node with the most free slots so
     // work spreads across peers instead of packing the requester first.
     auto key = [&](const Candidate& c) {
-        return std::tuple<int, int64_t, double, bool, std::chrono::milliseconds, const std::string&>(
-            -FreeSlots(c, cores), MissingForRank(c, unknown_missing_bytes), c.cpu_load_pct, !c.on_ac, c.latency,
+        return std::tuple<int, double, double, bool, std::chrono::milliseconds, const std::string&>(
+            -FreeSlots(c, cores), TransferCostSeconds(c, unknown_missing_bytes), c.cpu_load_pct, !c.on_ac, c.latency,
             c.node_id);
     };
     std::sort(candidates.begin(), candidates.end(),

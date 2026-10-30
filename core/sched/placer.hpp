@@ -19,6 +19,7 @@
 #include "node/executor.hpp"
 #include "node/local_executor.hpp"
 #include "node/node_client.hpp"
+#include "sched/bandwidth.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
@@ -72,6 +73,10 @@ public:
     };
     [[nodiscard]] std::map<std::string, NodeTraffic> Traffic() const;
 
+    // Per-peer throughput measured from this requester's own pushes and pulls; Rank uses it to
+    // turn missing bytes into transfer time.
+    [[nodiscard]] const BandwidthEstimator& Bandwidth() const { return bandwidth_; }
+
     struct Task;
     struct Shared;
 
@@ -102,6 +107,8 @@ private:
 
     std::mutex sent_mu_;
     std::map<std::string, std::shared_ptr<DonorSent>> sent_;
+
+    BandwidthEstimator bandwidth_;
 
     mutable std::mutex traffic_mu_;
     std::map<std::string, NodeTraffic> traffic_;
