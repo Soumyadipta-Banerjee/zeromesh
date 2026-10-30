@@ -962,6 +962,14 @@ condor_stage_out() {
     "$(ctr)" cp "$CNAME:/home/submituser/job/." "$1/"
 }
 
+# emit_row WL STEP SYS VARIANT WALL RX TX OK TOTAL RETRIES NOTE
+# Default: the legacy 11-column row appended to $CSV. If VD_ROW_HOOK names a function (the verdict driver
+# installs one), that function receives the same arguments instead and writes the verdict-format row.
+emit_row() {
+    if [ -n "${VD_ROW_HOOK:-}" ]; then "$VD_ROW_HOOK" "$@"; return; fi
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$@" >>"$CSV"
+}
+
 # exec_system SYSTEM WL STEP VARIANT NONCE STAGEDIR
 # Runs one system once on a fresh copy of STAGEDIR and appends one CSV row.
 exec_system() {
@@ -1010,11 +1018,11 @@ exec_system() {
     [ "$sys" = zm ] && [ "$CUR_ALL" = 1 ] && note="$note;all-nodes"
     [ "${sys#condor}" != "$sys" ] && [ "$CUR_ALL" = 1 ] && note="$note;all-nodes"
     [ -n "${KILL_NOTE:-}" ] && note="$note;$KILL_NOTE"
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$wl" "$stepn" "$sys" "$variant" \
+    emit_row "$wl" "$stepn" "$sys" "$variant" \
         "$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')" \
         "$(awk -v a="$rx0" -v b="$rx1" 'BEGIN{printf "%.1f", (b-a)/1048576}')" \
         "$(awk -v a="$tx0" -v b="$tx1" 'BEGIN{printf "%.1f", (b-a)/1048576}')" \
-        "$okc" "$total" "$retries" "$note" >>"$CSV"
+        "$okc" "$total" "$retries" "$note"
     log "$wl/$stepn $sys/$variant: $(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.1fs", b-a}'), ok $okc/$total, retries $retries, $note"
 }
 
@@ -1250,6 +1258,11 @@ Env: ZMF_HOME (default ~/.zmfield), ZMF_JOBS (build -j), ZMF_BWRAP_TAG, ZMF_TIME
                                           w1 CPU fan-out, w2 data-once, w3 donor churn
   chaos <zm|condor> <kill|term|restore>   run on the donor: break or restore it (bench calls this)
   report [DIR]                            regenerate report.md from a results directory
+  verdict register                        hash the pre-registered files; prints the commit command
+  verdict run --ssh USER@DONOR [--peer IP] [--smoke] [--resume DIR] [--network LABEL]
+                                          randomised-block ZeroMesh vs HTCondor verdict suite (run on
+                                          the requester; --smoke = 3 blocks, no verdict, no extension)
+  verdict report DIR                      regenerate verdict.json/report.md from the archived copies in DIR
   down                                    stop zmd and HTCondor (removes the HTCondor drop-ins)
 
 Two-laptop recipe: see scripts/ZMFIELD.md
@@ -1274,6 +1287,7 @@ main() {
     bench) cmd_bench "$@" ;;
     chaos) cmd_chaos "$@" ;;
     report) cmd_report "$@" ;;
+    verdict) source "$ROOT/scripts/verdict/verdict.sh"; cmd_verdict "$@" ;;
     down) cmd_down "$@" ;;
     ""|-h|--help|help) usage ;;
     *) usage >&2; die "unknown command: $cmd" ;;
