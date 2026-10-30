@@ -41,8 +41,8 @@ small core, with features attached through narrow plugin interfaces.
 | `zm` CLI + TUI (`cli/`) | Real; a ClientApi client (`run`, `status`, `monitor`, `team`, `version`) |
 | `zmd` daemon, ClientApi, job manager, local execution | Real (`core/node`, `zmd/`); tests in `tests/integration/test_local_daemon.py` |
 | NodeApi, placement, team security | Real (`core/node`, `core/sched`); wired in `zmd` (Task 17); see M3 below |
-| FUSE filesystem | Frozen until M5 (`env-mirror` plugin) |
-| REAPI front-end | Plugin `plugins/frontend-reapi` (enable with `ZM_ENABLE_REAPI=1`). Tick M6 when `integration_reapi` passes with `recc`. |
+| FUSE filesystem | Real (`plugins/env-mirror`, registered by `zmd`; needs `/dev/fuse`; integration test skipped without it) |
+| REAPI front-end | Plugin `plugins/frontend-reapi` (enable with `ZM_ENABLE_REAPI=1`); `integration_reapi` passes with `recc`. Partial: in-memory action cache, `WaitExecution` stub. |
 | DHT, DSM, GPU, Byzantine/TPM, torrent GUI | Frozen; see [`frozen/README.md`](frozen/README.md) |
 
 ## 3. Milestones
@@ -57,11 +57,11 @@ Each milestone is done **only** when its acceptance test passes.
   *Acceptance:* `zm run -- echo hi` prints `hi` with exit 0. Two runs with different commands give two real results, with no false cache hits. Killing `zmd` and restarting it keeps the node ID.
 - [ ] **M3: Remote execution + security.** Automated tests pass (`integration_remote`); **two-machine acceptance pending** — see [`tests/acceptance/m3_two_machines.md`](tests/acceptance/m3_two_machines.md). Team create/join, admission, mTLS, `NodeApi`, blob transfer, `env-host` plugin, placement.
   *Acceptance:* **Two machines:** on A, `zm run --remote-only -- sh -c 'hostname > out.txt'` with output `out.txt` produces a file containing **B's** hostname. A third machine not in the team never appears in `zm status` and can't call `NodeApi`.
-- [ ] **M4: Fan-out + resilience.** `zm run --each`, job DAGs, retries, drain/loss re-dispatch, donor policy file.
+- [ ] **M4: Fan-out + resilience.** *(Automated tests pass: `integration_fanout`, placer retry tests. Three-machine acceptance pending, see [`tests/acceptance/m4_three_machines.md`](tests/acceptance/m4_three_machines.md).)* `zm run --each`, job DAGs, retries, drain/loss re-dispatch, donor policy file.
   *Acceptance:* `zm run --each 'cases/*' -- ./sim {}` with 20 CPU-bound cases (each ~30 s single-threaded, inputs under 10 MB) on 3 machines completes in under 45% of the single-machine time. Killing one donor's `zmd` mid-job still completes all 20 correctly.
-- [ ] **M5: SDK + first app + mirror mode.** Python SDK, `zm-render`, and the `env-mirror` plugin.
+- [ ] **M5: SDK + first app + mirror mode.** *(Implemented; `sdk_python`, `app_zm_render` and `integration_mirror` pass. The 240-frame, 4-machine run is pending, see [`tests/acceptance/m5_render.md`](tests/acceptance/m5_render.md).)* Python SDK, `zm-render`, and the `env-mirror` plugin.
   *Acceptance:* `zm-render shot.blend --frames 1-240` on 4 machines produces the same frames as a local render. A donor without Blender installed renders frames through mirror mode.
-- [ ] **M6: REAPI front-end plugin.**
+- [x] **M6: REAPI front-end plugin.** *(`integration_reapi` passes with `recc`, asserting a compile action ran on the donor; both daemons run on one host.)*
   *Acceptance:* a CMake project builds through `recc` against `zmd`, with compile actions observed running on a peer. (`integration_reapi` automates this once recc is installed.)
 
 ## 4. Architectural Decision Records
