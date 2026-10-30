@@ -103,6 +103,8 @@ zmd_bin = executable('zmd', 'zmd/main.cpp',
   include_directories: inc,
   link_with: zm_core,
   dependencies: common_deps,
+  # dlopen()ed plugins (frontend-reapi) resolve zeromesh::v1 protobuf symbols from the daemon.
+  export_dynamic: true,
   install: true,
 )
 
