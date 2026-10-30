@@ -68,7 +68,8 @@ TEST(Hazard_PoissonChurnConvergesToTrueRate) {
         HazardModel m;
         PoissonChurn(m, "n1", rate, 2000, 42);
         ASSERT_TRUE(m.HasHistory());
-        ASSERT_EQ(m.Events("n1"), static_cast<size_t>(2000));
+        // Only the newest max_obs_per_node (1000) sessions are kept; every one of them is a departure.
+        ASSERT_EQ(m.Events("n1"), static_cast<size_t>(1000));
         const double est = m.HazardPerHour("n1");
         ASSERT_TRUE(std::fabs(est - rate) / rate < 0.15);
         // Survival over half an hour: exp(-rate/2).
