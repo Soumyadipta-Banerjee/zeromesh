@@ -263,9 +263,9 @@ build_zm() {
         # meson records the python interpreter at configure time, so the venv comes first.
         run python3 -m venv "$VENV"
         run "$VENV/bin/pip" install --quiet "$ROOT/sdk/python[dev]"
-        run "$VENV/bin/pip" install --quiet numpy scipy pytest
         load_env
     fi
+    run "$VENV/bin/pip" install --quiet numpy scipy pytest
     if [ ! -f "$BUILD/build.ninja" ]; then run meson setup "$BUILD" "$ROOT"; fi
     run ninja -C "$BUILD" -j "$(build_jobs)"
     if [ "$DRY" = 0 ]; then
