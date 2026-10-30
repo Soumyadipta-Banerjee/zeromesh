@@ -35,6 +35,10 @@ struct DonorPolicy {
     int comfort_max_step{4};
     int comfort_hold_s{10};
 
+    // Tail hedging (claim 3): the most simultaneous copies of one task, original included.
+    // 1 turns hedging off.
+    int max_copies{2};
+
     // Reads <config_dir>/donor.toml: `key = value` lines, '#' starts a comment. A missing
     // file gives the defaults. Unknown keys and bad values are reported on stderr and ignored.
     static DonorPolicy Load(const std::filesystem::path& config_dir);

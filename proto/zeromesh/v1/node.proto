@@ -28,6 +28,18 @@ message OfferReply {
   uint32 comfort_level = 4;
 }
 
+// Peer seeding (claim 1): asks the callee to fetch `digests` from another team peer
+// instead of receiving them from the caller. Optional and additive: a callee that does not
+// know the RPC answers UNIMPLEMENTED and the caller pushes the blobs itself.
+message SeedRequest {
+  string source_hint = 1;        // node id of the peer to fetch from
+  repeated Digest digests = 2;
+}
+message SeedReply {
+  repeated Digest fetched = 1;   // those now present on the callee, however they got there
+  string error = 2;              // why the rest was not fetched, if it was not
+}
+
 message RunRequest { string task_id = 1; }
 message TaskRef { string task_id = 1; }
 message DrainNotice {
@@ -43,6 +55,7 @@ service NodeApi {
   rpc OfferTask(Offer) returns (OfferReply);
   rpc PushBlobs(stream Chunk) returns (Empty);
   rpc PullBlobs(Digests) returns (stream Chunk);
+  rpc SeedBlobs(SeedRequest) returns (SeedReply);
   rpc RunTask(RunRequest) returns (stream JobEvent);
   rpc CancelTask(TaskRef) returns (Empty);
   rpc Drain(DrainNotice) returns (Empty);
