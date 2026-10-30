@@ -3,6 +3,7 @@
 #include "node/convert.hpp"
 #include "sched/rank.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <exception>
@@ -72,6 +73,9 @@ bool OfferRejectionOwnerBusy(const std::string& reason) {
 }
 constexpr std::chrono::seconds kOwnerBusyRecheck{5};
 
+// Longest task horizon (seconds) used when ranking donors by departure hazard.
+constexpr double kHazardHorizonCapS = 900.0;
+
 } // namespace
 
 struct Placer::Task {
@@ -128,6 +132,16 @@ Placer::Placer(std::shared_ptr<node::LocalExecutor> local, std::shared_ptr<net::
     if (!peers_ || !factory_ || !cas_ || !merkle_) throw std::invalid_argument("Placer: missing dependency");
     peers_->RegisterPreemptCallback(
         [this](const std::string& node_id, const std::string& reason) { OnPeerDrain(node_id, reason); });
+}
+
+void Placer::SetHazardModel(std::shared_ptr<const HazardModel> model) {
+    std::lock_guard lock(hazard_mu_);
+    hazard_ = std::move(model);
+}
+
+std::shared_ptr<const HazardModel> Placer::Hazard() const {
+    std::lock_guard lock(hazard_mu_);
+    return hazard_;
 }
 
 int64_t Placer::InputTreeBytes(const v1::TaskSpec& spec) const {
@@ -388,6 +402,13 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     const std::string input_root_hash = spec.input_root().hash();
     const int64_t input_tree_bytes = InputTreeBytes(spec);
 
+    // Seconds a donor must stay for this task to finish. The policy timeout is an upper bound,
+    // not an estimate, so cap it; the hazard ranking only needs a horizon of the right scale.
+    const double task_s = std::min<double>(spec.policy().has_timeout_s() && spec.policy().timeout_s() > 0
+                                               ? spec.policy().timeout_s()
+                                               : 3600,
+                                           kHazardHorizonCapS);
+
     auto release = [&](const Reservation& res) {
         std::lock_guard lock(shared_->mu);
         shared_->AddLocked(res.node_id, -1);
@@ -415,20 +436,29 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                                            .missing_bytes = 0,
                                            .in_flight = shared_->InFlightLocked(local_id_)});
         }
+        const auto hazard = Hazard();
+        const bool use_hazard = hazard && hazard->HasHistory();
         for (const auto& p : peers_->ListActive()) {
             if (p.id == local_id_ || blocked(p.id)) continue;
-            candidates.push_back(
-                Candidate{.node_id = p.id,
-                          .is_local = false,
-                          .cores_total = p.cores,
-                          .cores_free = p.cores_free,
-                          .mem_available = p.mem_available,
-                          .cpu_load_pct = p.cpu_load_pct,
-                          .on_ac = p.is_charging,
-                          .arch = p.arch,
-                          .latency = p.latency,
-                          .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
-                          .in_flight = shared_->InFlightLocked(p.id)});
+            Candidate cand{.node_id = p.id,
+                           .is_local = false,
+                           .cores_total = p.cores,
+                           .cores_free = p.cores_free,
+                           .mem_available = p.mem_available,
+                           .cpu_load_pct = p.cpu_load_pct,
+                           .on_ac = p.is_charging,
+                           .arch = p.arch,
+                           .latency = p.latency,
+                           .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
+                           .in_flight = shared_->InFlightLocked(p.id)};
+            if (use_hazard) cand.expected_min_s = hazard->ExpectedMin(p.id, task_s);
+            candidates.push_back(std::move(cand));
+        }
+        if (use_hazard) {
+            // This node outlives its own tasks: it is the requester.
+            for (auto& c : candidates) {
+                if (c.is_local) c.expected_min_s = task_s;
+            }
         }
         for (const Candidate& c : Rank(spec, std::move(candidates), input_tree_bytes)) {
             shared_->AddLocked(c.node_id, 1);

@@ -1,6 +1,7 @@
 #include "sched/rank.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <tuple>
 
 namespace zeromesh::sched {
@@ -21,6 +22,12 @@ int64_t MissingForRank(const Candidate& c, int64_t unknown_missing_bytes) {
     if (c.missing_bytes >= 0) return c.missing_bytes;
     return std::max<int64_t>(0, unknown_missing_bytes);
 }
+
+// Expected-work values within this factor of each other share a bucket and are ordered by
+// the later keys (missing bytes, load, ...).
+constexpr double kLiveputBucketRatio = 1.05;
+
+bool KnownLife(const Candidate& c) { return std::isfinite(c.expected_min_s) && c.expected_min_s > 0.0; }
 
 } // namespace
 
@@ -47,12 +54,37 @@ std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> can
         return false;
     });
 
-    // Flamenco-style: fill the mesh. Prefer the node with the most free slots so
-    // work spreads across peers instead of packing the requester first.
+    // Candidates without a hazard estimate count as the average known one, so missing history
+    // neither helps nor hurts. If all lives are equal the liveput term is constant and the
+    // order is exactly the old "most free slots" one.
+    double life_min = 0.0, life_max = 0.0, life_sum = 0.0;
+    int known = 0;
+    for (const auto& c : candidates) {
+        if (!KnownLife(c)) continue;
+        life_min = known == 0 ? c.expected_min_s : std::min(life_min, c.expected_min_s);
+        life_max = known == 0 ? c.expected_min_s : std::max(life_max, c.expected_min_s);
+        life_sum += c.expected_min_s;
+        ++known;
+    }
+    const double neutral_life = known == 0 ? 1.0 : (life_min == life_max ? life_min : life_sum / known);
+    auto life_of = [&](const Candidate& c) { return KnownLife(c) ? c.expected_min_s : neutral_life; };
+    bool liveput = false;
+    for (const auto& c : candidates) {
+        if (life_of(c) != life_of(candidates.front())) liveput = true;
+    }
+    // Higher is better. FreeSlots >= 1 and life > 0 here, so the log is defined.
+    auto work = [&](const Candidate& c) -> int64_t {
+        if (!liveput) return FreeSlots(c, cores);
+        const double expected_work = static_cast<double>(FreeSlots(c, cores)) * life_of(c);
+        return static_cast<int64_t>(std::floor(std::log(expected_work) / std::log(kLiveputBucketRatio)));
+    };
+
+    // Flamenco-style: fill the mesh. Prefer the node with the most expected committed work
+    // (free slots, discounted by how long the donor is expected to stay) so work spreads
+    // across peers instead of packing the requester first.
     auto key = [&](const Candidate& c) {
-        return std::tuple<int, int64_t, double, bool, std::chrono::milliseconds, const std::string&>(
-            -FreeSlots(c, cores), MissingForRank(c, unknown_missing_bytes), c.cpu_load_pct, !c.on_ac, c.latency,
-            c.node_id);
+        return std::tuple<int64_t, int64_t, double, bool, std::chrono::milliseconds, const std::string&>(
+            -work(c), MissingForRank(c, unknown_missing_bytes), c.cpu_load_pct, !c.on_ac, c.latency, c.node_id);
     };
     std::sort(candidates.begin(), candidates.end(),
               [&](const Candidate& a, const Candidate& b) { return key(a) < key(b); });

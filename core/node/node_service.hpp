@@ -73,6 +73,10 @@ public:
     // kSqueezedLevel on, new offers are refused: the owner is being held back already.
     static constexpr int kSqueezedLevel = 3;
     void SetComfortLevelProvider(std::function<int()> provider);
+
+    // The donor's own departure hazard (departures per hour), reported in every OfferReply as
+    // hazard_per_hour. A negative or non-finite value means "no record yet" and leaves the field unset.
+    void SetHazardProvider(std::function<double()> provider);
     [[nodiscard]] bool IsDraining() const;
 
     // Node ids of requesters that currently have a reserved or running task here.
@@ -124,6 +128,7 @@ private:
 
     mutable std::mutex comfort_mu_;
     std::function<int()> comfort_level_;
+    std::function<double()> hazard_per_hour_;
     mutable std::mutex mu_;
     std::map<TaskKey, Reservation> reserved_;
     std::map<TaskKey, Running> running_;
