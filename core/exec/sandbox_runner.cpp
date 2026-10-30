@@ -2,6 +2,7 @@
 
 #include "exec/bwrap.hpp"
 #include "exec/priority.hpp"
+#include "exec/units.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -19,6 +20,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 
 namespace zeromesh::exec {
@@ -287,7 +289,9 @@ std::optional<PreparedCgroup> PrepareTaskCgroup(const fs::path& parent, int core
     }
     if (CgroupFileWritable(out.dir / "pids.max")) WriteSmallFile(out.dir / "pids.max", "4096");
 
-    if (!out.memory && !out.cpu) {
+    // A limit was asked for but none could be applied: fall back to the non-cgroup path. With no
+    // limit asked for (the cgroup exists only so the task can be frozen or throttled) it is kept.
+    if (!out.memory && !out.cpu && (mem_bytes > 0 || cores > 0)) {
         fs::remove(out.dir, ec);
         return std::nullopt;
     }
@@ -339,6 +343,17 @@ bool CgroupHadOomKill(const fs::path& dir) {
     return count > 0;
 }
 
+// True while the kernel reports the cgroup as frozen (cgroup.events: "frozen 1").
+bool CgroupFrozen(const fs::path& dir) {
+    std::ifstream in(dir / "cgroup.events");
+    std::string key;
+    int value = 0;
+    while (in >> key >> value) {
+        if (key == "frozen") return value == 1;
+    }
+    return false;
+}
+
 } // namespace
 
 ResourceEnforcementStatus ProbeSandboxResourceEnforcement() {
@@ -360,6 +375,21 @@ std::optional<fs::path> DelegatedCgroupParent() {
 
 void SandboxRunner::SetCgroupObserver(CgroupObserver observer) {
     cgroup_observer_ = std::move(observer);
+}
+
+std::optional<fs::path> SandboxRunner::CgroupFor(const std::string& tag) const {
+    std::lock_guard lock(tagged_mu_);
+    auto it = tagged_cgroups_.find(tag);
+    if (it == tagged_cgroups_.end()) return std::nullopt;
+    return it->second;
+}
+
+bool SandboxRunner::SetTaskFrozen(const std::string& tag, bool frozen) {
+    auto dir = CgroupFor(tag);
+    if (!dir) return false;
+    const fs::path file = *dir / "cgroup.freeze";
+    if (!CgroupFileWritable(file)) return false;
+    return WriteSmallFile(file, frozen ? "1" : "0");
 }
 
 SandboxRunner::SandboxRunner(std::shared_ptr<store::CasStore> store, std::shared_ptr<store::MerkleBuilder> merkle,
@@ -401,6 +431,18 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         return result;
     }
     fs::create_directories(work / spec.working_dir);
+    // Partial commit: units the task commits land here. Ones that arrived with the input tree
+    // (an earlier attempt's work) are never reported again.
+    const fs::path units_dir = work / kUnitsDirName;
+    std::set<std::string> reported_units;
+    {
+        std::error_code uec;
+        fs::create_directories(units_dir, uec);
+        for (auto it = fs::directory_iterator(units_dir, uec); !uec && it != fs::directory_iterator();
+             it.increment(uec)) {
+            reported_units.insert(it->path().filename().string());
+        }
+    }
     // REAPI/compilers often write outputs under working_dir; ensure parents exist.
     for (const auto& out : spec.outputs) {
         if (!SafeRelative(out)) continue;
@@ -435,6 +477,7 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     b.AddEnv("XDG_RUNTIME_DIR", "/tmp/xdg-runtime");
     b.AddEnv("WAYLAND_DISPLAY", "");
     b.AddEnv("DISPLAY", "");
+    b.AddEnv("ZM_UNITS_DIR", std::string("/work/") + kUnitsDirName);
     b.SetWorkingDirectory((fs::path("/work") / spec.working_dir).lexically_normal().string());
     auto args = b.Build(spec.argv);
 
@@ -452,10 +495,24 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     std::optional<PreparedCgroup> task_cgroup;
     const bool want_mem = spec.mem_bytes > 0;
     const bool want_cpu = spec.cores > 0;
-    if (want_mem || want_cpu) {
+    // A tagged task also gets a cgroup without limits, so it can be frozen (departure) or throttled.
+    if (want_mem || want_cpu || !spec.task_tag.empty()) {
         if (auto parent = FindTaskCgroupParent()) task_cgroup = PrepareTaskCgroup(*parent, spec.cores, spec.mem_bytes);
     }
     if (task_cgroup && cgroup_observer_) cgroup_observer_(task_cgroup->dir, true);
+    if (task_cgroup && !spec.task_tag.empty()) {
+        std::lock_guard lock(tagged_mu_);
+        tagged_cgroups_[spec.task_tag] = task_cgroup->dir;
+    }
+    auto release_cgroup = [&] {
+        if (!task_cgroup) return;
+        if (!spec.task_tag.empty()) {
+            std::lock_guard lock(tagged_mu_);
+            tagged_cgroups_.erase(spec.task_tag);
+        }
+        if (cgroup_observer_) cgroup_observer_(task_cgroup->dir, false);
+        RemoveTaskCgroup(task_cgroup->dir);
+    };
     if (task_cgroup) {
         result.memory_enforced = task_cgroup->memory;
         result.cpu_enforced = task_cgroup->cpu;
@@ -469,7 +526,7 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     pid_t pid = fork();
     if (pid < 0) {
         result.error = "fork failed";
-        if (task_cgroup) RemoveTaskCgroup(task_cgroup->dir);
+        release_cgroup();
         ForceRemove(scratch);
         return result;
     }
@@ -495,10 +552,38 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     pollfd fds[2] = {{out_pipe[0], POLLIN, 0}, {err_pipe[0], POLLIN, 0}};
     int open_fds = 2;
     char buf[65536];
-    const auto deadline = start + spec.timeout;
+    auto deadline = start + spec.timeout;
     bool killed = false;
+    constexpr auto kScanEvery = std::chrono::milliseconds(100);
+    auto last_frozen_check = std::chrono::steady_clock::now();
+    auto last_unit_scan = last_frozen_check;
+
+    // Reports each new, finished file in the units directory exactly once. Dot-names are the
+    // staging area of the atomic write, so a half-written unit is never seen.
+    auto scan_units = [&] {
+        std::error_code uec;
+        for (auto it = fs::directory_iterator(units_dir, uec); !uec && it != fs::directory_iterator();
+             it.increment(uec)) {
+            const std::string name = it->path().filename().string();
+            if (!IsValidUnitId(name) || reported_units.contains(name)) continue;
+            struct stat ust{};
+            if (lstat(it->path().c_str(), &ust) != 0 || !S_ISREG(ust.st_mode)) continue;
+            reported_units.insert(name);
+            spec.on_unit(name, store_->PutBlobFile(it->path()));
+        }
+    };
 
     while (open_fds > 0) {
+        const auto tick = std::chrono::steady_clock::now();
+        // A frozen task is not running: that time must not eat into its timeout.
+        if (task_cgroup && tick - last_frozen_check >= kScanEvery) {
+            if (CgroupFrozen(task_cgroup->dir)) deadline += tick - last_frozen_check;
+            last_frozen_check = tick;
+        }
+        if (spec.on_unit && tick - last_unit_scan >= kScanEvery) {
+            last_unit_scan = tick;
+            scan_units();
+        }
         if (!killed && (stop.stop_requested() || std::chrono::steady_clock::now() >= deadline)) {
             if (stop.stop_requested())
                 result.cancelled = true;
@@ -528,6 +613,11 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
 
     int status = 0;
     waitpid(pid, &status, 0);
+    if (spec.on_unit) scan_units(); // units committed since the last scan, e.g. just before exit
+    {
+        std::error_code uec;
+        fs::remove(units_dir, uec); // removes it only if empty, so "." outputs stay as before
+    }
     if (WIFEXITED(status))
         result.exit_code = WEXITSTATUS(status);
     else if (WIFSIGNALED(status))
@@ -539,10 +629,7 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         CgroupHadOomKill(task_cgroup->dir)) {
         result.error = "task exceeded memory limit (killed)";
     }
-    if (task_cgroup) {
-        if (cgroup_observer_) cgroup_observer_(task_cgroup->dir, false);
-        RemoveTaskCgroup(task_cgroup->dir);
-    }
+    release_cgroup();
 
     out_file.close();
     err_file.close();
@@ -589,6 +676,7 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         }
         if (spec.capture_changed) {
             for (const auto& [rel, stamp] : TakeSnapshot(work)) {
+                if (rel.rfind(kUnitsDirName, 0) == 0) continue; // units travel as events, not outputs
                 auto it = before.find(rel);
                 bool changed =
                     it == before.end() || it->second.size != stamp.size || it->second.mtime_ns != stamp.mtime_ns;

@@ -102,6 +102,24 @@ info = zm.team_info()
 print(f"Team ID: {info.team_id}, Active: {info.in_team}, Pinned peers: {info.peers_pinned}")
 ```
 
+## Saving Partial Results (`commit_unit`)
+
+A task made of many units (frames, sweep cases) can save each one as it finishes. If the donor leaves or the
+task is cut off, the next attempt starts with those units already present, so only the rest runs again.
+
+```python
+import zeromesh
+
+for i in range(100):
+    if zeromesh.is_committed(f"case{i}"):
+        continue                                   # an earlier attempt finished it
+    result = run_case(i)
+    zeromesh.commit_unit(f"case{i}", result)       # bytes, text, or a file path (copied); atomic
+```
+
+`commit_unit` works only inside a task (it writes to `$ZM_UNITS_DIR`). Unit ids are 1-128 characters of
+`A-Z a-z 0-9 . _ -` and may not start with a dot. Job events carry a `unit_committed` field as units arrive.
+
 ## Error Handling
 
 - `zeromesh.DaemonNotRunning`: Raised if `zmd` is not running or socket is unreachable.
