@@ -17,8 +17,8 @@ bash scripts/zmfield.sh setup --open-firewall  # deps, bubblewrap>=0.12 if neede
 bash scripts/zmfield.sh selftest               # meson test; first answer to "does v2-integration compile and pass?"
 ```
 
-The v2-integration merge commits are marked "uncompiled", so expect to hit compile errors here before anything else.
-Stop and fix those first; the rest of this assumes a clean build.
+`v2-integration` at `2341adc` builds and passes all 10 `meson test` suites on Arch (one host). If `selftest` fails
+on a laptop, that is new information: stop and look before running the bench.
 
 **2. Requester (A), then donor (B):**
 
@@ -75,14 +75,16 @@ container) and restarts the service. `down` removes those drop-ins again.
 
 ## Verified vs not
 
-Verified when this was written (no build, no tests, no network, no services were run):
+Verified on the author's Arch laptop:
+- `v2-integration` at `2341adc` builds (`ninja -j6`) and passes all 10 `meson test` suites with the README venv.
+  That is one host only: no second machine, no HTCondor, no network was involved.
 - `bash -n` is clean; `--help`, `doctor` and `--dry-run` for `setup`, `requester`, `donor`, `bench`, `selftest`,
   `down` and `chaos` print the expected plans on an Arch box. shellcheck was not installed, so it was not run.
 - The pure-logic helpers were run against scratch directories: workdir staging, `sim.sh` output and calibration,
   HTCondor submit-file generation, rendered HTCondor config for both roles, and report generation from a fake CSV.
 
 **Not verified:**
-- That `v2-integration` builds or passes `meson test` (its merge commits say "uncompiled").
+- That the build and tests pass on other distros or compilers (Ubuntu ships bubblewrap < 0.12.0).
 - Package names and steps on anything but Arch (apt/dnf/zypper lists are from the README or best-effort); the
   bubblewrap-from-source path (`ZMF_BWRAP_TAG`, default `v0.12.0`, may not exist; meson option names are from memory).
 - Every HTCondor config knob, the CLAIMTOBE auth setup, config.d ordering on each distro's package, and the
