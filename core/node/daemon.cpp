@@ -13,6 +13,7 @@
 #include "node/action_cache.hpp"
 #include "node/client_service.hpp"
 #include "node/comfort_governor.hpp"
+#include "node/departure.hpp"
 #include "node/donor_policy.hpp"
 #include "node/job_manager.hpp"
 #include "node/local_executor.hpp"
@@ -240,6 +241,66 @@ int Daemon::Run() {
     DrainController drain_controller;
     std::unique_ptr<ComfortGovernor> comfort; // outlives the runner whose observer points at it
 
+    // Freeze-first departure (claim 3). Several sources can start one (battery/owner from the
+    // drain controller, lid/unplug from the watcher, suspend from logind); it ends when the
+    // last of them clears. Values are filled in from donor.toml once it is loaded.
+    constexpr int kDepartDrain = 1;
+    constexpr int kDepartSignal = 2;
+    constexpr int kDepartSleep = 4;
+    std::mutex departure_mu;
+    int departure_sources = 0;
+    std::chrono::milliseconds departure_ttl{0};
+    std::chrono::milliseconds departure_grace{0};
+    std::unique_ptr<DepartureWatcher> departure_watcher;
+    std::unique_ptr<LogindMonitor> logind;
+
+    auto begin_departure = [&](int source, v1::DepartureReason code, const std::string& detail) {
+        std::lock_guard lock(departure_mu);
+        const bool already = departure_sources != 0;
+        departure_sources |= source;
+        if (already || !node_service) return;
+        const uint32_t ttl_ms = static_cast<uint32_t>(departure_ttl.count());
+        const uint32_t grace_ms = static_cast<uint32_t>(departure_grace.count());
+        std::cerr << "zmd: departing: " << FormatDepartureReason(code, ttl_ms, detail) << "\n";
+        if (discovery) discovery->BroadcastNodeDraining(FormatDepartureReason(code, ttl_ms, detail));
+        const auto report = node_service->BeginDeparture(code, departure_ttl, departure_grace);
+        std::cerr << "zmd: departure: " << report.kept << " kept, " << report.frozen << " frozen, "
+                  << report.cancelled << " cancelled\n";
+        for (const auto& req_id : node_service->RequestersWithWork()) {
+            std::shared_ptr<NodeClient> c;
+            {
+                std::lock_guard clock(clients_mu);
+                if (auto it = clients.find(req_id); it != clients.end()) c = it->second;
+            }
+            if (!c && peers) {
+                if (auto peer = peers->Get(req_id); peer && !peer->ip_address.empty() && peer->node_port > 0 &&
+                                                    pins->FingerprintFor(peer->id)) {
+                    c = std::make_shared<NodeClient>(peer->ip_address + ":" + std::to_string(peer->node_port),
+                                                     identity, pins, peer->id);
+                    std::lock_guard clock(clients_mu);
+                    clients[peer->id] = c;
+                }
+            }
+            if (c) {
+                std::string err;
+                c->Drain(detail.empty() ? std::string(DepartureName(code)) : detail, &err, code, ttl_ms, grace_ms);
+            }
+        }
+    };
+    auto end_departure = [&](int source) {
+        std::lock_guard lock(departure_mu);
+        if (!(departure_sources & source)) return;
+        departure_sources &= ~source;
+        if (departure_sources != 0 || !node_service) return;
+        std::cerr << "zmd: departure over, resume accepting work\n";
+        node_service->EndDeparture();
+        node_service->SetDraining(false);
+        if (discovery) {
+            discovery->SetLocalState(net::PeerState::Active);
+            discovery->AnnounceNow();
+        }
+    };
+
     try {
         auto state = NodeState::LoadOrCreate(config_.state_dir);
         node_id = state.node_id();
@@ -344,6 +405,30 @@ int Daemon::Run() {
         });
         comfort->Start();
 
+        // Freeze-first departure: the state machine lives in NodeService; here it is given a
+        // way to freeze a task (its cgroup, via the governor so the ladder cannot thaw it), a
+        // memory of how long commands take, and the signals that start a departure.
+        departure_ttl = std::chrono::seconds(policy.freeze_ttl_s);
+        departure_grace = std::chrono::seconds(policy.drain_grace_s);
+        departure_watcher = std::make_unique<DepartureWatcher>(policy.depart_on_lid, policy.depart_on_unplug);
+        node_service->SetRuntimeHistory(
+            std::make_shared<RuntimeHistory>(config_.state_dir / "runtime_history.tsv"));
+        node_service->SetTaskFreezer([runner, g = comfort.get()](const std::string& exec_id, bool freeze) {
+            auto dir = runner->CgroupFor(exec_id);
+            return dir.has_value() && g->HoldFrozen(*dir, freeze);
+        });
+        if (LogindMonitor::Available()) {
+            logind = std::make_unique<LogindMonitor>(LogindMonitor::DefaultConfig(), [&](bool preparing) {
+                if (preparing)
+                    begin_departure(kDepartSleep, v1::DEPARTURE_SUSPEND, "system going to sleep");
+                else
+                    end_departure(kDepartSleep);
+            });
+            logind->Start();
+        } else {
+            std::cerr << "zmd: busctl not found: suspend is not detected (lid and AC still are)\n";
+        }
+
         grpc::ServerBuilder client_builder;
         client_builder.AddListeningPort("unix:" + sock.string(), grpc::InsecureServerCredentials());
         client_builder.RegisterService(client_service.get());
@@ -447,44 +532,31 @@ int Daemon::Run() {
                 const net::Telemetry t = telemetry_fn();
                 const auto upd = drain_controller.Tick(t);
                 if (upd.entered) {
-                    std::cerr << "zmd: draining: " << upd.reason << "\n";
-                    if (discovery) discovery->BroadcastNodeDraining(upd.reason);
-                    if (node_service) {
-                        node_service->SetDraining(true, upd.reason);
-                        for (const auto& req_id : node_service->RequestersWithWork()) {
-                            std::shared_ptr<NodeClient> c;
-                            {
-                                std::lock_guard lock(clients_mu);
-                                if (auto it = clients.find(req_id); it != clients.end()) c = it->second;
-                            }
-                            if (!c && peers) {
-                                if (auto peer = peers->Get(req_id); peer && !peer->ip_address.empty() &&
-                                                                    peer->node_port > 0 &&
-                                                                    pins->FingerprintFor(peer->id)) {
-                                    c = std::make_shared<NodeClient>(peer->ip_address + ":" +
-                                                                         std::to_string(peer->node_port),
-                                                                     identity, pins, peer->id);
-                                    std::lock_guard lock(clients_mu);
-                                    clients[peer->id] = c;
-                                }
-                            }
-                            if (c) {
-                                std::string err;
-                                c->Drain(upd.reason, &err);
-                            }
-                        }
-                        node_service->CancelPreemptible();
-                    }
+                    // Battery below the threshold, or the owner is back: freeze-first, not kill-first.
+                    begin_departure(kDepartDrain,
+                                    drain_controller.policy().ShouldDrain(t) ? v1::DEPARTURE_BATTERY
+                                                                             : v1::DEPARTURE_OWNER,
+                                    upd.reason);
                 } else if (upd.left) {
-                    std::cerr << "zmd: resume accepting work\n";
-                    if (discovery) {
-                        discovery->SetLocalState(net::PeerState::Active);
-                        discovery->AnnounceNow();
-                    }
-                    if (node_service) node_service->SetDraining(false);
+                    end_departure(kDepartDrain);
                 } else if (upd.draining && discovery && discovery->local_state() != net::PeerState::Draining) {
                     discovery->SetLocalState(net::PeerState::Draining);
                 }
+
+                // Lid closed / unplugged (suspend arrives from logind, above).
+                if (departure_watcher) {
+                    SignalState signals;
+                    signals.on_ac = t.on_ac;
+                    if (auto lid = ReadLidClosed()) signals.lid_closed = *lid;
+                    if (auto ev = departure_watcher->Update(signals)) {
+                        if (ev->active)
+                            begin_departure(kDepartSignal, ev->reason, "");
+                        else
+                            end_departure(kDepartSignal);
+                    }
+                }
+                // Freeze kept tasks once the grace window is over; kill the ones whose ttl ran out.
+                if (node_service) node_service->TickDeparture();
                 for (int i = 0; i < 10 && !admit_stop.load(); ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
@@ -549,6 +621,7 @@ int Daemon::Run() {
 
     // Stop admission and drain monitor, then discovery; Drain peers with tasks in flight.
     admit_stop = true;
+    if (logind) logind->Stop(); // its callback uses the departure state above
     if (comfort) comfort->Stop();
     if (admit_thread.joinable()) admit_thread.join();
     if (drain_thread.joinable()) drain_thread.join();

@@ -36,7 +36,9 @@ The v2 plan (data moved once, owner comfort, churn-proof completion, each measur
   been recorded on real hardware, so M3–M5 stay unticked in PLAN.md.
 - There is no committed measurement of speedup, bytes moved or owner impact.
 - The REAPI front-end keeps its action cache in memory and stubs `WaitExecution`.
-- Draining on low battery kills tasks; there is no freeze and no partial result yet.
+- A departing donor (low battery, owner back, lid closed, suspend) freezes its tasks with `cgroup.freeze` for
+  `freeze_ttl_s` instead of killing them, and tasks can save finished units with `commit_unit` so a retry runs
+  only the rest. Both are covered by unit tests on one host only; no two-machine or measured result yet.
 
 Earlier DHT, distributed-shared-memory, GPU and torrent code is parked in [`frozen/`](frozen/README.md). None of it is built.
 

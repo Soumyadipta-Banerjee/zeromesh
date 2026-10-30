@@ -38,6 +38,13 @@ struct DonorPolicy {
     // Tail hedging (claim 3): the most simultaneous copies of one task, original included.
     // 1 turns hedging off.
     int max_copies{2};
+    // Freeze-first departure (claim 3): tasks expected to finish within drain_grace_s keep
+    // running when this node leaves; the rest are frozen for up to freeze_ttl_s before being
+    // killed. depart_on_lid / depart_on_unplug choose which signals start a departure.
+    int drain_grace_s{20};
+    int freeze_ttl_s{120};
+    bool depart_on_lid{true};
+    bool depart_on_unplug{false};
 
     // Reads <config_dir>/donor.toml: `key = value` lines, '#' starts a comment. A missing
     // file gives the defaults. Unknown keys and bad values are reported on stderr and ignored.

@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -33,6 +35,12 @@ struct RunSpec {
     std::string node_id;            // exported as ZM_NODE_ID
     int cores{0};                   // 0 means 1 when applying a CPU cgroup quota
     uint64_t mem_bytes{0};          // 0 means no memory cap
+    // Names the run to SandboxRunner::CgroupFor / SetTaskFrozen (empty: not addressable).
+    std::string task_tag;
+    // Partial commit (exec/units.hpp): called, from the thread that runs the sandbox, once for
+    // each new unit file the task commits to $ZM_UNITS_DIR, with the unit stored in the CAS.
+    // Units already present in the input tree are not reported.
+    std::function<void(const std::string& unit_id, const store::Digest& digest)> on_unit;
 };
 
 struct OutputEntry {
@@ -91,12 +99,21 @@ public:
     using CgroupObserver = std::function<void(const std::filesystem::path&, bool added)>;
     void SetCgroupObserver(CgroupObserver observer);
 
+    // The cgroup of the running task started with RunSpec::task_tag == `tag`; nullopt when no
+    // such task runs or it has no cgroup (no delegation).
+    [[nodiscard]] std::optional<std::filesystem::path> CgroupFor(const std::string& tag) const;
+    // Freezes or thaws that task with cgroup.freeze. False when there is no such task cgroup
+    // or the kernel refused. Time spent frozen does not count against the task's timeout.
+    bool SetTaskFrozen(const std::string& tag, bool frozen);
+
 private:
     std::shared_ptr<store::CasStore> store_;
     std::shared_ptr<store::MerkleBuilder> merkle_;
     std::filesystem::path scratch_base_;
     std::string bwrap_path_;
     CgroupObserver cgroup_observer_;
+    mutable std::mutex tagged_mu_;
+    std::map<std::string, std::filesystem::path> tagged_cgroups_;
     std::string bwrap_error_; // why bwrap_path_ was refused, if it was
 };
 

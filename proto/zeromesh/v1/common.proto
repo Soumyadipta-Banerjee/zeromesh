@@ -117,6 +117,13 @@ enum TaskState {
   CANCELLED = 6;
 }
 
+// A task finished one unit of its work (a frame, a sweep case) and committed it; see
+// exec/units.hpp. Carried on JobEvent so a retry can start from the units already done.
+message UnitCommitted {
+  string unit_id = 1;
+  Digest digest = 2;
+}
+
 message JobEvent {
   string job_id = 1;
   string task_name = 2;
@@ -125,6 +132,7 @@ message JobEvent {
   bytes log_chunk = 5;
   int32 log_fd = 6;  // 1 = stdout, 2 = stderr; 0 when not a log event
   TaskResult result = 7;
+  UnitCommitted unit_committed = 8;  // set on a unit-committed event (state is the task's current state)
 }
 
 message JobStatus {

@@ -19,6 +19,8 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <set>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -99,6 +101,10 @@ public:
     void Add(const std::filesystem::path& dir); // also applies the current level
     void Remove(const std::filesystem::path& dir);
     void Apply(int level);
+    // Departure freeze: while held, `dir` stays frozen whatever the comfort level; releasing
+    // thaws it unless the ladder itself is at the freeze step. False when cgroup.freeze cannot
+    // be written (no such cgroup, or the controller is not delegated).
+    bool Hold(const std::filesystem::path& dir, bool frozen);
     [[nodiscard]] int level() const;
     [[nodiscard]] Caps Capabilities() const;
 
@@ -108,6 +114,7 @@ private:
     mutable std::mutex mu_;
     int level_{0};
     std::vector<std::filesystem::path> dirs_;
+    std::set<std::filesystem::path> held_;
     Caps caps_;
 };
 
@@ -129,6 +136,8 @@ public:
 
     void AddTaskCgroup(const std::filesystem::path& dir) { actuator_.Add(dir); }
     void RemoveTaskCgroup(const std::filesystem::path& dir) { actuator_.Remove(dir); }
+    // Freezes or thaws one task cgroup for a departure, independent of the comfort ladder.
+    bool HoldFrozen(const std::filesystem::path& dir, bool frozen) { return actuator_.Hold(dir, frozen); }
 
     // One sampling step; the thread calls it, tests call it directly.
     void Tick(const PsiTotals& totals, Clock::time_point now);
