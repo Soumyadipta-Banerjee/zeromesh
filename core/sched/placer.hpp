@@ -9,10 +9,14 @@
 //     CAS before reporting the result.
 // Capacity is reserved atomically before Offer/Run so concurrent tasks do not all
 // pile onto the top-ranked node (at most cores_total/task.cores in flight per node;
-// load-derived cores_free is a ranking/UI signal only). Donor drain, peer loss, and
-// push/pull transport failures re-queue up to policy.max_retries (JobEvent QUEUED,
-// detail "retry n/max: reason"). Run timeouts, non-zero exits, and donor env/policy
-// rejections are final; user/job cancel is never retried.
+// load-derived cores_free is a ranking/UI signal only; a donor's reported core limit caps it,
+// and the memory declared by tasks already placed there is held against its total). Donor
+// drain, peer loss, and push/pull transport failures re-queue up to policy.max_retries
+// (JobEvent QUEUED, detail "retry n/max: reason"). Run timeouts, non-zero exits and user/job
+// cancel are final. An Offer rejection is that donor's answer only: a passing one (busy, owner
+// at the keyboard, draining) defers the donor for the retry_after it names, a capability or
+// policy miss skips it for a while, and the task fails ("no node can run this task: ...")
+// only once no donor is left.
 
 #include "net/peer_table.hpp"
 #include "net/telemetry.hpp"
@@ -132,6 +136,9 @@ private:
     // Lets `target` fetch what it misses from donors known to hold it; returns what is still missing.
     std::vector<v1::Digest> SeedFromPeers(const std::string& target, node::NodeClient& client,
                                           std::vector<v1::Digest> missing);
+    // Remembers the core limit a donor reported in an OfferReply; Rank uses it as the donor's capacity.
+    void NoteCoreLimit(const std::string& node_id, const v1::OfferReply& reply);
+    [[nodiscard]] int CoreLimitOf(const std::string& node_id) const; // -1 until the donor has told us
     void NoteHolders(const std::string& node_id, const std::vector<v1::Digest>& digests);
     void AddSeeded(const std::string& node_id, uint64_t bytes);
     void HedgeScan();
@@ -161,6 +168,9 @@ private:
 
     std::mutex sent_mu_;
     std::map<std::string, std::shared_ptr<DonorSent>> sent_;
+
+    mutable std::mutex limits_mu_;
+    std::unordered_map<std::string, int> core_limit_; // node id -> cores it donates in total
 
     mutable std::mutex seed_mu_;
     SeedConfig seed_cfg_;

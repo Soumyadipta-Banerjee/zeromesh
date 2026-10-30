@@ -155,36 +155,66 @@ bool DonorPolicy::DrainCondition(const net::Telemetry& t) const {
     return false;
 }
 
-std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                int cores_in_use) const {
+namespace {
+
+// How long a requester should wait before offering again, per passing refusal.
+constexpr int kRetryCoresBusyMs = 100; // a sibling task may finish any moment
+constexpr int kRetryMemoryMs = 2000;
+constexpr int kRetryBatteryMs = 15000; // battery state changes slowly
+
+} // namespace
+
+std::optional<Refusal> DonorPolicy::Evaluate(const net::Telemetry& t, const v1::TaskSpec& spec,
+                                             int cores_in_use) const {
     if (!t.on_ac && t.battery_pct >= 0) {
         if (ShouldDrain(t)) {
-            return "on battery at " + std::to_string(t.battery_pct) + "%, below the drain threshold of " +
-                   std::to_string(drain_below_battery) + "%";
+            return Refusal{RefusalKind::Busy,
+                           "on battery at " + std::to_string(t.battery_pct) + "%, below the drain threshold of " +
+                               std::to_string(drain_below_battery) + "%",
+                           kRetryBatteryMs};
         }
         if (t.battery_pct <= allow_on_battery_above) {
-            return "on battery at " + std::to_string(t.battery_pct) + "%; donor policy needs AC or more than " +
-                   std::to_string(allow_on_battery_above) + "%";
+            return Refusal{RefusalKind::Busy,
+                           "on battery at " + std::to_string(t.battery_pct) + "%; donor policy needs AC or more than " +
+                               std::to_string(allow_on_battery_above) + "%",
+                           kRetryBatteryMs};
         }
     }
     if (spec.policy().allow_network() && !allow_network) {
-        return "task needs network access, which this node's donor policy does not allow";
+        return Refusal{RefusalKind::Unsupported,
+                       "task needs network access, which this node's donor policy does not allow", 0};
     }
     const std::string& arch = spec.resources().arch();
     if (!arch.empty() && !t.arch.empty() && arch != t.arch) {
-        return "task needs arch " + arch + ", this node is " + t.arch;
+        return Refusal{RefusalKind::Unsupported, "task needs arch " + arch + ", this node is " + t.arch, 0};
     }
     const int need = std::max(spec.resources().cores(), 1);
     const int limit = CoreLimit(t.cores_total);
+    if (need > limit) {
+        return Refusal{RefusalKind::Unsupported,
+                       "task needs " + std::to_string(need) + " cores; donor policy allows only " +
+                           std::to_string(limit),
+                       0};
+    }
     if (cores_in_use + need > limit) {
-        return "task needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) + " and " +
-               std::to_string(cores_in_use) + " are in use";
+        return Refusal{RefusalKind::Busy,
+                       "task needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) +
+                           " and " + std::to_string(cores_in_use) + " are in use",
+                       kRetryCoresBusyMs};
     }
     const int64_t mem = spec.resources().mem_bytes();
     if (mem > 0 && static_cast<uint64_t>(mem) > t.mem_available) {
-        return "task needs " + std::to_string(mem) + " bytes of memory, " + std::to_string(t.mem_available) +
-               " are available";
+        return Refusal{RefusalKind::Busy,
+                       "task needs " + std::to_string(mem) + " bytes of memory, " + std::to_string(t.mem_available) +
+                           " are available",
+                       kRetryMemoryMs};
     }
+    return std::nullopt;
+}
+
+std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
+                                                int cores_in_use) const {
+    if (auto r = Evaluate(t, spec, cores_in_use)) return std::move(r->reason);
     return std::nullopt;
 }
 

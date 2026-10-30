@@ -149,3 +149,34 @@ TEST(DrainControllerHysteresis) {
     ASSERT_TRUE(ctl.Tick(active, idle_at).draining);
     ASSERT_TRUE(ctl.Tick(active, idle_at + std::chrono::seconds(5)).left);
 }
+
+TEST(DonorPolicyRefusalKinds) {
+    using zeromesh::node::RefusalKind;
+    DonorPolicy p; // donates cores_total - 1 = 7 of 8 cores
+    auto spec = Echo();
+
+    auto battery = p.Evaluate(Laptop(30, false), spec, 0);
+    ASSERT_TRUE(battery.has_value());
+    ASSERT_TRUE(battery->kind == RefusalKind::Busy);
+    ASSERT_TRUE(battery->retry_after_ms > 0);
+
+    auto busy = p.Evaluate(Laptop(-1, true), spec, 7);
+    ASSERT_TRUE(busy.has_value());
+    ASSERT_TRUE(busy->kind == RefusalKind::Busy);
+
+    // Needing more than the donor ever donates is not "busy": waiting will not help.
+    spec.mutable_resources()->set_cores(8);
+    auto too_big = p.Evaluate(Laptop(-1, true), spec, 0);
+    ASSERT_TRUE(too_big.has_value());
+    ASSERT_TRUE(too_big->kind == RefusalKind::Unsupported);
+
+    auto net = Echo();
+    net.mutable_policy()->set_allow_network(true);
+    auto no_net = p.Evaluate(Laptop(-1, true), net, 0);
+    ASSERT_TRUE(no_net.has_value());
+    ASSERT_TRUE(no_net->kind == RefusalKind::Unsupported);
+
+    ASSERT_FALSE(p.Evaluate(Laptop(-1, true), Echo(), 0).has_value());
+    // Refuses stays the same, minus the kind.
+    ASSERT_EQ(p.Refuses(Laptop(-1, true), spec, 0), std::optional<std::string>(too_big->reason));
+}

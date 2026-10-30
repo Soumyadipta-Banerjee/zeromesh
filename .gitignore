@@ -32,3 +32,5 @@ __pycache__/
 .pytest_cache/
 *.egg
 cscope.out*
+.claude/
+zm-objs/

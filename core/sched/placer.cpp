@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <future>
 #include <map>
@@ -56,28 +57,43 @@ std::string RetryReason(const v1::TaskResult& r, bool drain_preempted) {
     return "retry";
 }
 
-bool OfferRejectionRetryable(const std::string& reason) {
-    return reason.find("in use") != std::string::npos || reason.find("draining") != std::string::npos;
-}
+// What to do about a donor that rejected an offer.
+struct Rejection {
+    bool passing{false};                  // true: the donor will take work again soon
+    std::chrono::milliseconds retry_after{0};
+};
 
-// Capability miss on one donor: try the next peer, and offer this one again after
-// kCapabilityRecheck (a donor may install the command while the job runs).
-bool OfferRejectionTryNextPeer(const std::string& reason) {
-    return reason.find("not found on this node") != std::string::npos ||
-           reason.find("no env provider") != std::string::npos;
+constexpr std::chrono::milliseconds kMinRetryAfter{50};
+
+// Donors state the kind of rejection; one that does not (older nodes) is classified by its
+// prose. A rejection that is neither passing nor a capability miss is still only that donor's
+// "no": the task goes on to the next donor and fails only once none is left.
+Rejection ClassifyRejection(const v1::OfferReply& reply) {
+    using std::chrono::milliseconds;
+    switch (reply.reject_kind()) {
+    case v1::REJECT_DRAINING:
+    case v1::REJECT_BUSY:
+        return {true, std::max(milliseconds(reply.retry_after_ms()), kMinRetryAfter)};
+    case v1::REJECT_UNSUPPORTED:
+        return {false, milliseconds(0)};
+    default:
+        break;
+    }
+    const std::string& why = reply.reason();
+    if (why.find("owner busy") != std::string::npos) return {true, milliseconds(5000)};
+    if (why.find("in use") != std::string::npos || why.find("draining") != std::string::npos) {
+        return {true, kMinRetryAfter};
+    }
+    return {false, milliseconds(0)};
 }
 
 constexpr std::chrono::seconds kCapabilityRecheck{15};
 
-// The donor's owner is busy and the comfort governor is holding donated work back; send
-// elsewhere and look again soon.
-bool OfferRejectionOwnerBusy(const std::string& reason) {
-    return reason.find("owner busy") != std::string::npos;
-}
-constexpr std::chrono::seconds kOwnerBusyRecheck{5};
-
 // Longest task horizon (seconds) used when ranking donors by departure hazard.
 constexpr double kHazardHorizonCapS = 900.0;
+
+// A task waiting for capacity looks again at least this often.
+constexpr std::chrono::milliseconds kPlacementRecheck{100};
 
 } // namespace
 
@@ -141,14 +157,23 @@ struct Placer::Shared {
     std::mutex mu;
     std::map<std::string, std::shared_ptr<Task>> tasks;
     std::map<std::string, int> in_flight; // node id -> tasks we run there
+    std::map<std::string, int64_t> mem_in_flight; // node id -> memory those tasks declared
+    std::condition_variable cv;           // notified when a reservation is released
 
     int InFlightLocked(const std::string& node) const {
         auto it = in_flight.find(node);
         return it == in_flight.end() ? 0 : it->second;
     }
 
-    void AddLocked(const std::string& node, int delta) {
+    int64_t MemInFlightLocked(const std::string& node) const {
+        auto it = mem_in_flight.find(node);
+        return it == mem_in_flight.end() ? 0 : it->second;
+    }
+
+    // `mem` is the task's declared memory; it follows the task's reservation in and out.
+    void AddLocked(const std::string& node, int delta, int64_t mem = 0) {
         if ((in_flight[node] += delta) <= 0) in_flight.erase(node);
+        if ((mem_in_flight[node] += delta * mem) <= 0) mem_in_flight.erase(node);
     }
 
     void Forget(const std::string& task_id) {
@@ -176,6 +201,18 @@ void Placer::SetHazardModel(std::shared_ptr<const HazardModel> model) {
 std::shared_ptr<const HazardModel> Placer::Hazard() const {
     std::lock_guard lock(hazard_mu_);
     return hazard_;
+}
+
+void Placer::NoteCoreLimit(const std::string& node_id, const v1::OfferReply& reply) {
+    if (!reply.has_core_limit()) return;
+    std::lock_guard lock(limits_mu_);
+    core_limit_[node_id] = static_cast<int>(reply.core_limit());
+}
+
+int Placer::CoreLimitOf(const std::string& node_id) const {
+    std::lock_guard lock(limits_mu_);
+    auto it = core_limit_.find(node_id);
+    return it == core_limit_.end() ? -1 : it->second;
 }
 
 int64_t Placer::InputTreeBytes(const v1::TaskSpec& spec) const {
@@ -453,6 +490,13 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     std::unordered_set<std::string> tried; // nodes already offered this placement round
     // Nodes that lacked the command, and when they may be offered again.
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> missing_until;
+    // Donors that turned the offer down for now (busy, owner at the keyboard, draining) and when
+    // to offer again. Unlike missing_until they still count as able to run the task.
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> defer_until;
+    auto deferred = [&](const std::string& id) {
+        auto it = defer_until.find(id);
+        return it != defer_until.end() && std::chrono::steady_clock::now() < it->second;
+    };
     auto lacks_command = [&](const std::string& id) {
         auto it = missing_until.find(id);
         return it != missing_until.end() && std::chrono::steady_clock::now() < it->second;
@@ -463,6 +507,8 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
     const std::string input_root_hash = spec.input_root().hash();
     const int64_t input_tree_bytes = InputTreeBytes(spec);
 
+    const int64_t task_mem = std::max<int64_t>(spec.resources().mem_bytes(), 0);
+
     // Seconds a donor must stay for this task to finish. The policy timeout is an upper bound,
     // not an estimate, so cap it; the hazard ranking only needs a horizon of the right scale.
     const double task_s = std::min<double>(spec.policy().has_timeout_s() && spec.policy().timeout_s() > 0
@@ -472,15 +518,20 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
 
     auto release = [&](const Reservation& res) {
         std::lock_guard lock(shared_->mu);
-        shared_->AddLocked(res.node_id, -1);
-        std::lock_guard tlock(task->mu);
-        if (task->assigned_node == res.node_id) task->assigned_node.clear();
-        task->client.reset();
-        task->is_local = false;
-        task->running = false;
+        shared_->AddLocked(res.node_id, -1, task_mem);
+        {
+            std::lock_guard tlock(task->mu);
+            if (task->assigned_node == res.node_id) task->assigned_node.clear();
+            task->client.reset();
+            task->is_local = false;
+            task->running = false;
+        }
+        shared_->cv.notify_all(); // capacity freed: let queued tasks look again
     };
 
-    auto blocked = [&](const std::string& id) { return skip.contains(id) || tried.contains(id) || lacks_command(id); };
+    auto blocked = [&](const std::string& id) {
+        return skip.contains(id) || tried.contains(id) || lacks_command(id) || deferred(id);
+    };
 
     auto reserve_next = [&]() -> std::optional<Reservation> {
         std::lock_guard lock(shared_->mu);
@@ -491,6 +542,8 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                                            .cores_total = self.cores_total,
                                            .cores_free = self.cores_free,
                                            .mem_available = self.mem_available,
+                                           .mem_total = self.mem_total,
+                                           .mem_committed = shared_->MemInFlightLocked(local_id_),
                                            .cpu_load_pct = self.cpu_load_pct,
                                            .on_ac = self.on_ac,
                                            .arch = self.arch,
@@ -507,6 +560,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                            .cores_total = p.cores,
                            .cores_free = p.cores_free,
                            .mem_available = p.mem_available,
+                           .mem_total = p.memory_bytes,
+                           .mem_committed = shared_->MemInFlightLocked(p.id),
+                           .core_limit = CoreLimitOf(p.id),
                            .cpu_load_pct = p.cpu_load_pct,
                            .on_ac = p.is_charging,
                            .arch = p.arch,
@@ -523,8 +579,8 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                 if (c.is_local) c.expected_min_s = task_s;
             }
         }
-        for (const Candidate& c : Rank(spec, std::move(candidates), input_tree_bytes)) {
-            shared_->AddLocked(c.node_id, 1);
+        for (const Candidate& c : Rank(spec, std::move(candidates), input_tree_bytes, task_s)) {
+            shared_->AddLocked(c.node_id, 1, task_mem);
             {
                 std::lock_guard tlock(task->mu);
                 task->assigned_node = c.node_id;
@@ -568,6 +624,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                                            .cores_total = self.cores_total,
                                            .cores_free = self.cores_free,
                                            .mem_available = self.mem_available,
+                                           .mem_total = self.mem_total,
                                            .cpu_load_pct = self.cpu_load_pct,
                                            .on_ac = self.on_ac,
                                            .arch = self.arch,
@@ -582,6 +639,8 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                           .cores_total = p.cores,
                           .cores_free = p.cores_free,
                           .mem_available = p.mem_available,
+                          .mem_total = p.memory_bytes,
+                          .core_limit = CoreLimitOf(p.id),
                           .cpu_load_pct = p.cpu_load_pct,
                           .on_ac = p.is_charging,
                           .arch = p.arch,
@@ -589,7 +648,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                           .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
                           .in_flight = 0});
         }
-        return !Rank(spec, std::move(candidates), input_tree_bytes).empty();
+        return !Rank(spec, std::move(candidates), input_tree_bytes, task_s).empty();
     };
 
     // Donor drain may arrive as MarkDraining, or only as a cancelled TaskResult if the
@@ -635,7 +694,10 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                 return fail_placement(last_reason);
             }
             tried.clear();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            // Wake when a reservation is released; the timeout covers capacity freed elsewhere
+            // (other requesters, peers coming and going) and deferred donors becoming due.
+            std::unique_lock wait_lock(shared_->mu);
+            shared_->cv.wait_for(wait_lock, kPlacementRecheck);
             continue;
         }
         tried.insert(reserved->node_id);
@@ -710,21 +772,15 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             if (infra_retry_or_fail(reserved->node_id, reason)) continue;
             return fail_placement(reason);
         }
+        NoteCoreLimit(reserved->node_id, *reply);
         if (!reply->accepted()) {
             release(*reserved);
-            const std::string& why = reply->reason();
-            if (OfferRejectionRetryable(why)) {
-                tried.erase(reserved->node_id);
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            } else if (OfferRejectionOwnerBusy(why)) {
-                missing_until[reserved->node_id] = std::chrono::steady_clock::now() + kOwnerBusyRecheck;
-                last_reason = "node " + reserved->node_id + ": " + why;
-            } else if (OfferRejectionTryNextPeer(why)) {
-                missing_until[reserved->node_id] = std::chrono::steady_clock::now() + kCapabilityRecheck;
-                last_reason = "node " + reserved->node_id + ": " + why;
+            last_reason = "node " + reserved->node_id + ": " + reply->reason();
+            const Rejection rej = ClassifyRejection(*reply);
+            if (rej.passing) {
+                defer_until[reserved->node_id] = std::chrono::steady_clock::now() + rej.retry_after;
             } else {
-                return task->Done(
-                    Failed(local_id_, "no node can run this task: node " + reserved->node_id + ": " + why));
+                missing_until[reserved->node_id] = std::chrono::steady_clock::now() + kCapabilityRecheck;
             }
             continue;
         }

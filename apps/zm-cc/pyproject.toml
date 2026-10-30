@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zm-cc"
+version = "0.1.0"
+description = "Distribute C, C++ and Fortran compilation across a ZeroMesh team"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "zeromesh",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+zm-cc = "zm_cc.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zm_cc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

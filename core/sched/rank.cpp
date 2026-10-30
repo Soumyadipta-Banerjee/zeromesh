@@ -16,6 +16,7 @@ namespace {
 int FreeSlots(const Candidate& c, int cores) {
     const int per = std::max(cores, 1);
     int total = c.cores_total > 0 ? c.cores_total : c.cores_free;
+    if (c.core_limit >= 0) total = std::min(total, c.core_limit);
     const int capacity = std::max(total, 0) / per;
     return capacity - c.in_flight;
 }
@@ -29,6 +30,21 @@ int64_t MissingForRank(const Candidate& c, int64_t unknown_missing_bytes) {
 // the later keys (missing bytes, load, ...).
 constexpr double kLiveputBucketRatio = 1.05;
 
+// Memory the donor can still promise: what is free right now, and what is left of its total after
+// the tasks we already placed there.
+bool FitsMemory(const Candidate& c, int64_t mem) {
+    if (mem <= 0) return true;
+    if (c.mem_available < static_cast<uint64_t>(mem)) return false;
+    if (c.mem_total > 0) {
+        const int64_t uncommitted = static_cast<int64_t>(c.mem_total) - std::max<int64_t>(c.mem_committed, 0);
+        if (uncommitted < mem) return false;
+    }
+    return true;
+}
+
+// A transfer under this share of the task's time is noise; ordering then stays on slots alone.
+constexpr double kTransferNoiseShare = 0.01;
+
 bool KnownLife(const Candidate& c) { return std::isfinite(c.expected_min_s) && c.expected_min_s > 0.0; }
 
 } // namespace
@@ -40,7 +56,8 @@ double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes) {
 }
 
 std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates,
-                            int64_t unknown_missing_bytes) {
+                            int64_t unknown_missing_bytes, double task_s) {
+    if (!(task_s > 0.0) || !std::isfinite(task_s)) task_s = kDefaultTaskSeconds;
     const auto& policy = spec.policy();
     const bool may_local = !policy.has_may_run_local() || policy.may_run_local();
     const bool may_remote = !policy.has_may_run_remote() || policy.may_run_remote();
@@ -58,7 +75,7 @@ std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> can
         if (c.is_local ? !may_local : !may_remote) return true;
         if (!arch.empty() && c.arch != arch) return true;
         if (FreeSlots(c, cores) < 1) return true;
-        if (mem > 0 && c.mem_available < static_cast<uint64_t>(mem)) return true;
+        if (!FitsMemory(c, mem)) return true;
         return false;
     });
 
@@ -80,10 +97,18 @@ std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> can
     for (const auto& c : candidates) {
         if (life_of(c) != life_of(candidates.front())) liveput = true;
     }
-    // Higher is better. FreeSlots >= 1 and life > 0 here, so the log is defined.
+    // Share of the task's time that is useful once the input has arrived.
+    auto efficiency = [&](const Candidate& c) {
+        return task_s / (task_s + TransferCostSeconds(c, unknown_missing_bytes));
+    };
+    bool transfer_matters = false;
+    for (const auto& c : candidates) {
+        if (TransferCostSeconds(c, unknown_missing_bytes) > kTransferNoiseShare * task_s) transfer_matters = true;
+    }
+    // Higher is better. FreeSlots >= 1, life > 0 and efficiency > 0 here, so the log is defined.
     auto work = [&](const Candidate& c) -> int64_t {
-        if (!liveput) return FreeSlots(c, cores);
-        const double expected_work = static_cast<double>(FreeSlots(c, cores)) * life_of(c);
+        if (!liveput && !transfer_matters) return FreeSlots(c, cores);
+        const double expected_work = static_cast<double>(FreeSlots(c, cores)) * life_of(c) * efficiency(c);
         return static_cast<int64_t>(std::floor(std::log(expected_work) / std::log(kLiveputBucketRatio)));
     };
 
