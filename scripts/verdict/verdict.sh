@@ -205,11 +205,27 @@ with open(p, "w") as f:
 EOF
 }
 
-# vd_analyze RES ROOT [--smoke] -> runs analyze.py; its stdout (may hold NEEDS_EXTENSION) is passed through
+# vd_analyze RES ROOT ANALYZER_DIR [--smoke] -> runs ANALYZER_DIR/analyze.py (its siblings import from the same
+# dir); its stdout (may hold NEEDS_EXTENSION) is passed through. A fake-backend result dir is stamped afterwards.
 vd_analyze() {
-    local res=$1 root=$2; shift 2
-    "$VD_PY" "$VD_DIR/analyze.py" "$res/results.csv" --config "$res/verdict.toml" \
-        --registration "$res/registration.json" --root "$root" --out "$res" "$@"
+    local res=$1 root=$2 adir=$3 rc=0; shift 3
+    [ -f "$adir/analyze.py" ] || die "no analyzer at $adir/analyze.py"
+    "$VD_PY" "$adir/analyze.py" "$res/results.csv" --config "$res/verdict.toml" \
+        --registration "$res/registration.json" --root "$root" --out "$res" "$@" || rc=$?
+    vd_stamp_fake "$res"
+    return $rc
+}
+
+# vd_stamp_fake RES: results from the fake backend must never read as a measurement
+vd_stamp_fake() {
+    [ -f "$1/fake" ] && [ -f "$1/report.md" ] || return 0
+    { echo "FAKE BACKEND — synthetic data, not a measurement"; cat "$1/report.md"; } >"$1/report.md.tmp"
+    mv "$1/report.md.tmp" "$1/report.md"
+}
+
+# vd_reg_hash FILE -> the registration hash, empty if unreadable
+vd_reg_hash() {
+    "$VD_PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["hash"])' "$1" 2>/dev/null || true
 }
 
 vd_real_setup() { # NIC, pool and calibration state, as cmd_bench does
@@ -251,13 +267,28 @@ cmd_verdict_run() {
         echo "zmfield: config changed since registration (or never registered): run 'verdict register' and commit it" >&2
         exit 2
     fi
-    eval "$("$VD_PY" "$VD_DIR/config.py" shell "$VD_DIR/verdict.toml")"
-    if [ "$smoke" = 1 ]; then VD_RUN_BLOCKS=3; VD_RUN_EXTEND_TO=0; fi
-
+    local cfg=$VD_DIR/verdict.toml
     if [ -n "$resume" ]; then
         [ -f "$resume/results.csv" ] || die "--resume: no results.csv in $resume"
         RES=${resume%/}
-    else
+        # the dir must be the run this registration covers, and must be the same kind of run
+        if [ "$smoke" = 1 ] && [ ! -f "$RES/smoke" ]; then
+            echo "zmfield: config changed since registration: $RES is not a smoke run, refusing --smoke --resume" >&2; exit 2
+        fi
+        if [ "$smoke" = 0 ]; then
+            local dh lh
+            dh=$(vd_reg_hash "$RES/registration.json"); lh=$(vd_reg_hash "$reg")
+            if [ -f "$RES/smoke" ] || [ -z "$dh" ] || [ "$dh" != "$lh" ]; then
+                echo "zmfield: config changed since registration: $RES was collected under a different (or smoke) registration" >&2; exit 2
+            fi
+        fi
+        cfg=$RES/verdict.toml
+        [ -f "$cfg" ] || die "--resume: no verdict.toml in $RES"
+    fi
+    eval "$("$VD_PY" "$VD_DIR/config.py" shell "$cfg")"
+    if [ "$smoke" = 1 ]; then VD_RUN_BLOCKS=3; VD_RUN_EXTEND_TO=0; fi
+
+    if [ -z "$resume" ]; then
         RES=$ZMF_HOME/results/verdict-$(date -u +%Y%m%dT%H%M%SZ)
     fi
     RUNID=$(basename "$RES"); RUNROOT=$ZMF_HOME/work/$RUNID; CSV=$RES/results.csv
@@ -275,8 +306,10 @@ cmd_verdict_run() {
         while read -r f; do
             [ -f "$ROOT/$f" ] || continue
             mkdir -p "$RES/registered_tree/$(dirname "$f")"; cp "$ROOT/$f" "$RES/registered_tree/$f"
-        done < <("$VD_PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import register; print("\n".join(register.HASHED))' "$VD_DIR")
+        done < <("$VD_PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import register; print("\n".join(register.HASHED))' "$VD_DIR"
+                echo scripts/verdict/register.py)   # analyze.py imports it; not in register.HASHED, archived so the archive runs standalone
         [ "$smoke" = 1 ] && : >"$RES/smoke"
+        if vd_fake && [ "$smoke" = 0 ]; then : >"$RES/fake"; fi
         local cv=fake sha
         vd_fake || cv=$(condor_cmd condor_version 2>/dev/null | head -1 || echo ?)
         sha=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo ?)
@@ -289,12 +322,12 @@ cmd_verdict_run() {
     local b out args=()
     [ "$smoke" = 1 ] && args=(--smoke)
     for b in -1 $(seq 1 "$VD_RUN_BLOCKS"); do vd_run_block "$b"; done
-    out=$(vd_analyze "$RES" "$ROOT" ${args[@]+"${args[@]}"}) || die "analyze.py failed"
+    out=$(vd_analyze "$RES" "$ROOT" "$VD_DIR" ${args[@]+"${args[@]}"}) || die "analyze.py failed"
     if [ "$smoke" = 0 ] && [[ $out == *NEEDS_EXTENSION* ]] && [ "$VD_RUN_EXTEND_TO" -gt "$VD_RUN_BLOCKS" ]; then
         log "verdict inconclusive at n=$VD_RUN_BLOCKS: extending to n=$VD_RUN_EXTEND_TO"
         vd_scope_mark_extended "$RES"
         for b in $(seq $((VD_RUN_BLOCKS+1)) "$VD_RUN_EXTEND_TO"); do vd_run_block "$b"; done
-        out=$(vd_analyze "$RES" "$ROOT") || die "analyze.py failed"
+        out=$(vd_analyze "$RES" "$ROOT" "$VD_DIR") || die "analyze.py failed"
     fi
     vd_fake || [ "${ZMF_KEEP_WORK:-0}" = 1 ] || rm -rf "$RUNROOT"
     log "report: $RES/report.md"
@@ -314,7 +347,8 @@ cmd_verdict_report() {
     [ -n "$d" ] && [ -f "$d/results.csv" ] || die "verdict report DIR: no results.csv in '${d}'"
     local args=()
     [ -f "$d/smoke" ] && args=(--smoke)
-    vd_analyze "${d%/}" "${d%/}/registered_tree" ${args[@]+"${args[@]}"} >/dev/null
+    # validity and numbers both come from the archived copies, not the live tree
+    vd_analyze "${d%/}" "${d%/}/registered_tree" "${d%/}/registered_tree/scripts/verdict" ${args[@]+"${args[@]}"} >/dev/null
     log "report: ${d%/}/report.md"
 }
 

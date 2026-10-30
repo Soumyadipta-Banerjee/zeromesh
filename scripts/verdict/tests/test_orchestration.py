@@ -113,7 +113,9 @@ def test_registered_run_archives_tree_and_reports(tmp_root):
     (res / "report.md").unlink()
     r = run_verdict(["report", str(res)], {}, tmp_root)
     assert r.returncode == 0, r.stderr
-    assert "INVALID" not in (res / "report.md").read_text()
+    text = (res / "report.md").read_text()
+    assert text.startswith("FAKE BACKEND — synthetic data, not a measurement")
+    assert "INVALID" not in text
     assert json.loads((res / "verdict.json").read_text())["validity"] == "VALID"
 
 
@@ -162,3 +164,62 @@ def test_register_prints_commit_command(tmp_root):
     assert r.returncode == 0, r.stderr
     assert 'git add scripts/verdict/registration.json && git commit -m "verdict: register ' in r.stdout
     assert (tmp_root / "root" / "scripts" / "verdict" / "registration.json").exists()
+
+
+def test_resume_refuses_after_reregistration(tmp_root):
+    toml = small_registered_tree(tmp_root)
+    assert run_verdict(["run", "--ssh", "fake@x"], {}, tmp_root).returncode == 0
+    res = res_dir(tmp_root)
+    full = read_csv(res)
+    with open(res / "results.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(full[0].keys()))
+        w.writeheader()
+        w.writerows(x for x in full if int(x["block"]) <= 1)
+    toml.write_text(toml.read_text().replace("alpha = 0.05", "alpha = 0.10"))
+    assert run_verdict(["register"], {}, tmp_root).returncode == 0   # tree and registration agree again
+    r = run_verdict(["run", "--ssh", "fake@x", "--resume", str(res)], {}, tmp_root)
+    assert r.returncode == 2
+    assert "config changed since registration" in r.stderr
+    assert {int(x["block"]) for x in read_csv(res)} == {-1, 1}
+
+
+def test_resume_of_registered_run_with_same_registration(tmp_root):
+    small_registered_tree(tmp_root)
+    assert run_verdict(["run", "--ssh", "fake@x"], {}, tmp_root).returncode == 0
+    res = res_dir(tmp_root)
+    full = read_csv(res)
+    with open(res / "results.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(full[0].keys()))
+        w.writeheader()
+        w.writerows(x for x in full if int(x["block"]) <= 1)
+    r = run_verdict(["run", "--ssh", "fake@x", "--resume", str(res)], {}, tmp_root)
+    assert r.returncode == 0, r.stderr
+    assert {int(x["block"]) for x in read_csv(res)} == {-1, 1, 2}
+
+
+def test_resume_smoke_dir_without_smoke_refuses(tmp_root):
+    small_registered_tree(tmp_root)
+    assert smoke(tmp_root).returncode == 0
+    res = res_dir(tmp_root)
+    r = run_verdict(["run", "--ssh", "fake@x", "--resume", str(res)], {}, tmp_root)
+    assert r.returncode == 2
+    assert "config changed since registration" in r.stderr
+
+
+def test_report_uses_archived_analyzer(tmp_root):
+    small_registered_tree(tmp_root)
+    assert run_verdict(["run", "--ssh", "fake@x"], {}, tmp_root).returncode == 0
+    res = res_dir(tmp_root)
+    live = tmp_root / "root" / "scripts" / "verdict" / "analyze.py"
+    live.write_text("raise SystemExit('live analyzer must not be used')\n")
+    (res / "verdict.json").unlink()
+    r = run_verdict(["report", str(res)], {}, tmp_root)
+    assert r.returncode == 0, r.stderr
+    assert json.loads((res / "verdict.json").read_text())["validity"] == "VALID"
+
+
+def test_fake_smoke_report_is_not_stamped_fake(tmp_root):
+    assert smoke(tmp_root).returncode == 0
+    res = res_dir(tmp_root)
+    assert not (res / "fake").exists()
+    assert (res / "report.md").read_text().startswith("SMOKE — no verdict")
