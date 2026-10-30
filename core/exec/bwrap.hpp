@@ -6,6 +6,28 @@
 
 namespace zeromesh::exec {
 
+struct BwrapVersion {
+    int major{0};
+    int minor{0};
+    int patch{0};
+
+    friend bool operator>=(const BwrapVersion& a, const BwrapVersion& b) {
+        if (a.major != b.major) return a.major > b.major;
+        if (a.minor != b.minor) return a.minor > b.minor;
+        return a.patch >= b.patch;
+    }
+};
+
+// Oldest bubblewrap we run tasks under: earlier releases carry the 2026 sandbox-escape advisories.
+inline constexpr BwrapVersion kMinBwrapVersion{0, 12, 0};
+
+// Parses the output of `bwrap --version` ("bubblewrap 0.13.0").
+std::optional<BwrapVersion> ParseBwrapVersion(const std::string& output);
+
+// Empty when `binary` is a bubblewrap we will run tasks under; otherwise the reason it is refused:
+// missing, setuid (a setuid helper widens the attack surface), unparsable or older than kMinBwrapVersion.
+std::string CheckBwrapBinary(const std::string& binary);
+
 // Builds a bubblewrap command line. Always isolates every namespace (network shared only on
 // request), clears the environment, starts a new session and dies with its parent.
 // Mounts are emitted in the order they were added.
