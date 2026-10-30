@@ -751,42 +751,79 @@ build_burn() {
     cat >"$src" <<'CEOF'
 /* burn cpu ITERS CASE NONCE  : fixed CPU work, writes CASE.out
  * burn sum FILE CASE NONCE   : reads FILE fully (FNV-1a), writes CASE.out; falls back to FILE's basename
- * CASE.out is "ok <what> <value> <hostname>", so the report can show which machine ran each task. */
+ * burn rawcpu ITERS | burn rawsum FILE : print the raw value in decimal
+ * burn ref RAW CASE NONCE    : print the digest CASE.out must carry, without doing the work
+ * CASE.out is "ok <what> <digest16hex> <hostname>". digest = FNV-1a-64 over the raw value (8 bytes,
+ * little-endian), then the bytes of the CASE file, then the bytes of NONCE. A stale or wrong output
+ * therefore cannot carry the right digest, and the report can still show which machine ran each task. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-static void done(const char *casepath, const char *what, unsigned long long v) {
+#define FNV_OFF 1469598103934665603ULL
+#define FNV_PRIME 1099511628211ULL
+static unsigned long long fnv(unsigned long long h, const unsigned char *p, size_t n) {
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= FNV_PRIME; }
+    return h;
+}
+static unsigned long long digest(unsigned long long raw, const char *casepath, const char *nonce) {
+    unsigned char le[8], buf[4096];
+    for (int i = 0; i < 8; i++) le[i] = (unsigned char)(raw >> (8 * i));
+    unsigned long long h = fnv(FNV_OFF, le, 8);
+    FILE *f = fopen(casepath, "rb");
+    if (!f) { perror(casepath); exit(2); }
+    size_t k;
+    while ((k = fread(buf, 1, sizeof buf, f)) > 0) h = fnv(h, buf, k);
+    fclose(f);
+    return fnv(h, (const unsigned char *)nonce, strlen(nonce));
+}
+static unsigned long long rawcpu(unsigned long long n) {
+    volatile unsigned long long x = 0;
+    for (unsigned long long i = 0; i < n; i++) x += i ^ (x >> 3);
+    return x;
+}
+static unsigned long long rawsum(const char *file) {
+    FILE *fp = fopen(file, "rb");
+    if (!fp) { const char *b = strrchr(file, '/'); if (b) fp = fopen(b + 1, "rb"); }
+    if (!fp) { perror(file); exit(2); }
+    static unsigned char buf[1 << 20];
+    unsigned long long h = FNV_OFF;
+    size_t k;
+    while ((k = fread(buf, 1, sizeof buf, fp)) > 0) h = fnv(h, buf, k);
+    fclose(fp);
+    return h;
+}
+static void done(const char *casepath, const char *what, unsigned long long raw, const char *nonce) {
     char path[4096], host[128] = "?";
     snprintf(path, sizeof path, "%s.out", casepath);
     gethostname(host, sizeof host);
     FILE *f = fopen(path, "w");
     if (!f) { perror(path); exit(2); }
-    fprintf(f, "ok %s %llu %s\n", what, v, host);
+    fprintf(f, "ok %s %016llx %s\n", what, digest(raw, casepath, nonce), host);
     fclose(f);
 }
 int main(int argc, char **argv) {
-    if (argc >= 4 && !strcmp(argv[1], "cpu")) {
-        unsigned long long n = strtoull(argv[2], 0, 10);
-        volatile unsigned long long x = 0;
-        for (unsigned long long i = 0; i < n; i++) x += i ^ (x >> 3);
-        done(argv[3], "cpu", x);
+    if (argc >= 5 && !strcmp(argv[1], "cpu")) {
+        done(argv[3], "cpu", rawcpu(strtoull(argv[2], 0, 10)), argv[4]);
         return 0;
     }
-    if (argc >= 4 && !strcmp(argv[1], "sum")) {
-        FILE *fp = fopen(argv[2], "rb");
-        if (!fp) { const char *b = strrchr(argv[2], '/'); if (b) fp = fopen(b + 1, "rb"); }
-        if (!fp) { perror(argv[2]); return 2; }
-        static unsigned char buf[1 << 20];
-        unsigned long long h = 1469598103934665603ULL;
-        size_t k;
-        while ((k = fread(buf, 1, sizeof buf, fp)) > 0)
-            for (size_t i = 0; i < k; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
-        fclose(fp);
-        done(argv[3], "sum", h);
+    if (argc >= 5 && !strcmp(argv[1], "sum")) {
+        done(argv[3], "sum", rawsum(argv[2]), argv[4]);
         return 0;
     }
-    fprintf(stderr, "usage: burn cpu ITERS CASE [NONCE] | burn sum FILE CASE [NONCE]\n");
+    if (argc >= 3 && !strcmp(argv[1], "rawcpu")) {
+        printf("%llu\n", rawcpu(strtoull(argv[2], 0, 10)));
+        return 0;
+    }
+    if (argc >= 3 && !strcmp(argv[1], "rawsum")) {
+        printf("%llu\n", rawsum(argv[2]));
+        return 0;
+    }
+    if (argc >= 5 && !strcmp(argv[1], "ref")) {
+        printf("%016llx\n", digest(strtoull(argv[2], 0, 10), argv[3], argv[4]));
+        return 0;
+    }
+    fprintf(stderr, "usage: burn cpu ITERS CASE NONCE | burn sum FILE CASE NONCE | burn rawcpu ITERS | burn rawsum FILE | burn ref RAW CASE NONCE\n");
     return 64;
 }
 CEOF
@@ -794,10 +831,47 @@ CEOF
         || die "static link failed: install static glibc (Debian/Kali: libc6-dev, Fedora: glibc-static, Arch: glibc)"
 }
 
+# payload_kind WL -> cpu|sum. PAYLOAD_FORCE (set per workload by the verdict driver) wins; otherwise the
+# bench default: w2 sums a big input, everything else burns CPU.
+payload_kind() {
+    if [ -n "${PAYLOAD_FORCE:-}" ]; then echo "$PAYLOAD_FORCE"
+    elif [ "$1" = w2 ]; then echo sum
+    else echo cpu; fi
+}
+
+# expected_digest RAW CASEPATH NONCE -> the digest hex a correct CASE.out carries
+expected_digest() { "$ZMF_HOME/burn" ref "$1" "$2" "$3"; }
+
+# stage_raw WL STAGEDIR -> the raw burn value for this stage, computed once and cached under RUNROOT
+stage_raw() {
+    local wl=$1 stage=$2 f
+    if [ "$(payload_kind "$wl")" = sum ]; then
+        f=$RUNROOT/raw.sum.$(basename "$stage")
+        [ -s "$f" ] || "$ZMF_HOME/burn" rawsum "$stage/data/big.bin" >"$f"
+    else
+        f=$RUNROOT/raw.$ITERS
+        [ -s "$f" ] || "$ZMF_HOME/burn" rawcpu "$ITERS" >"$f"
+    fi
+    cat "$f"
+}
+
+# count_ok WD PREFIX NAMESFILE RAW NONCE -> number of cases whose WD/PREFIX<c>.out is "ok <kind> <expected digest> ..."
+count_ok() {
+    local wd=$1 prefix=$2 names=$3 raw=$4 nonce=$5 c want n=0 f1 f2 f3
+    while read -r c; do
+        [ -n "$c" ] || continue
+        want=$(expected_digest "$raw" "$wd/cases/$c" "$nonce") || want=
+        read -r f1 f2 f3 _ <"$wd/$prefix$c.out" 2>/dev/null || continue
+        if [ "$f1" = ok ] && [ -n "$want" ] && [ "$f3" = "$want" ]; then n=$((n+1)); fi
+    done <"$names"
+    echo "$n"
+}
+
 calibrate() {
     build_burn
     local n=500000000 t0 t1
-    t0=$(now); "$ZMF_HOME/burn" cpu "$n" "$ZMF_HOME/.cal"; t1=$(now); rm -f "$ZMF_HOME/.cal.out"
+    : >"$ZMF_HOME/.cal"   # burn digests the case file, so it must exist
+    t0=$(now); "$ZMF_HOME/burn" cpu "$n" "$ZMF_HOME/.cal" calibrate; t1=$(now); rm -f "$ZMF_HOME/.cal" "$ZMF_HOME/.cal.out"
     ITERS=$(awk -v n="$n" -v a="$t0" -v b="$t1" -v s="$SECS" 'BEGIN{printf "%d", (n/(b-a))*s}')
     log "calibration: burn does $ITERS iterations (~${SECS}s on this machine)"
 }
@@ -843,11 +917,11 @@ stage_data() { # stage_data DIR N MB
 condor_submit_file() { # condor_submit_file WD WL NONCE MODE
     local wd=$1 wl=$2 nonce=$3 mode=$4 inputs fqdn
     ls "$wd/cases" | grep -v '\.out$' >"$wd/cases.list" || true
-    if [ "$wl" = w2 ]; then inputs='data/big.bin, cases/$(case)'; else inputs='cases/$(case)'; fi
+    if [ "$(payload_kind "$wl")" = sum ]; then inputs='data/big.bin, cases/$(case)'; else inputs='cases/$(case)'; fi
     {
         echo 'universe = vanilla'
         echo 'executable = burn'
-        if [ "$wl" = w2 ]; then echo "arguments = \"sum data/big.bin \$(case) $nonce\""
+        if [ "$(payload_kind "$wl")" = sum ]; then echo "arguments = \"sum data/big.bin \$(case) $nonce\""
         else echo "arguments = \"cpu $ITERS \$(case) $nonce\""; fi
         echo 'should_transfer_files = YES'
         echo 'when_to_transfer_output = ON_EXIT'
@@ -900,7 +974,7 @@ exec_system() {
     case "$sys" in
     zm-local|zm)
         local flags=() cmdv=(./burn cpu "$ITERS" '{}' "$nonce")
-        if [ "$wl" = w2 ]; then cmdv=(./burn sum data/big.bin '{}' "$nonce"); fi
+        if [ "$(payload_kind "$wl")" = sum ]; then cmdv=(./burn sum data/big.bin '{}' "$nonce"); fi
         if [ "$sys" = zm-local ]; then flags=(--local-only); elif [ "$CUR_ALL" = 0 ]; then flags=(--remote-only); fi
         read -r r0 <<<"$(nic_read)"; t0=$(now)
         ( cd "$wd" && timeout "$ZMF_TIMEOUT" "$BUILD/zm" --socket "$SOCK" run ${flags[@]+"${flags[@]}"} \
@@ -922,11 +996,10 @@ exec_system() {
     # NIC counters are "rx tx" pairs; split them
     local rx0 tx0 rx1 tx1
     rx0=${r0%% *}; tx0=${r0##* }; rx1=${r1%% *}; tx1=${r1##* }
-    local total=0 okc=0 c
-    while read -r c; do
-        total=$((total+1))
-        if grep -q '^ok' "$wd/$prefix$c.out" 2>/dev/null; then okc=$((okc+1)); fi
-    done <"$STAGE_NAMES"
+    local total okc c raw
+    raw=$(stage_raw "$wl" "$stage")
+    total=$(wc -l <"$STAGE_NAMES")
+    okc=$(count_ok "$wd" "$prefix" "$STAGE_NAMES" "$raw" "$nonce")
     local retries=0
     if [ "${sys#zm}" != "$sys" ]; then retries=$(grep -cE 'retry [0-9]+/[0-9]+' "$err" || true); fi
     local note="rc=$rc;scope=$SCOPE" hosts
