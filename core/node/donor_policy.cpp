@@ -94,6 +94,11 @@ DonorPolicy DonorPolicy::Parse(std::string_view text, std::ostream& warn, std::s
                 p.comfort_max_step = *v;
             else
                 bad();
+        } else if (key == "max_copies") {
+            if (auto v = ParseInt(value, 1, 8))
+                p.max_copies = *v;
+            else
+                bad();
         } else if (key == "hold_s") {
             if (auto v = ParseInt(value, 0, 86400))
                 p.comfort_hold_s = *v;
