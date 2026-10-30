@@ -326,6 +326,9 @@ int Daemon::Run() {
             [svc = client_service.get()]() { return svc->SelfInfo(); }, cas, registry, local_executor, telemetry_fn,
             policy, peers);
         node_service->SetComfortLevelProvider([g = comfort.get()] { return g->level(); });
+        node_service->SetPeerClientFactory(client_for_node); // lets this donor seed from peers
+        // max_copies from donor.toml; hedging stays off until a hazard model sets `survival`.
+        placer->SetHedging(sched::Placer::HedgeConfig::FromPolicy(policy));
         comfort->Start();
 
         grpc::ServerBuilder client_builder;

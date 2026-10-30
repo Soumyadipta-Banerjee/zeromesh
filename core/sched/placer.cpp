@@ -3,6 +3,7 @@
 #include "node/convert.hpp"
 #include "sched/rank.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <exception>
@@ -83,20 +84,44 @@ struct Placer::Task {
     std::atomic<bool> finished{false};
     std::atomic<bool> worker_done{false};
 
+    // Tail hedging. A hedge is an extra copy of `primary`, registered under its own id; it never
+    // reports to the job, only (on success) to the primary through cb.on_done.
+    bool is_hedge{false};
+    std::unordered_set<std::string> exclude; // nodes this task must not be placed on (hedge copies)
+    std::atomic<bool> hedge_counted{false};  // counted in HedgeStats::launched once it got a slot
+
     std::mutex mu;
     bool is_local{false};
     std::string assigned_node; // node currently reserved / running
     std::shared_ptr<node::NodeClient> client;
+    bool running{false};  // a remote Run is in progress
+    bool ever_ran{false}; // a remote Run was started at least once
+    std::chrono::steady_clock::time_point run_started{};
+    std::vector<std::shared_ptr<Task>> hedges; // primary only
+    int hedge_seq{0};
+    std::chrono::steady_clock::time_point next_hedge{};
+    std::function<void()> on_finished; // runs once after the task's result was delivered
 
     bool IsLocal() {
         std::lock_guard lock(mu);
         return is_local;
     }
 
-    void Done(v1::TaskResult r) {
-        if (finished.exchange(true)) return;
+    // True when this call delivered the result (the first one wins; later ones are ignored).
+    bool Finish(v1::TaskResult r) {
+        if (finished.exchange(true)) return false;
+        std::function<void()> hook;
+        {
+            std::lock_guard lock(mu);
+            hook = std::move(on_finished);
+            on_finished = nullptr;
+        }
         if (cb.on_done) cb.on_done(std::move(r));
+        if (hook) hook();
+        return true;
     }
+
+    void Done(v1::TaskResult r) { Finish(std::move(r)); }
 };
 
 struct Placer::Shared {
@@ -195,6 +220,10 @@ std::shared_ptr<Placer::DonorSent> Placer::SentFor(const std::string& node_id) {
 }
 
 Placer::~Placer() {
+    if (hedge_thread_.joinable()) {
+        hedge_thread_.request_stop();
+        hedge_thread_.join();
+    }
     std::vector<std::shared_ptr<Task>> tasks;
     {
         std::lock_guard lock(shared_->mu);
@@ -251,10 +280,17 @@ void Placer::Execute(const std::string& task_id, const v1::TaskSpec& spec, node:
     task->id = task_id;
     task->spec = spec;
     task->cb = std::move(cb);
+    task->on_finished = [this, weak = std::weak_ptr<Task>(task)] {
+        if (auto t = weak.lock()) CancelHedges(t);
+    };
     {
         std::lock_guard lock(shared_->mu);
         shared_->tasks[task_id] = task;
     }
+    LaunchWorker(task);
+}
+
+void Placer::LaunchWorker(const std::shared_ptr<Task>& task) {
     std::lock_guard lock(workers_mu_);
     ReapFinishedLocked();
     workers_.push_back(Worker{task, std::jthread([this, task] {
@@ -374,7 +410,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
 
     const int max_retries = MaxRetries(spec);
     int attempt = 0;                       // completed failed attempts that consumed a retry
-    std::unordered_set<std::string> skip;  // nodes skipped after a retryable infra failure
+    std::unordered_set<std::string> skip = task->exclude; // nodes skipped after a retryable infra failure
     std::unordered_set<std::string> tried; // nodes already offered this placement round
     // Nodes that lacked the command, and when they may be offered again.
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> missing_until;
@@ -395,6 +431,7 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         if (task->assigned_node == res.node_id) task->assigned_node.clear();
         task->client.reset();
         task->is_local = false;
+        task->running = false;
     };
 
     auto blocked = [&](const std::string& id) { return skip.contains(id) || tried.contains(id) || lacks_command(id); };
@@ -516,6 +553,8 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
 
         auto reserved = reserve_next();
         if (!reserved) {
+            // A hedge only takes a slot that is free right now; it never queues behind real work.
+            if (task->is_hedge) return task->Done(Cancelled(local_id_));
             // Wait for in-flight capacity; timeout_s is the run timeout, not a placement cap.
             if (!any_eligible()) {
                 return fail_placement(last_reason);
@@ -525,6 +564,10 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             continue;
         }
         tried.insert(reserved->node_id);
+        if (task->is_hedge && !task->hedge_counted.exchange(true)) {
+            std::lock_guard hedge_lock(hedge_mu_);
+            ++hedge_stats_.launched;
+        }
 
         if (reserved->is_local) {
             if (!local_) {
@@ -613,6 +656,16 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         if (task->cb.on_state) task->cb.on_state(v1::PLACED, "node " + reserved->node_id);
 
         std::vector<v1::Digest> missing(reply->missing().begin(), reply->missing().end());
+        if (needed) {
+            // Everything it did not report missing is already there: a future seeding source.
+            std::unordered_set<std::string> missing_hashes;
+            for (const auto& d : missing) missing_hashes.insert(d.hash());
+            std::vector<v1::Digest> held;
+            for (const auto& d : *needed) {
+                if (!missing_hashes.contains(d.hash())) held.push_back(d);
+            }
+            NoteHolders(reserved->node_id, held);
+        }
         uint64_t wire_pushed = 0;
         bool pushed_ok = true;
         {
@@ -629,10 +682,24 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                     if (!donor->sent.contains(d.hash())) to_send.push_back(d);
                 }
             }
+            // Let the donor fetch what other donors hold; push only the rest.
+            const std::vector<v1::Digest> wanted = to_send;
+            to_send = SeedFromPeers(reserved->node_id, *client, std::move(to_send));
+            {
+                std::unordered_set<std::string> still_missing;
+                for (const auto& d : to_send) still_missing.insert(d.hash());
+                std::lock_guard lock(donor->mu);
+                for (const auto& d : wanted) {
+                    if (!still_missing.contains(d.hash())) donor->sent[d.hash()] = std::chrono::steady_clock::now();
+                }
+            }
             pushed_ok = client->Push(*cas_, to_send, &err, &wire_pushed);
             if (pushed_ok) {
-                std::lock_guard lock(donor->mu);
-                for (const auto& d : to_send) donor->sent[d.hash()] = std::chrono::steady_clock::now();
+                {
+                    std::lock_guard lock(donor->mu);
+                    for (const auto& d : to_send) donor->sent[d.hash()] = std::chrono::steady_clock::now();
+                }
+                NoteHolders(reserved->node_id, to_send);
             }
         }
         AddTraffic(reserved->node_id, wire_pushed, 0);
@@ -666,6 +733,12 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                 task->cb.on_state(ev.state(), ev.detail());
             }
         };
+        {
+            std::lock_guard lock(task->mu);
+            task->running = true;
+            task->ever_ran = true;
+            task->run_started = std::chrono::steady_clock::now();
+        }
         auto result = client->Run(task->id, on_event, &err);
         const bool user_cancel = task->cancelled.load();
         const bool drain = donor_draining(reserved->node_id);
@@ -712,6 +785,275 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         release(*reserved);
         return task->Done(std::move(*result));
     }
+}
+
+Placer::HedgeConfig Placer::HedgeConfig::FromPolicy(const node::DonorPolicy& policy) {
+    HedgeConfig c;
+    c.max_copies = policy.max_copies;
+    return c;
+}
+
+void Placer::SetHedging(HedgeConfig cfg) {
+    const bool active = static_cast<bool>(cfg.survival);
+    {
+        std::lock_guard lock(hedge_mu_);
+        hedge_cfg_ = std::move(cfg);
+    }
+    if (!active || hedge_thread_.joinable()) return;
+    hedge_thread_ = std::jthread([this](std::stop_token st) {
+        while (!st.stop_requested()) {
+            std::chrono::milliseconds interval;
+            {
+                std::lock_guard lock(hedge_mu_);
+                interval = hedge_cfg_.check_interval;
+            }
+            std::this_thread::sleep_for(interval);
+            if (st.stop_requested()) break;
+            try {
+                HedgeScan();
+            } catch (const std::exception&) {
+                // a failed scan only delays hedging; the primary copy is unaffected
+            }
+        }
+    });
+}
+
+Placer::HedgeStats Placer::Hedging() const {
+    std::lock_guard lock(hedge_mu_);
+    return hedge_stats_;
+}
+
+namespace {
+
+double HedgeHorizon(double default_horizon_s, const v1::TaskSpec& spec) {
+    double h = default_horizon_s;
+    if (spec.policy().has_timeout_s() && spec.policy().timeout_s() > 0) {
+        h = std::min(h, static_cast<double>(spec.policy().timeout_s()));
+    }
+    return h;
+}
+
+} // namespace
+
+void Placer::HedgeScan() {
+    HedgeConfig cfg;
+    {
+        std::lock_guard lock(hedge_mu_);
+        cfg = hedge_cfg_;
+    }
+    if (!cfg.survival || cfg.max_copies < 2) return;
+
+    struct Pick {
+        std::shared_ptr<Task> task;
+        std::string node;
+        std::unordered_set<std::string> exclude;
+    };
+    std::vector<Pick> picks;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(shared_->mu);
+        int unplaced = 0;
+        int running = 0;
+        for (auto& [id, t] : shared_->tasks) {
+            if (t->is_hedge || t->finished.load()) continue;
+            std::lock_guard tlock(t->mu);
+            if (t->assigned_node.empty()) {
+                ++unplaced;
+                continue;
+            }
+            ++running;
+            if (t->is_local || !t->running || now < t->next_hedge) continue;
+            int live = 0;
+            bool pending = false; // a hedge was launched but has no donor slot yet
+            std::unordered_set<std::string> exclude{t->assigned_node};
+            for (auto& h : t->hedges) {
+                if (h->finished.load()) continue;
+                ++live;
+                std::lock_guard hlock(h->mu);
+                if (h->assigned_node.empty() && !h->ever_ran) pending = true;
+                if (!h->assigned_node.empty()) exclude.insert(h->assigned_node);
+            }
+            if (pending || live + 1 >= cfg.max_copies) continue;
+            picks.push_back(Pick{t, t->assigned_node, std::move(exclude)});
+        }
+        // The tail: nothing is waiting for a slot and few tasks are still running.
+        if (unplaced > 0 || running > cfg.tail_max_running) return;
+    }
+
+    for (auto& pick : picks) {
+        const double p = cfg.survival(pick.node, HedgeHorizon(cfg.default_horizon_s, pick.task->spec));
+        if (!(p < cfg.survive_below)) continue; // also skips NaN
+        LaunchHedge(pick.task, std::move(pick.exclude), cfg);
+    }
+}
+
+void Placer::LaunchHedge(const std::shared_ptr<Task>& primary, std::unordered_set<std::string> exclude,
+                         const HedgeConfig& cfg) {
+    // Only start a copy if some other node could take it; otherwise wait for the next scan.
+    bool target = false;
+    for (const auto& p : peers_->ListActive()) {
+        if (p.id != local_id_ && !exclude.contains(p.id)) target = true;
+    }
+    const auto& policy = primary->spec.policy();
+    const bool may_local = !policy.has_may_run_local() || policy.may_run_local();
+    if (local_ && may_local && !exclude.contains(local_id_)) target = true;
+    if (!target) return;
+
+    auto hedge = std::make_shared<Task>();
+    hedge->is_hedge = true;
+    hedge->spec = primary->spec;
+    hedge->spec.mutable_policy()->set_max_retries(0);
+    hedge->exclude = std::move(exclude);
+    {
+        std::lock_guard lock(primary->mu);
+        if (primary->finished.load()) return;
+        hedge->id = primary->id + "#hedge" + std::to_string(++primary->hedge_seq);
+        primary->next_hedge = std::chrono::steady_clock::now() + cfg.retry_after;
+        primary->hedges.push_back(hedge);
+    }
+    hedge->cb.on_done = [this, primary_weak = std::weak_ptr<Task>(primary),
+                         hedge_weak = std::weak_ptr<Task>(hedge)](v1::TaskResult r) {
+        auto h = hedge_weak.lock();
+        if (h) OnHedgeDone(primary_weak.lock(), h, std::move(r));
+    };
+    {
+        std::lock_guard lock(shared_->mu);
+        shared_->tasks[hedge->id] = hedge;
+    }
+    LaunchWorker(hedge);
+}
+
+void Placer::OnHedgeDone(const std::shared_ptr<Task>& primary, const std::shared_ptr<Task>& hedge,
+                         v1::TaskResult r) {
+    double cpu = 0;
+    bool ran = false;
+    {
+        std::lock_guard lock(hedge->mu);
+        if (hedge->ever_ran) {
+            const std::chrono::duration<double> ran_for = std::chrono::steady_clock::now() - hedge->run_started;
+            cpu = ran_for.count() * std::max(1, hedge->spec.resources().cores());
+            ran = true;
+        }
+    }
+    const bool usable = !r.cancelled() && !r.timed_out() && r.exit_code() == 0 && r.error().empty();
+    bool won = false;
+    if (usable && primary) {
+        won = primary->Finish(r);
+        if (won) Cancel(primary->id); // stop the original copy; it is no longer needed
+    }
+    const bool counted = hedge->hedge_counted.load();
+    std::lock_guard lock(hedge_mu_);
+    if (won) ++hedge_stats_.won;
+    if (counted && !won && r.cancelled()) ++hedge_stats_.cancelled;
+    if (ran) {
+        hedge_stats_.cpu_seconds += cpu;
+        if (!won) hedge_stats_.wasted_cpu_seconds += cpu;
+    }
+}
+
+void Placer::CancelHedges(const std::shared_ptr<Task>& primary) {
+    std::vector<std::shared_ptr<Task>> hedges;
+    {
+        std::lock_guard lock(primary->mu);
+        hedges = primary->hedges;
+    }
+    for (const auto& h : hedges) {
+        if (!h->finished.load()) Cancel(h->id);
+    }
+}
+
+void Placer::SetSeeding(SeedConfig cfg) {
+    seed_gate_.Configure(cfg.per_source_cap, cfg.lan_cap);
+    std::lock_guard lock(seed_mu_);
+    seed_cfg_ = cfg;
+}
+
+void Placer::AddSeeded(const std::string& node_id, uint64_t bytes) {
+    if (bytes == 0) return;
+    std::lock_guard lock(traffic_mu_);
+    traffic_[node_id].bytes_seeded += bytes;
+}
+
+void Placer::NoteHolders(const std::string& node_id, const std::vector<v1::Digest>& digests) {
+    if (node_id == local_id_ || digests.empty()) return;
+    std::lock_guard lock(holders_mu_);
+    if (holders_.size() > kHoldersMaxBlobs) holders_.clear();
+    for (const auto& d : digests) {
+        auto& nodes = holders_[d.hash()];
+        if (std::find(nodes.begin(), nodes.end(), node_id) != nodes.end()) continue;
+        if (nodes.size() >= kHoldersPerBlob) nodes.erase(nodes.begin());
+        nodes.push_back(node_id);
+    }
+}
+
+std::vector<v1::Digest> Placer::SeedFromPeers(const std::string& target, node::NodeClient& client,
+                                              std::vector<v1::Digest> missing) {
+    SeedConfig cfg;
+    {
+        std::lock_guard lock(seed_mu_);
+        cfg = seed_cfg_;
+    }
+    if (!cfg.enabled || missing.empty()) return missing;
+
+    std::vector<std::vector<std::string>> holders(missing.size());
+    {
+        std::lock_guard lock(holders_mu_);
+        for (size_t i = 0; i < missing.size(); ++i) {
+            if (auto it = holders_.find(missing[i].hash()); it != holders_.end()) holders[i] = it->second;
+        }
+    }
+
+    // The least-busy holder per blob: fewest seeds in flight from it, then fewest of our tasks on it.
+    std::unordered_map<std::string, int> in_flight;
+    auto busyness = [&](const std::string& n) {
+        auto [it, inserted] = in_flight.try_emplace(n, 0);
+        if (inserted) it->second = InFlightOn(n);
+        return seed_gate_.Active(n) * 1000 + it->second;
+    };
+    std::map<std::string, std::vector<v1::Digest>> by_source;
+    std::vector<v1::Digest> rest;
+    for (size_t i = 0; i < missing.size(); ++i) {
+        std::string best;
+        int best_busy = 0;
+        for (const auto& n : holders[i]) {
+            if (n == target || n == local_id_ || !peers_->Get(n)) continue;
+            const int b = busyness(n);
+            if (best.empty() || b < best_busy) {
+                best = n;
+                best_busy = b;
+            }
+        }
+        if (best.empty())
+            rest.push_back(missing[i]);
+        else
+            by_source[best].push_back(missing[i]);
+    }
+
+    for (auto& [source, group] : by_source) {
+        auto token = seed_gate_.Acquire(source, cfg.acquire_timeout);
+        if (!token) { // every slot is taken: the requester sends these itself
+            rest.insert(rest.end(), group.begin(), group.end());
+            continue;
+        }
+        std::vector<v1::Digest> fetched;
+        std::string err;
+        client.SeedBlobs(source, group, &fetched, &err); // `fetched` is authoritative even on error
+        std::unordered_set<std::string> got;
+        for (const auto& f : fetched) got.insert(f.hash());
+        std::vector<v1::Digest> have;
+        uint64_t bytes = 0;
+        for (const auto& d : group) {
+            if (got.contains(d.hash())) {
+                have.push_back(d);
+                bytes += static_cast<uint64_t>(std::max<int64_t>(d.size_bytes(), 0));
+            } else {
+                rest.push_back(d);
+            }
+        }
+        NoteHolders(target, have);
+        AddSeeded(target, bytes);
+    }
+    return rest;
 }
 
 } // namespace zeromesh::sched
