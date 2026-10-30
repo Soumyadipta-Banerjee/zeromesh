@@ -364,6 +364,11 @@ write_donor_toml() {
 allow_on_battery_above = 0
 drain_below_battery = 0
 EOF
+    # test rigs only: pin the comfort governor at step 0 so it never squeezes or refuses donated work
+    if [ "${ZMF_NO_GOVERNOR:-0}" = 1 ]; then
+        printf '# ZMF_NO_GOVERNOR=1: governor disabled for benchmarking\nmax_step = 0\n' >>"$ZM_CONFIG_DIR/donor.toml"
+        log "comfort governor disabled (max_step = 0) by ZMF_NO_GOVERNOR=1"
+    fi
 }
 
 zmd_start() {
@@ -726,7 +731,7 @@ cmd_chaos() {
 # ---------------------------------------------------------------------------------------
 SSH_TARGET=""; SSH_SCRIPT="zeromesh/scripts/zmfield.sh"
 WORKLOADS="w1,w2,w3"; NCASES=24; SECS=10; MB=128; ALL_NODES=0; CONDOR_MODES="default,tuned"
-PEER_IP=""; WITH_TERM=0
+PEER_IP=""; WITH_TERM=0; SCOPE=donor; LOCAL_ONLY=0
 CUR_ALL=0; IFACE=""; ITERS=0; RES=""; RUNROOT=""; RUNID=""; CSV=""; CONDOR_OK=0
 
 nic_read() {
@@ -734,11 +739,66 @@ nic_read() {
     if [ -r "$f/rx_bytes" ]; then echo "$(cat "$f/rx_bytes") $(cat "$f/tx_bytes")"; else echo "0 0"; fi
 }
 
+# The bench payload is a tiny STATIC C program, not `sh`. ZeroMesh refuses a task when the donor's copy of the
+# command (binary + shared libraries + shebang interpreters) hashes differently from the requester's, which is
+# always the case between two distros (Arch bash vs Debian dash). A static binary has nothing to differ, runs the
+# same machine code everywhere, and makes the CPU comparison fair. Every system runs this same file.
+build_burn() {
+    local src=$ZMF_HOME/burn.c bin=$ZMF_HOME/burn cc_=${CC:-cc}
+    have "$cc_" || die "need a C compiler ($cc_) to build the bench payload"
+    mkdir -p "$ZMF_HOME"
+    cat >"$src" <<'CEOF'
+/* burn cpu ITERS CASE NONCE  : fixed CPU work, writes CASE.out
+ * burn sum FILE CASE NONCE   : reads FILE fully (FNV-1a), writes CASE.out; falls back to FILE's basename
+ * CASE.out is "ok <what> <value> <hostname>", so the report can show which machine ran each task. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+static void done(const char *casepath, const char *what, unsigned long long v) {
+    char path[4096], host[128] = "?";
+    snprintf(path, sizeof path, "%s.out", casepath);
+    gethostname(host, sizeof host);
+    FILE *f = fopen(path, "w");
+    if (!f) { perror(path); exit(2); }
+    fprintf(f, "ok %s %llu %s\n", what, v, host);
+    fclose(f);
+}
+int main(int argc, char **argv) {
+    if (argc >= 4 && !strcmp(argv[1], "cpu")) {
+        unsigned long long n = strtoull(argv[2], 0, 10);
+        volatile unsigned long long x = 0;
+        for (unsigned long long i = 0; i < n; i++) x += i ^ (x >> 3);
+        done(argv[3], "cpu", x);
+        return 0;
+    }
+    if (argc >= 4 && !strcmp(argv[1], "sum")) {
+        FILE *fp = fopen(argv[2], "rb");
+        if (!fp) { const char *b = strrchr(argv[2], '/'); if (b) fp = fopen(b + 1, "rb"); }
+        if (!fp) { perror(argv[2]); return 2; }
+        static unsigned char buf[1 << 20];
+        unsigned long long h = 1469598103934665603ULL;
+        size_t k;
+        while ((k = fread(buf, 1, sizeof buf, fp)) > 0)
+            for (size_t i = 0; i < k; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
+        fclose(fp);
+        done(argv[3], "sum", h);
+        return 0;
+    }
+    fprintf(stderr, "usage: burn cpu ITERS CASE [NONCE] | burn sum FILE CASE [NONCE]\n");
+    return 64;
+}
+CEOF
+    "$cc_" -O1 -static -o "$bin" "$src" \
+        || die "static link failed: install static glibc (Debian/Kali: libc6-dev, Fedora: glibc-static, Arch: glibc)"
+}
+
 calibrate() {
-    local n=2000000 t0 t1
-    t0=$(now); sh -c "i=0; while [ \$i -lt $n ]; do i=\$((i+1)); done"; t1=$(now)
+    build_burn
+    local n=500000000 t0 t1
+    t0=$(now); "$ZMF_HOME/burn" cpu "$n" "$ZMF_HOME/.cal"; t1=$(now); rm -f "$ZMF_HOME/.cal.out"
     ITERS=$(awk -v n="$n" -v a="$t0" -v b="$t1" -v s="$SECS" 'BEGIN{printf "%d", (n/(b-a))*s}')
-    log "calibration: sim.sh loops $ITERS times (~${SECS}s on this machine's sh)"
+    log "calibration: burn does $ITERS iterations (~${SECS}s on this machine)"
 }
 
 write_hostinfo() {
@@ -764,19 +824,11 @@ write_hostinfo() {
     } >"$RES/hostinfo.txt"
 }
 
-stage_cpu() { # stage_cpu DIR N  -> cases/NNN + sim.sh
+stage_cpu() { # stage_cpu DIR N  -> cases/NNN + burn
     local d=$1 n=$2 i
     mkdir -p "$d/cases"
     for i in $(seq 0 $((n-1))); do printf 'case %03d\n' "$i" >"$d/cases/$(printf '%03d' "$i")"; done
-    cat >"$d/sim.sh" <<'EOF'
-#!/bin/sh
-# usage: sim.sh CASE [NONCE]; pure-shell counted loop, no forks, so the work is CPU-bound and fixed
-i=0
-while [ "$i" -lt __ITERS__ ]; do i=$((i+1)); done
-echo ok > "$1.out"
-EOF
-    sed -i "s/__ITERS__/$ITERS/" "$d/sim.sh"
-    chmod +x "$d/sim.sh"
+    cp "$ZMF_HOME/burn" "$d/burn"
 }
 
 stage_data() { # stage_data DIR N MB
@@ -784,15 +836,7 @@ stage_data() { # stage_data DIR N MB
     mkdir -p "$d/cases" "$d/data"
     for i in $(seq 0 $((n-1))); do printf 'case %03d\n' "$i" >"$d/cases/$(printf '%03d' "$i")"; done
     head -c "$((mb*1048576))" /dev/urandom >"$d/data/big.bin"
-    cat >"$d/sim.sh" <<'EOF'
-#!/bin/sh
-# usage: sim.sh CASE [NONCE]; hashes the shared input (data/big.bin, or big.bin under HTCondor)
-f=data/big.bin
-[ -f "$f" ] || f=big.bin
-h=$(sha256sum "$f" | cut -d' ' -f1)
-echo "ok $h" > "$1.out"
-EOF
-    chmod +x "$d/sim.sh"
+    cp "$ZMF_HOME/burn" "$d/burn"
 }
 
 condor_submit_file() { # condor_submit_file WD WL NONCE MODE
@@ -801,8 +845,9 @@ condor_submit_file() { # condor_submit_file WD WL NONCE MODE
     if [ "$wl" = w2 ]; then inputs='data/big.bin, cases/$(case)'; else inputs='cases/$(case)'; fi
     {
         echo 'universe = vanilla'
-        echo 'executable = sim.sh'
-        echo "arguments = \"\$(case) $nonce\""
+        echo 'executable = burn'
+        if [ "$wl" = w2 ]; then echo "arguments = \"sum data/big.bin \$(case) $nonce\""
+        else echo "arguments = \"cpu $ITERS \$(case) $nonce\""; fi
         echo 'should_transfer_files = YES'
         echo 'when_to_transfer_output = ON_EXIT'
         echo "transfer_input_files = $inputs"
@@ -813,10 +858,11 @@ condor_submit_file() { # condor_submit_file WD WL NONCE MODE
         echo 'request_cpus = 1'
         echo 'request_memory = 256MB'
         if [ "$mode" = tuned ]; then echo 'job_lease_duration = 60'; fi
-        if [ "$CUR_ALL" = 0 ]; then
+        if [ "$CUR_ALL" = 0 ] || [ "$LOCAL_ONLY" = 1 ]; then
             fqdn=$(condor_cmd condor_config_val FULL_HOSTNAME 2>/dev/null || hostname -f)
             fqdn=$(printf '%s' "$fqdn" | tr 'A-Z' 'a-z')
-            echo "requirements = (toLower(TARGET.Machine) != \"$fqdn\")"
+            if [ "$LOCAL_ONLY" = 1 ]; then echo "requirements = (toLower(TARGET.Machine) == \"$fqdn\")"
+            else echo "requirements = (toLower(TARGET.Machine) != \"$fqdn\")"; fi
         fi
         echo 'queue case from cases.list'
     } >"$wd/job.sub"
@@ -852,11 +898,12 @@ exec_system() {
     local r0 t0 r1 t1
     case "$sys" in
     zm-local|zm)
-        local flags=()
+        local flags=() cmdv=(./burn cpu "$ITERS" '{}' "$nonce")
+        if [ "$wl" = w2 ]; then cmdv=(./burn sum data/big.bin '{}' "$nonce"); fi
         if [ "$sys" = zm-local ]; then flags=(--local-only); elif [ "$CUR_ALL" = 0 ]; then flags=(--remote-only); fi
         read -r r0 <<<"$(nic_read)"; t0=$(now)
         ( cd "$wd" && timeout "$ZMF_TIMEOUT" "$BUILD/zm" --socket "$SOCK" run ${flags[@]+"${flags[@]}"} \
-            --each 'cases/*' -- sh ./sim.sh '{}' "$nonce" ) >"$out" 2>"$err" || rc=$?
+            --each 'cases/*' -- "${cmdv[@]}" ) >"$out" 2>"$err" || rc=$?
         t1=$(now); read -r r1 <<<"$(nic_read)"
         prefix=cases/ ;;
     condor-*)
@@ -881,7 +928,10 @@ exec_system() {
     done <"$STAGE_NAMES"
     local retries=0
     if [ "${sys#zm}" != "$sys" ]; then retries=$(grep -cE 'retry [0-9]+/[0-9]+' "$err" || true); fi
-    local note="rc=$rc"
+    local note="rc=$rc;scope=$SCOPE" hosts
+    hosts=$(while read -r c; do awk 'NR==1{print $NF}' "$wd/$prefix$c.out" 2>/dev/null || true; done <"$STAGE_NAMES" \
+        | sort | uniq -c | awk '{printf "%s%s:%s", (n++?"|":""), $2, $1}')
+    [ -n "$hosts" ] && note="$note;ran_on=$hosts"
     [ "$sys" = zm ] && [ "$CUR_ALL" = 0 ] && note="$note;remote-only"
     [ "$sys" = zm ] && [ "$CUR_ALL" = 1 ] && note="$note;all-nodes"
     [ "${sys#condor}" != "$sys" ] && [ "$CUR_ALL" = 1 ] && note="$note;all-nodes"
@@ -929,7 +979,7 @@ condor_systems() {
     fi
     return 0
 }
-systems_list() { echo "zm-local zm $(condor_systems)"; }
+systems_list() { if [ "$LOCAL_ONLY" = 1 ]; then echo "zm-local $(condor_systems)"; else echo "zm-local zm $(condor_systems)"; fi; }
 
 bench_w1() {
     step "w1: CPU fan-out, $NCASES cases of ~${SECS}s"
@@ -955,7 +1005,7 @@ bench_w3() {
     local n=$((NCASES + NCASES * 2 / 3))
     step "w3: churn, $n cases, donor killed at ~30% (needs a second node to finish on)"
     [ "$ALL_NODES" = 1 ] || log "w3 forces all-nodes: the requester must be able to finish the work after the donor dies"
-    CUR_ALL=1
+    CUR_ALL=1; LOCAL_ONLY=0
     local stage=$RUNROOT/stage-w3 sys base_wall delay modes="kill" mode kind pid
     rm -rf "$stage"; stage_cpu "$stage" "$n"; ls "$stage/cases" >"$STAGE_NAMES"
     if [ "$WITH_TERM" = 1 ]; then modes="kill term"; fi
@@ -994,7 +1044,15 @@ cmd_bench() {
         --cases) NCASES=${2:?}; shift ;;
         --secs) SECS=${2:?}; shift ;;
         --mb) MB=${2:?}; shift ;;
-        --all-nodes) ALL_NODES=1 ;;
+        --all-nodes) ALL_NODES=1; SCOPE=both ;;
+        --scope)
+            SCOPE=${2:?}; shift
+            case "$SCOPE" in
+            this) ALL_NODES=0; LOCAL_ONLY=1 ;;
+            donor) ALL_NODES=0; LOCAL_ONLY=0 ;;
+            both) ALL_NODES=1; LOCAL_ONLY=0 ;;
+            *) die "bench: --scope is this|donor|both" ;;
+            esac ;;
         --ssh) SSH_TARGET=${2:?}; shift ;;
         --ssh-script) SSH_SCRIPT=${2:?}; shift ;;
         --condor-modes) CONDOR_MODES=${2:?}; shift ;;
@@ -1015,7 +1073,7 @@ cmd_bench() {
     fi
     [ -x "$BUILD/zm" ] || die "not built: run setup first"
     zmd_alive || die "zmd is not running: run 'requester' first"
-    [ "$(admitted_peers)" -ge 1 ] || die "no ADMITTED peer in 'zm status'; get the donor joined first"
+    if [ "$SCOPE" != this ]; then [ "$(admitted_peers)" -ge 1 ] || die "no ADMITTED peer in 'zm status'; get the donor joined first"; fi
 
     local target=$PEER_IP
     if [ -z "$target" ] && [ -f "$ZMF_HOME/state/peer_ip" ]; then target=$(cat "$ZMF_HOME/state/peer_ip"); fi
@@ -1029,7 +1087,7 @@ cmd_bench() {
 
     CONDOR_OK=0
     if [ "$(condor_tier)" != none ]; then
-        if [ "$(condor_machines | wc -l)" -ge 2 ]; then CONDOR_OK=1
+        if [ "$(condor_machines | wc -l)" -ge "$([ "$SCOPE" = this ] && echo 1 || echo 2)" ]; then CONDOR_OK=1
         else warn "condor_status shows fewer than 2 machines: HTCondor runs are SKIPPED. Is the donor's startd up and 9618/tcp open?"; fi
     else
         warn "no HTCondor on this machine: HTCondor runs are SKIPPED"
@@ -1100,7 +1158,8 @@ usage() {
     cat <<'EOF'
 zmfield.sh: field-test ZeroMesh against HTCondor on real Linux laptops.
 Run with bash (fish users: `bash scripts/zmfield.sh ...`). Global flag: --dry-run (print, don't execute).
-Env: ZMF_HOME (default ~/.zmfield), ZMF_JOBS (build -j), ZMF_BWRAP_TAG, ZMF_TIMEOUT, ZMF_KEEP_WORK=1.
+Env: ZMF_HOME (default ~/.zmfield), ZMF_JOBS (build -j), ZMF_BWRAP_TAG, ZMF_TIMEOUT, ZMF_KEEP_WORK=1,
+     ZMF_NO_GOVERNOR=1 (donor: write max_step = 0 so the comfort governor never refuses work; test rigs only).
 
   doctor                                  check this machine (read-only)
   setup [--no-condor] [--open-firewall] [--branch B]
@@ -1111,7 +1170,7 @@ Env: ZMF_HOME (default ~/.zmfield), ZMF_JOBS (build -j), ZMF_BWRAP_TAG, ZMF_TIME
                                           prints the exact command to run on the donor
   donor --cm REQUESTER_IP [--join 'ZM-..'] [--ip IP]
                                           start zmd + join team + HTCondor execute node
-  bench [--workloads w1,w2,w3] [--cases N] [--secs S] [--mb MB] [--all-nodes]
+  bench [--workloads w1,w2,w3] [--cases N] [--secs S] [--mb MB] [--scope this|donor|both] [--all-nodes]
         [--ssh user@donor] [--ssh-script PATH] [--condor-modes default,tuned]
         [--peer DONOR_IP] [--with-term]   (run on the requester)
                                           w1 CPU fan-out, w2 data-once, w3 donor churn
