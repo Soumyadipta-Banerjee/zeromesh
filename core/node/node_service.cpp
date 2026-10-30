@@ -454,6 +454,9 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
         if (it == reserved_.end()) return no_reservation();
         spec = std::move(it->second.spec);
         reserved_.erase(it);
+        if (!req->profile_id().empty()) {
+            (*spec.mutable_env_spec()->mutable_params())["profile_id"] = req->profile_id();
+        }
         const bool preemptible = !spec.policy().has_preemptible() || spec.policy().preemptible();
         running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible, spec, std::move(needed)};
     }
