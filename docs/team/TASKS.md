@@ -16,7 +16,7 @@ put your name next to it in the table below (via a PR), and start.
 | [M5b: zm-render](#m5b-zm-render-appszm-render) | _open_ | M |
 | [M5c: env-mirror](#m5c-env-mirror-pluginsenv-mirror) | Shravan (suggested) | L |
 | [M6: frontend-reapi](#m6-frontend-reapi-pluginsfrontend-reapi) | _open_ | L |
-| [Ops: CI, packaging, acceptance, docs](#ops-ci-packaging-acceptance-docs) | _open_ | M |
+| [Ops: CI, packaging, acceptance, docs](#ops-ci-packaging-acceptance-docs) | Soumya | M |
 
 Sizes are rough: S is a few days, M is one to two weeks, L is two weeks or more for one person.
 
@@ -395,7 +395,7 @@ protobuf, CMake and recc.
 
 ## Ops: CI, packaging, acceptance, docs
 
-**Owner:** _open_. **Size:** M. **Branch:** `stream/ops`.
+**Owner:** Soumya. **Size:** M. **Branch:** `stream/ops`.
 
 **Goal.** Make ZeroMesh easy to install and hard to break: stricter CI, packages with a
 systemd user unit, and the multi-machine acceptance runs done and recorded. Keep the public
