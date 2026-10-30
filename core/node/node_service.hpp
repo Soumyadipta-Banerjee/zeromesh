@@ -42,8 +42,7 @@ public:
     NodeService(std::string node_id, std::shared_ptr<net::PinStore> pins,
                 std::function<std::optional<net::TeamKey>()> team, std::string self_fingerprint,
                 std::function<v1::PeerInfo()> self_info, std::shared_ptr<store::CasStore> cas = nullptr,
-                std::shared_ptr<plugin::Registry> registry = nullptr,
-                std::shared_ptr<LocalExecutor> executor = nullptr,
+                std::shared_ptr<plugin::Registry> registry = nullptr, std::shared_ptr<LocalExecutor> executor = nullptr,
                 std::function<net::Telemetry()> telemetry = nullptr, DonorPolicy policy = {},
                 std::shared_ptr<net::PeerTable> peers = nullptr);
     ~NodeService() override;
@@ -94,7 +93,7 @@ private:
     PendingAdmissions pending_;
 
     // Remote execution.
-    using TaskKey = std::pair<std::string, std::string>;  // (caller node id, task id)
+    using TaskKey = std::pair<std::string, std::string>; // (caller node id, task id)
     struct Reservation {
         v1::TaskSpec spec;
         std::vector<store::Digest> needed;

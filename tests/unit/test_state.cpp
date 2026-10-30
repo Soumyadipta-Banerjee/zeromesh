@@ -9,7 +9,7 @@ using zeromesh::testing::TempDir;
 
 TEST(StatePersistsId) {
     TempDir tmp;
-    const auto dir = tmp / "state";  // does not exist yet
+    const auto dir = tmp / "state"; // does not exist yet
     auto a = NodeState::LoadOrCreate(dir);
     auto b = NodeState::LoadOrCreate(dir);
     ASSERT_EQ(a.node_id().size(), 32u);

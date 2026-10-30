@@ -18,8 +18,7 @@ public:
     const std::filesystem::path& dir() const { return dir_; }
 
 private:
-    NodeState(std::filesystem::path dir, std::string node_id)
-        : dir_(std::move(dir)), node_id_(std::move(node_id)) {}
+    NodeState(std::filesystem::path dir, std::string node_id) : dir_(std::move(dir)), node_id_(std::move(node_id)) {}
 
     std::filesystem::path dir_;
     std::string node_id_;

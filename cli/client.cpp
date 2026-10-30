@@ -7,7 +7,9 @@
 
 namespace zeromesh::cli {
 
-std::filesystem::path DefaultSocketPath() { return node::DaemonConfig::FromEnv().socket_path(); }
+std::filesystem::path DefaultSocketPath() {
+    return node::DaemonConfig::FromEnv().socket_path();
+}
 
 Client::Client(std::shared_ptr<grpc::Channel> channel)
     : channel_(std::move(channel)), stub_(v1::ClientApi::NewStub(channel_)) {}

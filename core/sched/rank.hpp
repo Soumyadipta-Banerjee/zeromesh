@@ -14,15 +14,15 @@ namespace zeromesh::sched {
 struct Candidate {
     std::string node_id;
     bool is_local{false};
-    int cores_total{0};  // fixed machine size (slot capacity); not live free cores
-    int cores_free{0};   // informational / load hint only
+    int cores_total{0}; // fixed machine size (slot capacity); not live free cores
+    int cores_free{0};  // informational / load hint only
     uint64_t mem_available{0};
     double cpu_load_pct{0.0};
     bool on_ac{true};
     std::string arch;
     std::chrono::milliseconds latency{0};
-    int64_t missing_bytes{-1};  // input bytes the node lacks; -1 = unknown
-    int in_flight{0};           // tasks this node already runs for us
+    int64_t missing_bytes{-1}; // input bytes the node lacks; -1 = unknown
+    int in_flight{0};          // tasks this node already runs for us
 };
 
 // Keeps the candidates that can run `spec` and orders them best first.

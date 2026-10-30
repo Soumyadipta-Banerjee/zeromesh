@@ -8,7 +8,9 @@
 namespace zeromesh::frontend_reapi {
 
 Frontend::Frontend() = default;
-Frontend::~Frontend() { Stop(); }
+Frontend::~Frontend() {
+    Stop();
+}
 
 bool Frontend::Start(plugin::ClientApiHandle& api, const plugin::PluginConfig& cfg) {
     // Disabled by default; enable with PluginConfig enabled=true/1 or ZM_ENABLE_REAPI=1.
@@ -33,8 +35,7 @@ bool Frontend::Start(plugin::ClientApiHandle& api, const plugin::PluginConfig& c
     }
     running_ = true;
     std::cerr << "[frontend-reapi] listening on 127.0.0.1"
-              << (std::getenv("ZM_REAPI_PORT") ? std::string(":") + std::getenv("ZM_REAPI_PORT")
-                                               : std::string(":8980"))
+              << (std::getenv("ZM_REAPI_PORT") ? std::string(":") + std::getenv("ZM_REAPI_PORT") : std::string(":8980"))
               << " via " << socket_ << "\n";
     return true;
 }
@@ -42,7 +43,10 @@ bool Frontend::Start(plugin::ClientApiHandle& api, const plugin::PluginConfig& c
 void Frontend::Stop() {
     if (!running_) return;
     running_ = false;
-    if (server_) { server_->Stop(); server_.reset(); }
+    if (server_) {
+        server_->Stop();
+        server_.reset();
+    }
     std::cerr << "[frontend-reapi] stopped\n";
 }
 

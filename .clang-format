@@ -1,0 +1,25 @@
+# Matches the style the codebase already uses, so formatting a file changes little.
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++20
+IndentWidth: 4
+ColumnLimit: 120
+AccessModifierOffset: -4
+NamespaceIndentation: None
+FixNamespaceComments: true
+PointerAlignment: Left
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: All
+AlignAfterOpenBracket: Align
+BinPackArguments: true
+BinPackParameters: true
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+IncludeBlocks: Preserve
+SortIncludes: Never
+ReflowComments: false
+SpacesBeforeTrailingComments: 1
+BreakTemplateDeclarations: Yes

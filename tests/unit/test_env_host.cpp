@@ -47,8 +47,7 @@ TEST(EnvHostMirrorsUsrMerge) {
     ASSERT_TRUE(r.value.has_value());
     const auto& env = *r.value;
     for (const char* p : {"/bin", "/lib"}) {
-        bool sym = std::any_of(env.symlinks.begin(), env.symlinks.end(),
-                               [&](const auto& s) { return s.link == p; });
+        bool sym = std::any_of(env.symlinks.begin(), env.symlinks.end(), [&](const auto& s) { return s.link == p; });
         bool bind = std::any_of(env.binds.begin(), env.binds.end(),
                                 [&](const auto& b) { return b.sandbox == p && b.read_only; });
         if (fs::is_symlink(p)) {
@@ -60,9 +59,8 @@ TEST(EnvHostMirrorsUsrMerge) {
     ASSERT_TRUE(std::any_of(env.env.begin(), env.env.end(), [](const auto& kv) {
         return kv.first == "PATH" && kv.second == "/usr/local/bin:/usr/bin:/bin";
     }));
-    ASSERT_TRUE(std::any_of(env.binds.begin(), env.binds.end(), [](const auto& b) {
-        return b.host == "/etc" && b.sandbox == "/etc" && b.read_only;
-    }));
+    ASSERT_TRUE(std::any_of(env.binds.begin(), env.binds.end(),
+                            [](const auto& b) { return b.host == "/etc" && b.sandbox == "/etc" && b.read_only; }));
 }
 
 TEST(EnvHostLoadsAsPlugin) {

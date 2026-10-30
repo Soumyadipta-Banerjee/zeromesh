@@ -23,29 +23,25 @@ enum class PeerState {
 struct Peer {
     std::string id;
     std::string hostname;
-    std::string arch{};            // uname machine, e.g. "x86_64"
+    std::string arch{}; // uname machine, e.g. "x86_64"
     std::string ip_address;
     int grpc_port{8980};
-    int node_port{8981};           // NodeApi TCP port
+    int node_port{8981}; // NodeApi TCP port
     int cores{1};
     int cores_free{0};
     uint64_t memory_bytes{0};
     uint64_t mem_available{0};
-    double cpu_load_pct{0.0};     // 0.0 to 100.0%
-    int battery_pct{-1};           // -1 for AC/Desktop, 0-100 for battery
+    double cpu_load_pct{0.0}; // 0.0 to 100.0%
+    int battery_pct{-1};      // -1 for AC/Desktop, 0-100 for battery
     bool is_charging{true};
     PeerState state{PeerState::Active};
     std::string draining_reason{};
     std::chrono::milliseconds latency{0};
     std::chrono::steady_clock::time_point last_seen{};
 
-    [[nodiscard]] std::string endpoint() const {
-        return ip_address + ":" + std::to_string(grpc_port);
-    }
+    [[nodiscard]] std::string endpoint() const { return ip_address + ":" + std::to_string(grpc_port); }
 
-    [[nodiscard]] bool IsAvailable() const {
-        return state == PeerState::Active;
-    }
+    [[nodiscard]] bool IsAvailable() const { return state == PeerState::Active; }
 };
 
 /**

@@ -79,7 +79,7 @@ TEST(NodeApiRemoteRun) {
     zeromesh::testing::WriteFile(src / "in.txt", "hello from A\n");
     auto root = a.merkle->BuildTree(src.path());
     auto needed = ToProto(a.merkle->CollectTree(root));
-    ASSERT_EQ(needed.size(), static_cast<size_t>(2));  // the manifest and in.txt
+    ASSERT_EQ(needed.size(), static_cast<size_t>(2)); // the manifest and in.txt
 
     v1::TaskSpec spec = Shell("cat in.txt; printf %s \"$ZM_NODE_ID\" > who");
     spec.add_outputs("who");
@@ -185,7 +185,8 @@ TEST(NodeApiBlobDigestVerified) {
     ASSERT_FALSE(b.cas->HasBlob(good.hash));
     ASSERT_FALSE(b.cas->HasBlob(bad.hash));
     // More bytes than declared, a hash that is not one, a chunk without digest, a truncated object.
-    ASSERT_EQ(PushRaw(*stub, {MakeChunk(good.hash, 2, "hello", true)}).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ASSERT_EQ(PushRaw(*stub, {MakeChunk(good.hash, 2, "hello", true)}).error_code(),
+              grpc::StatusCode::INVALID_ARGUMENT);
     ASSERT_EQ(PushRaw(*stub, {MakeChunk("../../etc/passwd", 5, "hello", true)}).error_code(),
               grpc::StatusCode::INVALID_ARGUMENT);
     ASSERT_EQ(PushRaw(*stub, {MakeChunk("", 0, "hello", true)}).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
@@ -194,7 +195,8 @@ TEST(NodeApiBlobDigestVerified) {
     ASSERT_FALSE(b.cas->HasBlob(good.hash));
 
     // Correct bytes in two chunks are stored.
-    ASSERT_TRUE(PushRaw(*stub, {MakeChunk(good.hash, good.size_bytes, "he", false), MakeChunk("", 0, "llo", true)}).ok());
+    ASSERT_TRUE(
+        PushRaw(*stub, {MakeChunk(good.hash, good.size_bytes, "he", false), MakeChunk("", 0, "llo", true)}).ok());
     ASSERT_EQ(b.cas->GetBlob(good.hash), std::optional<std::string>("hello"));
 
     // Unadmitted callers are refused by every remote-execution RPC.
@@ -236,9 +238,12 @@ TEST(NodeApiCancel) {
     std::optional<v1::TaskResult> result;
     std::string run_err;
     std::thread runner([&] {
-        result = client->Run("t1", [&](const v1::JobEvent& ev) {
-            if (ev.state() == v1::RUNNING) running = true;
-        }, &run_err);
+        result = client->Run(
+            "t1",
+            [&](const v1::JobEvent& ev) {
+                if (ev.state() == v1::RUNNING) running = true;
+            },
+            &run_err);
     });
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (!running && std::chrono::steady_clock::now() < deadline) {

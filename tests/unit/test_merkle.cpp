@@ -9,26 +9,13 @@ TEST(DirectoryManifest_SerializationRoundtrip) {
     using namespace zeromesh::store;
 
     DirectoryManifest orig;
-    orig.files.push_back(FileNode{
-        .name = "compiler.cpp",
-        .digest = Digest{"hash_compiler", 1024},
-        .is_executable = false
-    });
-    orig.files.push_back(FileNode{
-        .name = "compile.sh",
-        .digest = Digest{"hash_script", 256},
-        .is_executable = true
-    });
+    orig.files.push_back(
+        FileNode{.name = "compiler.cpp", .digest = Digest{"hash_compiler", 1024}, .is_executable = false});
+    orig.files.push_back(FileNode{.name = "compile.sh", .digest = Digest{"hash_script", 256}, .is_executable = true});
 
-    orig.directories.push_back(DirectoryNode{
-        .name = "subfolder",
-        .digest = Digest{"hash_subfolder_manifest", 512}
-    });
+    orig.directories.push_back(DirectoryNode{.name = "subfolder", .digest = Digest{"hash_subfolder_manifest", 512}});
 
-    orig.symlinks.push_back(SymlinkNode{
-        .name = "liblink.so",
-        .target = "libcore.so.1"
-    });
+    orig.symlinks.push_back(SymlinkNode{.name = "liblink.so", .target = "libcore.so.1"});
 
     std::string serialized = orig.Serialize();
     ASSERT_FALSE(serialized.empty());
@@ -83,7 +70,8 @@ TEST(MerkleBuilder_BuildAndMaterializeTree) {
         f << "#!/bin/bash\necho Building...\n";
     }
     std::filesystem::permissions(test_root / "bin" / "build.sh",
-                                 std::filesystem::perms::owner_exec | std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                 std::filesystem::perms::owner_exec | std::filesystem::perms::owner_read |
+                                     std::filesystem::perms::owner_write,
                                  std::filesystem::perm_options::add);
 
     // Symlink

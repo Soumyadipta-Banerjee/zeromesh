@@ -22,9 +22,7 @@ public:
         return instance;
     }
 
-    void Add(const std::string& name, std::function<void()> func) {
-        tests_.push_back({name, std::move(func)});
-    }
+    void Add(const std::string& name, std::function<void()> func) { tests_.push_back({name, std::move(func)}); }
 
     int RunAll() {
         int passed = 0;
@@ -56,8 +54,8 @@ public:
 
         std::cout << "-----------------------------------------\n";
         std::cout << "Total Tests: " << tests_.size() << " | "
-                  << "\033[32mPassed: " << passed << "\033[0m | "
-                  << (failed > 0 ? "\033[31m" : "") << "Failed: " << failed << "\033[0m\n";
+                  << "\033[32mPassed: " << passed << "\033[0m | " << (failed > 0 ? "\033[31m" : "")
+                  << "Failed: " << failed << "\033[0m\n";
         std::cout << "=========================================\n\n";
 
         return failed == 0 ? 0 : 1;
@@ -67,45 +65,42 @@ private:
     std::vector<TestCase> tests_;
 };
 
-#define TEST(test_name) \
-    void test_name(); \
-    struct test_name##_registrar { \
-        test_name##_registrar() { \
-            ::zeromesh::testing::TestRegistry::Instance().Add(#test_name, test_name); \
-        } \
-    } test_name##_instance; \
+#define TEST(test_name)                                                                                                \
+    void test_name();                                                                                                  \
+    struct test_name##_registrar {                                                                                     \
+        test_name##_registrar() { ::zeromesh::testing::TestRegistry::Instance().Add(#test_name, test_name); }          \
+    } test_name##_instance;                                                                                            \
     void test_name()
 
-#define ASSERT_TRUE(condition) \
-    do { \
-        if (!(condition)) { \
-            std::ostringstream ss; \
-            ss << "Assertion failed: " << #condition << " (" << __FILE__ << ":" << __LINE__ << ")"; \
-            throw std::runtime_error(ss.str()); \
-        } \
+#define ASSERT_TRUE(condition)                                                                                         \
+    do {                                                                                                               \
+        if (!(condition)) {                                                                                            \
+            std::ostringstream ss;                                                                                     \
+            ss << "Assertion failed: " << #condition << " (" << __FILE__ << ":" << __LINE__ << ")";                    \
+            throw std::runtime_error(ss.str());                                                                        \
+        }                                                                                                              \
     } while (0)
 
-#define ASSERT_FALSE(condition) \
-    ASSERT_TRUE(!(condition))
+#define ASSERT_FALSE(condition) ASSERT_TRUE(!(condition))
 
-#define ASSERT_EQ(val1, val2) \
-    do { \
-        if (!((val1) == (val2))) { \
-            std::ostringstream ss; \
-            ss << "Equality assertion failed: " << #val1 << " == " << #val2 \
-               << " (" << __FILE__ << ":" << __LINE__ << ")"; \
-            throw std::runtime_error(ss.str()); \
-        } \
+#define ASSERT_EQ(val1, val2)                                                                                          \
+    do {                                                                                                               \
+        if (!((val1) == (val2))) {                                                                                     \
+            std::ostringstream ss;                                                                                     \
+            ss << "Equality assertion failed: " << #val1 << " == " << #val2 << " (" << __FILE__ << ":" << __LINE__     \
+               << ")";                                                                                                 \
+            throw std::runtime_error(ss.str());                                                                        \
+        }                                                                                                              \
     } while (0)
 
-#define ASSERT_NE(val1, val2) \
-    do { \
-        if ((val1) == (val2)) { \
-            std::ostringstream ss; \
-            ss << "Inequality assertion failed: " << #val1 << " != " << #val2 \
-               << " (" << __FILE__ << ":" << __LINE__ << ")"; \
-            throw std::runtime_error(ss.str()); \
-        } \
+#define ASSERT_NE(val1, val2)                                                                                          \
+    do {                                                                                                               \
+        if ((val1) == (val2)) {                                                                                        \
+            std::ostringstream ss;                                                                                     \
+            ss << "Inequality assertion failed: " << #val1 << " != " << #val2 << " (" << __FILE__ << ":" << __LINE__   \
+               << ")";                                                                                                 \
+            throw std::runtime_error(ss.str());                                                                        \
+        }                                                                                                              \
     } while (0)
 
 } // namespace zeromesh::testing

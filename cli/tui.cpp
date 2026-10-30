@@ -34,17 +34,26 @@ std::string Power(const v1::PeerInfo& p) {
     return std::to_string(p.battery_pct()) + "%" + (p.on_ac() ? " (AC)" : "");
 }
 
-std::string Clip(const std::string& s, size_t n) { return s.size() > n ? s.substr(0, n - 3) + "..." : s; }
+std::string Clip(const std::string& s, size_t n) {
+    return s.size() > n ? s.substr(0, n - 3) + "..." : s;
+}
 
 const char* StateName(v1::TaskState s) {
     switch (s) {
-        case v1::QUEUED: return "QUEUED";
-        case v1::PLACED: return "PLACED";
-        case v1::RUNNING: return "RUNNING";
-        case v1::SUCCEEDED: return "DONE";
-        case v1::FAILED: return "FAILED";
-        case v1::CANCELLED: return "CANCEL";
-        default: return "?";
+    case v1::QUEUED:
+        return "QUEUED";
+    case v1::PLACED:
+        return "PLACED";
+    case v1::RUNNING:
+        return "RUNNING";
+    case v1::SUCCEEDED:
+        return "DONE";
+    case v1::FAILED:
+        return "FAILED";
+    case v1::CANCELLED:
+        return "CANCEL";
+    default:
+        return "?";
     }
 }
 
@@ -164,8 +173,10 @@ void CountTasks(const v1::ActivitySnapshot& activity, int* live, int* done) {
     *live = 0;
     *done = 0;
     for (const auto& t : activity.tasks()) {
-        if (IsWorking(t.state())) ++(*live);
-        else ++(*done);
+        if (IsWorking(t.state()))
+            ++(*live);
+        else
+            ++(*done);
     }
 }
 
@@ -195,9 +206,9 @@ void WriteTaskRow(const v1::ActiveTask& t, const v1::PeerList* peers, bool color
     if (name.size() > 16) name = name.substr(0, 13) + "...";
     std::string where = Where(t, peers);
     if (where.size() > 16) where = where.substr(0, 13) + "...";
-    os << "  " << role_color << std::left << std::setw(10) << t.role() << reset << " " << state_color
-       << std::setw(8) << StateName(t.state()) << reset << " " << std::setw(16) << where << " " << std::setw(16)
-       << name << "  " << ArgvJoin(t) << "\n";
+    os << "  " << role_color << std::left << std::setw(10) << t.role() << reset << " " << state_color << std::setw(8)
+       << StateName(t.state()) << reset << " " << std::setw(16) << where << " " << std::setw(16) << name << "  "
+       << ArgvJoin(t) << "\n";
 }
 
 // Read one keystroke / CSI sequence. Returns false on EOF / hangup.
@@ -209,8 +220,8 @@ enum Key : int {
     KeyDown = 3,
     KeyPgUp = 4,
     KeyPgDn = 5,
-    KeyTabLive = 6,  // switch to live (1)
-    KeyTabDone = 7,  // switch to done (2)
+    KeyTabLive = 6, // switch to live (1)
+    KeyTabDone = 7, // switch to done (2)
     KeyToggleTab = 8,
     KeyClear = 9,
 };
@@ -315,8 +326,8 @@ void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color) {
         os << "  " << dim << "(no peers yet)" << reset << "\n";
         return;
     }
-    os << "  " << std::left << std::setw(10) << "NODE ID" << "  " << std::setw(24) << "HOST" << "  "
-       << std::right << std::setw(9) << "CORES" << "  " << std::setw(9) << "MEM" << "  " << std::setw(7) << "CPU"
+    os << "  " << std::left << std::setw(10) << "NODE ID" << "  " << std::setw(24) << "HOST" << "  " << std::right
+       << std::setw(9) << "CORES" << "  " << std::setw(9) << "MEM" << "  " << std::setw(7) << "CPU"
        << "  " << std::left << std::setw(10) << "STATE" << "  ADMITTED\n";
     for (const auto& p : peers.peers()) {
         if (p.is_self()) continue;
@@ -324,10 +335,10 @@ void RenderStatus(const v1::PeerList& peers, std::ostream& os, bool color) {
         std::string cores = std::to_string(p.cores_free()) + "/" + std::to_string(p.cores_total());
         const char* state_color = p.state() == "active" ? green : yellow;
         std::string id8 = p.node_id().size() <= 8 ? p.node_id() : p.node_id().substr(0, 8);
-        os << "  " << std::left << std::setw(10) << id8 << "  " << std::setw(24) << Clip(host, 24)
-           << "  " << std::right << std::setw(9) << cores << "  " << std::setw(9) << Gib(p.mem_available()) << "  "
-           << std::setw(7) << Pct(p.cpu_load_pct()) << "  " << state_color << std::left << std::setw(10)
-           << p.state() << reset << "  " << (p.admitted() ? "yes" : "no") << "\n";
+        os << "  " << std::left << std::setw(10) << id8 << "  " << std::setw(24) << Clip(host, 24) << "  " << std::right
+           << std::setw(9) << cores << "  " << std::setw(9) << Gib(p.mem_available()) << "  " << std::setw(7)
+           << Pct(p.cpu_load_pct()) << "  " << state_color << std::left << std::setw(10) << p.state() << reset << "  "
+           << (p.admitted() ? "yes" : "no") << "\n";
     }
 }
 
@@ -338,9 +349,12 @@ void RenderActivity(const v1::ActivitySnapshot& activity, std::ostream& os, bool
 
     int working = 0, done = 0, failed = 0;
     for (const auto& t : activity.tasks()) {
-        if (IsWorking(t.state())) ++working;
-        else if (t.state() == v1::SUCCEEDED) ++done;
-        else ++failed;
+        if (IsWorking(t.state()))
+            ++working;
+        else if (t.state() == v1::SUCCEEDED)
+            ++done;
+        else
+            ++failed;
     }
 
     os << bold << "Tasks" << reset;
@@ -376,8 +390,10 @@ void RenderMonitor(const v1::PeerList& peers, const v1::ActivitySnapshot& activi
     const v1::PeerInfo* self = nullptr;
     int others = 0;
     for (const auto& p : peers.peers()) {
-        if (p.is_self()) self = &p;
-        else ++others;
+        if (p.is_self())
+            self = &p;
+        else
+            ++others;
     }
 
     // FitScreen reserves the last row for the key footer.
@@ -463,7 +479,7 @@ int RunMonitor(const PeerFetcher& fetch_peers, const ActivityFetcher& fetch_acti
     int tab = 0; // 0=live, 1=done
     int scroll_live = 0;
     int scroll_done = 0;
-    std::string notice;  // shown in the footer for one frame
+    std::string notice; // shown in the footer for one frame
 
     // Alternate screen + hide cursor; enable SGR mouse for wheel scrolling.
     if (tty) {
@@ -471,8 +487,10 @@ int RunMonitor(const PeerFetcher& fetch_peers, const ActivityFetcher& fetch_acti
     }
 
     auto cleanup = [&]() {
-        if (tty) std::cout << "\033[?1006l\033[?1000l\033[?25h\033[?1049l" << std::flush;
-        else std::cout << "\n" << std::flush;
+        if (tty)
+            std::cout << "\033[?1006l\033[?1000l\033[?25h\033[?1049l" << std::flush;
+        else
+            std::cout << "\n" << std::flush;
     };
 
     while (!stop.load()) {
@@ -538,43 +556,43 @@ int RunMonitor(const PeerFetcher& fetch_peers, const ActivityFetcher& fetch_acti
                 }
                 const int page = std::max(1, rows / 2);
                 switch (key) {
-                    case KeyQuit:
-                        cleanup();
-                        return rc;
-                    case KeyUp:
-                        scroll = std::max(0, scroll - 1);
-                        break;
-                    case KeyDown:
-                        if (tab_count > 0) scroll = std::min(scroll + 1, std::max(0, tab_count - 1));
-                        break;
-                    case KeyPgUp:
-                        scroll = std::max(0, scroll - page);
-                        break;
-                    case KeyPgDn:
-                        if (tab_count > 0) scroll = std::min(scroll + page, std::max(0, tab_count - 1));
-                        break;
-                    case KeyTabLive:
-                        tab = 0;
-                        break;
-                    case KeyTabDone:
-                        tab = 1;
-                        break;
-                    case KeyToggleTab:
-                        tab = tab == 0 ? 1 : 0;
-                        break;
-                    case KeyClear: {
-                        std::string clear_error;
-                        if (clear_activity && clear_activity(&clear_error)) {
-                            scroll_live = 0;
-                            scroll_done = 0;
-                            notice = "cleared finished tasks";
-                        } else {
-                            notice = "clear failed: " + (clear_error.empty() ? "unsupported" : clear_error);
-                        }
-                        break;
+                case KeyQuit:
+                    cleanup();
+                    return rc;
+                case KeyUp:
+                    scroll = std::max(0, scroll - 1);
+                    break;
+                case KeyDown:
+                    if (tab_count > 0) scroll = std::min(scroll + 1, std::max(0, tab_count - 1));
+                    break;
+                case KeyPgUp:
+                    scroll = std::max(0, scroll - page);
+                    break;
+                case KeyPgDn:
+                    if (tab_count > 0) scroll = std::min(scroll + page, std::max(0, tab_count - 1));
+                    break;
+                case KeyTabLive:
+                    tab = 0;
+                    break;
+                case KeyTabDone:
+                    tab = 1;
+                    break;
+                case KeyToggleTab:
+                    tab = tab == 0 ? 1 : 0;
+                    break;
+                case KeyClear: {
+                    std::string clear_error;
+                    if (clear_activity && clear_activity(&clear_error)) {
+                        scroll_live = 0;
+                        scroll_done = 0;
+                        notice = "cleared finished tasks";
+                    } else {
+                        notice = "clear failed: " + (clear_error.empty() ? "unsupported" : clear_error);
                     }
-                    default:
-                        break;
+                    break;
+                }
+                default:
+                    break;
                 }
                 pfd.revents = 0;
                 if (!PollReadable(0)) break;

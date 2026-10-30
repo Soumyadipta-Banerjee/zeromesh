@@ -12,7 +12,7 @@
 namespace zeromesh::net {
 
 struct Identity {
-    std::string node_id;     // the certificate's CN
+    std::string node_id; // the certificate's CN
     std::string cert_pem;
     std::string key_pem;     // PKCS#8, unencrypted; stored mode 0600
     std::string fingerprint; // lowercase hex SHA-256 of the DER certificate (64 chars)

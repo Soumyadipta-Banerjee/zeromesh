@@ -68,7 +68,7 @@ void WriteFileAtomic0600(const fs::path& path, const std::string& content) {
     if (::rename(tmp.c_str(), path.c_str()) != 0) Fail("cannot rename to", path);
 }
 
-}  // namespace
+} // namespace
 
 NodeState NodeState::LoadOrCreate(const fs::path& state_dir) {
     std::error_code ec;
@@ -86,8 +86,7 @@ NodeState NodeState::LoadOrCreate(const fs::path& state_dir) {
         std::string id;
         std::getline(in, id);
         if (!IsValidId(id)) {
-            throw std::runtime_error("malformed node id in " + id_path.string() +
-                                     " (expected 32 lowercase hex chars)");
+            throw std::runtime_error("malformed node id in " + id_path.string() + " (expected 32 lowercase hex chars)");
         }
         return NodeState(state_dir, id);
     }
@@ -97,4 +96,4 @@ NodeState NodeState::LoadOrCreate(const fs::path& state_dir) {
     return NodeState(state_dir, std::move(id));
 }
 
-}  // namespace zeromesh::node
+} // namespace zeromesh::node

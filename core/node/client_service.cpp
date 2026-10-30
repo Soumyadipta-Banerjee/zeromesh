@@ -28,7 +28,9 @@ namespace {
 
 namespace fs = std::filesystem;
 
-grpc::Status Invalid(const std::string& msg) { return {grpc::StatusCode::INVALID_ARGUMENT, msg}; }
+grpc::Status Invalid(const std::string& msg) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, msg};
+}
 
 std::string RandomHex(size_t bytes) {
     std::vector<unsigned char> buf(bytes);
@@ -57,14 +59,14 @@ std::string HumanBytes(uint64_t n) {
 
 // Sums the sizes of the regular files BuildTree would store, without following symlinks.
 // Returns false as soon as the sum exceeds `limit`.
-bool SizeWithinLimit(const fs::path& dir, const std::string& rel, const store::IgnoreRules& rules,
-                     uint64_t limit, uint64_t& total) {
+bool SizeWithinLimit(const fs::path& dir, const std::string& rel, const store::IgnoreRules& rules, uint64_t limit,
+                     uint64_t& total) {
     std::error_code ec;
-    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
-         !ec && it != end; it.increment(ec)) {
+    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
         const std::string name = it->path().filename().string();
         const std::string child_rel = rel.empty() ? name : rel + "/" + name;
-        struct stat st {};
+        struct stat st{};
         if (lstat(it->path().c_str(), &st) != 0) continue;
         const bool is_dir = S_ISDIR(st.st_mode);
         if (rules.Ignored(child_rel, is_dir)) continue;
@@ -102,12 +104,11 @@ std::string Errno(const std::string& what, const fs::path& p) {
 
 // Creates the directories between `root` and the entry, refusing to pass through a symlink
 // or a non-directory. Returns the parent directory of the entry, or an error.
-std::optional<fs::path> EnsureParents(const fs::path& root, const std::vector<std::string>& segs,
-                                      std::string* error) {
+std::optional<fs::path> EnsureParents(const fs::path& root, const std::vector<std::string>& segs, std::string* error) {
     fs::path cur = root;
     for (size_t i = 0; i + 1 < segs.size(); ++i) {
         cur /= segs[i];
-        struct stat st {};
+        struct stat st{};
         if (lstat(cur.c_str(), &st) != 0) {
             if (errno != ENOENT || mkdir(cur.c_str(), 0755) != 0) {
                 *error = Errno("cannot create directory", cur);
@@ -177,7 +178,7 @@ bool CopyBlobTo(const fs::path& src, const fs::path& dst, bool executable, std::
 // Moves `tmp` onto `target`. rename(2) replaces a file or symlink at `target` itself (it never
 // follows it); an existing directory there is removed first.
 bool ReplaceEntry(const fs::path& tmp, const fs::path& target, std::string* error) {
-    struct stat st {};
+    struct stat st{};
     if (lstat(target.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
         std::error_code ec;
         fs::remove_all(target, ec);
@@ -195,7 +196,7 @@ bool ReplaceEntry(const fs::path& tmp, const fs::path& target, std::string* erro
 
 // True when `target` already is a regular file with exactly this content and mode.
 bool AlreadyCurrent(const fs::path& target, const v1::OutputEntry& out) {
-    struct stat st {};
+    struct stat st{};
     if (lstat(target.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
     if (static_cast<int64_t>(st.st_size) != out.digest().size_bytes()) return false;
     if (((st.st_mode & S_IXUSR) != 0) != out.is_executable()) return false;
@@ -216,9 +217,15 @@ v1::PeerInfo FromPeer(const net::Peer& p) {
     info.set_battery_pct(p.battery_pct);
     info.set_on_ac(p.is_charging);
     switch (p.state) {
-        case net::PeerState::Active: info.set_state("active"); break;
-        case net::PeerState::Draining: info.set_state("draining"); break;
-        case net::PeerState::Offline: info.set_state("offline"); break;
+    case net::PeerState::Active:
+        info.set_state("active");
+        break;
+    case net::PeerState::Draining:
+        info.set_state("draining");
+        break;
+    case net::PeerState::Offline:
+        info.set_state("offline");
+        break;
     }
     return info;
 }
@@ -262,7 +269,7 @@ ClientService::ClientService(std::shared_ptr<store::CasStore> cas, std::shared_p
     : cas_(std::move(cas)), merkle_(std::move(merkle)), jobs_(std::move(jobs)), peers_(std::move(peers)),
       options_(std::move(options)), team_(std::move(team)), local_executor_(std::move(local_executor)) {
     if (sodium_init() < 0) throw std::runtime_error("libsodium initialisation failed");
-    telemetry_.Sample();  // prime the CPU-load delta
+    telemetry_.Sample(); // prime the CPU-load delta
 }
 
 grpc::Status ClientService::PutObjects(grpc::ServerContext*, grpc::ServerReader<v1::Chunk>* reader,
@@ -458,7 +465,7 @@ grpc::Status ClientService::CancelJob(grpc::ServerContext*, const v1::JobRef* re
 grpc::Status ClientService::FetchOutputs(grpc::ServerContext*, const v1::FetchRequest* req, v1::FetchReply* reply) {
     const fs::path dest = req->dest_path();
     if (!dest.is_absolute()) return Invalid("dest_path must be absolute: '" + req->dest_path() + "'");
-    struct stat dst {};
+    struct stat dst{};
     if (stat(dest.c_str(), &dst) != 0 || !S_ISDIR(dst.st_mode)) {
         return Invalid("dest_path is not a directory: " + dest.string());
     }

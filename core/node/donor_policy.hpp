@@ -20,14 +20,14 @@
 namespace zeromesh::node {
 
 struct DonorPolicy {
-    int allow_on_battery_above{50};  // percent; on battery, accept only above this
-    int max_cores{-1};               // -1 = cores_total - 1
-    bool allow_network{false};       // tasks may ask for network only if this is true
-    int drain_below_battery{20};     // percent; on battery below this, refuse and drain
+    int allow_on_battery_above{50}; // percent; on battery, accept only above this
+    int max_cores{-1};              // -1 = cores_total - 1
+    bool allow_network{false};      // tasks may ask for network only if this is true
+    int drain_below_battery{20};    // percent; on battery below this, refuse and drain
     // Off by default: keyboard IRQs made demo nodes announce "draining" and
     // vanish from peer lists. Re-enable via ~/.config/zeromesh/donor.toml when wanted.
     bool drain_on_user_activity{false};
-    int drain_hold_s{300};           // seconds the drain condition must stay clear
+    int drain_hold_s{300}; // seconds the drain condition must stay clear
 
     // Reads <config_dir>/donor.toml: `key = value` lines, '#' starts a comment. A missing
     // file gives the defaults. Unknown keys and bad values are reported on stderr and ignored.
@@ -65,9 +65,9 @@ public:
 
     struct TickResult {
         bool draining{false};
-        std::string reason;   // non-empty while draining
-        bool entered{false};  // transitioned into draining this call
-        bool left{false};     // transitioned out of draining this call
+        std::string reason;  // non-empty while draining
+        bool entered{false}; // transitioned into draining this call
+        bool left{false};    // transitioned out of draining this call
     };
 
     // Applies one sample. `now` is injectable for tests.

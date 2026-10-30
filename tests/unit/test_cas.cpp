@@ -216,7 +216,7 @@ TEST(CasConcurrentPutAndGc_Integrity) {
         // Fail only when a still-present blob has the wrong bytes/hash.
         if (!store.HasBlob(digest.hash)) continue;
         const auto got = store.GetBlob(digest.hash);
-        if (!got) continue;  // GC raced between HasBlob and GetBlob
+        if (!got) continue; // GC raced between HasBlob and GetBlob
         if (*got != payload || zeromesh::store::CasStore::ComputeDigest(*got).hash != digest.hash) {
             ++integrity_failures;
         }

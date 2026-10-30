@@ -12,6 +12,8 @@ inline v1::Digest ToProto(const store::Digest& d) {
     return out;
 }
 
-inline store::Digest FromProto(const v1::Digest& d) { return store::Digest{d.hash(), d.size_bytes()}; }
+inline store::Digest FromProto(const v1::Digest& d) {
+    return store::Digest{d.hash(), d.size_bytes()};
+}
 
 } // namespace zeromesh::node

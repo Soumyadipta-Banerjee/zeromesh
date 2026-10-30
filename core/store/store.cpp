@@ -83,15 +83,12 @@ private:
             0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
             0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
             0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-        };
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
         uint32_t W[64];
         for (int t = 0; t < 16; ++t) {
-            W[t] = (static_cast<uint32_t>(block[t * 4]) << 24) |
-                   (static_cast<uint32_t>(block[t * 4 + 1]) << 16) |
-                   (static_cast<uint32_t>(block[t * 4 + 2]) << 8) |
-                   (static_cast<uint32_t>(block[t * 4 + 3]));
+            W[t] = (static_cast<uint32_t>(block[t * 4]) << 24) | (static_cast<uint32_t>(block[t * 4 + 1]) << 16) |
+                   (static_cast<uint32_t>(block[t * 4 + 2]) << 8) | (static_cast<uint32_t>(block[t * 4 + 3]));
         }
         for (int t = 16; t < 64; ++t) {
             uint32_t s0 = RoTr(W[t - 15], 7) ^ RoTr(W[t - 15], 18) ^ (W[t - 15] >> 3);
@@ -110,12 +107,24 @@ private:
             uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
             uint32_t temp2 = S0 + maj;
 
-            h = g; g = f; f = e; e = d + temp1;
-            d = c; c = b; b = a; a = temp1 + temp2;
+            h = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
         }
 
-        state_[0] += a; state_[1] += b; state_[2] += c; state_[3] += d;
-        state_[4] += e; state_[5] += f; state_[6] += g; state_[7] += h;
+        state_[0] += a;
+        state_[1] += b;
+        state_[2] += c;
+        state_[3] += d;
+        state_[4] += e;
+        state_[5] += f;
+        state_[6] += g;
+        state_[7] += h;
     }
 
     std::array<uint32_t, 8> state_{};
@@ -132,8 +141,7 @@ std::chrono::steady_clock::time_point SteadyFromFileTime(std::filesystem::file_t
 
 } // namespace
 
-CasStore::CasStore(std::filesystem::path base_path, CasLimits limits)
-    : limits_(limits) {
+CasStore::CasStore(std::filesystem::path base_path, CasLimits limits) : limits_(limits) {
     if (base_path.empty()) {
         const char* home = std::getenv("HOME");
         if (home) {
@@ -273,8 +281,7 @@ CasStore::GcStats CasStore::CollectGarbage(uint64_t target_bytes,
         if (protect_hashes.contains(hash)) continue;
         victims.push_back({meta.last_used, hash});
     }
-    std::sort(victims.begin(), victims.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::sort(victims.begin(), victims.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 
     for (const auto& [_, hash] : victims) {
         if (blob_bytes_ <= target_bytes) break;

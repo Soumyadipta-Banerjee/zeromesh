@@ -81,7 +81,7 @@ private:
                           int64_t total_bytes);
 
     mutable std::mutex push_cache_mu_;
-    std::unordered_map<std::string, int64_t> push_cache_;  // "node|root" -> bytes known on peer
+    std::unordered_map<std::string, int64_t> push_cache_; // "node|root" -> bytes known on peer
     std::list<std::string> push_cache_lru_;
     static constexpr size_t kPushCacheMax = 128;
 

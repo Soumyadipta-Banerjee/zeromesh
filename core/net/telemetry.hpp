@@ -10,12 +10,12 @@ namespace zeromesh::net {
 struct Telemetry {
     int cores_total{0};
     int cores_free{0};
-    uint64_t mem_total{0};      // bytes
-    uint64_t mem_available{0};  // bytes
-    double cpu_load_pct{0.0};   // 0..100
-    int battery_pct{-1};        // -1 when there is no battery
+    uint64_t mem_total{0};     // bytes
+    uint64_t mem_available{0}; // bytes
+    double cpu_load_pct{0.0};  // 0..100
+    int battery_pct{-1};       // -1 when there is no battery
     bool on_ac{true};
-    bool user_active{false};    // recent keyboard/mouse IRQ activity (M4 drain)
+    bool user_active{false}; // recent keyboard/mouse IRQ activity (M4 drain)
     std::string arch{};
 };
 

@@ -4,7 +4,9 @@
 
 namespace {
 
-zeromesh::plugin::IEnvProvider* MakeHost() { return zeromesh::envhost::Make().release(); }
+zeromesh::plugin::IEnvProvider* MakeHost() {
+    return zeromesh::envhost::Make().release();
+}
 
 const zeromesh::plugin::PluginEntry kEntry{
     .abi_major = zeromesh::plugin::kAbiMajor,
@@ -15,4 +17,6 @@ const zeromesh::plugin::PluginEntry kEntry{
 
 } // namespace
 
-extern "C" const zeromesh::plugin::PluginEntry* zm_plugin_entry() { return &kEntry; }
+extern "C" const zeromesh::plugin::PluginEntry* zm_plugin_entry() {
+    return &kEntry;
+}

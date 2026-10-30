@@ -124,12 +124,9 @@ std::string_view StateName(PeerState s) {
 }
 
 // Common envelope checks: size, record tag, field count, team id, MAC, sender id.
-std::optional<std::vector<std::string_view>> OpenEnvelope(std::string_view packet,
-                                                          std::string_view record_tag,
-                                                          size_t field_count,
-                                                          std::string_view label,
-                                                          const TeamKey& key,
-                                                          std::string_view self_node_id) {
+std::optional<std::vector<std::string_view>> OpenEnvelope(std::string_view packet, std::string_view record_tag,
+                                                          size_t field_count, std::string_view label,
+                                                          const TeamKey& key, std::string_view self_node_id) {
     if (packet.size() > kMaxPacket) return std::nullopt;
     auto f = SplitTabs(packet);
     if (f.size() != field_count || f[0] != record_tag) return std::nullopt;
@@ -142,8 +139,7 @@ std::optional<std::vector<std::string_view>> OpenEnvelope(std::string_view packe
 } // namespace
 
 int64_t UnixMsNow() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
 
@@ -256,16 +252,14 @@ std::string FormatDrain(const DrainFields& d, const TeamKey& key) {
     return Sign(std::move(body), kDrainLabel, key);
 }
 
-std::optional<DrainNotice> ParseDrain(std::string_view packet, const TeamKey& key,
-                                      std::string_view self_node_id) {
+std::optional<DrainNotice> ParseDrain(std::string_view packet, const TeamKey& key, std::string_view self_node_id) {
     const auto f = OpenEnvelope(packet, kDrainTag, 8, kDrainLabel, key, self_node_id);
     if (!f) return std::nullopt;
     const auto seq = ParseNumber<uint64_t>((*f)[4]);
     const auto timestamp_ms = ParseNumber<int64_t>((*f)[5]);
     if (!seq || *seq == 0 || !timestamp_ms || *timestamp_ms <= 0) return std::nullopt;
     if ((*f)[3].empty()) return std::nullopt;
-    return DrainNotice{std::string((*f)[2]), std::string((*f)[6]), std::string((*f)[3]), *seq,
-                       *timestamp_ms};
+    return DrainNotice{std::string((*f)[2]), std::string((*f)[6]), std::string((*f)[3]), *seq, *timestamp_ms};
 }
 
 bool TimestampAcceptable(int64_t unix_ms, std::chrono::milliseconds max_skew) {
@@ -281,24 +275,22 @@ void ReplayTracker::Clear() {
     skew_log_last_.clear();
 }
 
-bool ReplayTracker::Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq,
-                           int64_t timestamp_ms) {
+bool ReplayTracker::Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq, int64_t timestamp_ms) {
     if (node_id.empty() || boot_id.empty() || seq == 0) return false;
     if (!TimestampAcceptable(timestamp_ms)) {
         std::lock_guard<std::mutex> lock(mu_);
         const auto now = std::chrono::steady_clock::now();
         const std::string key(node_id);
         auto it = skew_log_last_.find(key);
-        if (it == skew_log_last_.end() ||
-            now - it->second >= std::chrono::seconds(5)) {
+        if (it == skew_log_last_.end() || now - it->second >= std::chrono::seconds(5)) {
             skew_log_last_[key] = now;
             const int64_t wall_now = UnixMsNow();
             const int64_t skew_ms = timestamp_ms - wall_now;
             std::fprintf(stderr,
                          "zeromesh discovery: rejecting packet from peer %s: clock skew %lld ms "
                          "(timestamp %lld, local %lld)\n",
-                         key.c_str(), static_cast<long long>(skew_ms),
-                         static_cast<long long>(timestamp_ms), static_cast<long long>(wall_now));
+                         key.c_str(), static_cast<long long>(skew_ms), static_cast<long long>(timestamp_ms),
+                         static_cast<long long>(wall_now));
         }
         return false;
     }
@@ -318,14 +310,12 @@ Discovery::Discovery(std::shared_ptr<PeerTable> peer_table, DiscoveryConfig conf
     : peer_table_(std::move(peer_table)), config_(std::move(config)) {
     if (config_.hostname.empty()) {
         char hostname_buf[256] = {0};
-        config_.hostname = gethostname(hostname_buf, sizeof(hostname_buf) - 1) == 0
-                               ? std::string(hostname_buf)
-                               : std::string("localhost");
+        config_.hostname = gethostname(hostname_buf, sizeof(hostname_buf) - 1) == 0 ? std::string(hostname_buf)
+                                                                                    : std::string("localhost");
     }
     if (config_.node_id.empty()) {
         std::random_device rd;
-        config_.node_id = config_.hostname + "-" + std::to_string(getpid()) + "-" +
-                          std::to_string(rd() % 100000);
+        config_.node_id = config_.hostname + "-" + std::to_string(getpid()) + "-" + std::to_string(rd() % 100000);
     }
     // Match what peers see on the wire, so our own announcements are recognised.
     config_.node_id = Sanitize(config_.node_id, kMaxIdLen);
@@ -372,8 +362,7 @@ void Discovery::SetTeam(std::optional<TeamKey> team) {
     bool changed;
     {
         std::lock_guard<std::mutex> lock(team_mutex_);
-        changed = team_.has_value() != team.has_value() ||
-                  (team_ && team_->secret != team->secret);
+        changed = team_.has_value() != team.has_value() || (team_ && team_->secret != team->secret);
         team_ = std::move(team);
     }
     if (changed && peer_table_) {
@@ -400,8 +389,7 @@ void Discovery::Send(const std::string& msg) const {
     dest.sin_family = AF_INET;
     dest.sin_port = htons(static_cast<uint16_t>(config_.discovery_port));
     if (inet_pton(AF_INET, config_.multicast_group.c_str(), &dest.sin_addr) == 1) {
-        sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<const sockaddr*>(&dest),
-               sizeof(dest));
+        sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
     }
     close(sock);
 }
@@ -471,8 +459,7 @@ void Discovery::AdvertiserLoop() {
             peer_table_->PruneStale(kPeerPruneAfter);
         }
         // Sleep in short ticks so Stop() returns promptly.
-        for (auto slept = std::chrono::milliseconds(0);
-             slept < kAnnounceInterval && running_.load(); slept += kTick) {
+        for (auto slept = std::chrono::milliseconds(0); slept < kAnnounceInterval && running_.load(); slept += kTick) {
             std::this_thread::sleep_for(kTick);
         }
     }
@@ -541,8 +528,8 @@ void Discovery::ListenerLoop() {
 
         sockaddr_in sender{};
         socklen_t sender_len = sizeof(sender);
-        const ssize_t n = recvfrom(sock, buffer.data(), buffer.size(), 0,
-                                   reinterpret_cast<sockaddr*>(&sender), &sender_len);
+        const ssize_t n =
+            recvfrom(sock, buffer.data(), buffer.size(), 0, reinterpret_cast<sockaddr*>(&sender), &sender_len);
         // Oversized datagrams are truncated to kMaxPacket + 1 bytes and then rejected.
         if (n <= 0) continue;
 

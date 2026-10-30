@@ -61,12 +61,8 @@ v1::TaskState StateFromResult(const v1::TaskResult& r) {
 LocalExecutor::LocalExecutor(std::shared_ptr<exec::SandboxRunner> runner, std::shared_ptr<plugin::Registry> registry,
                              std::string node_id, int slots, std::filesystem::path scratch_root,
                              std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory)
-    : runner_(std::move(runner)),
-      registry_(std::move(registry)),
-      node_id_(std::move(node_id)),
-      scratch_root_(std::move(scratch_root)),
-      cas_(std::move(cas)),
-      client_factory_(std::move(client_factory)) {
+    : runner_(std::move(runner)), registry_(std::move(registry)), node_id_(std::move(node_id)),
+      scratch_root_(std::move(scratch_root)), cas_(std::move(cas)), client_factory_(std::move(client_factory)) {
     core_capacity_ = std::max(1, slots);
     int n = core_capacity_;
     workers_.reserve(static_cast<size_t>(n));
@@ -82,7 +78,7 @@ LocalExecutor::~LocalExecutor() {
     }
     for (auto& w : workers_) w.request_stop();
     cv_.notify_all();
-    workers_.clear();  // joins
+    workers_.clear(); // joins
 
     // Tasks that never started still get their single on_done.
     std::deque<std::shared_ptr<Item>> left;
@@ -139,8 +135,7 @@ std::vector<LocalExecutor::ActiveItem> LocalExecutor::ListActive() const {
     std::vector<ActiveItem> out;
     out.reserve(items_.size() + recent_.size());
     for (const auto& [id, item] : items_) {
-        out.push_back(ActiveItem{item->task_id, item->spec, item->started,
-                                 item->started ? v1::RUNNING : v1::QUEUED});
+        out.push_back(ActiveItem{item->task_id, item->spec, item->started, item->started ? v1::RUNNING : v1::QUEUED});
     }
     for (const auto& done : recent_) out.push_back(done);
     return out;
@@ -212,8 +207,7 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
     ctx.requester_node_id = requester.empty() ? node_id_ : requester;
 
     std::error_code ec;
-    const auto scratch =
-        scratch_root_ / store::CasStore::ComputeDigest(item.task_id).hash;
+    const auto scratch = scratch_root_ / store::CasStore::ComputeDigest(item.task_id).hash;
     std::filesystem::create_directories(scratch, ec);
     ctx.scratch_dir = scratch;
 
@@ -237,8 +231,8 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
     try {
         plugin::Availability avail = env->Check(ctx.env);
         if (!avail.ok) {
-            return Failed(node_id_, avail.reason.empty() ? "env provider '" + env_name + "' cannot run this task"
-                                                         : avail.reason);
+            return Failed(node_id_,
+                          avail.reason.empty() ? "env provider '" + env_name + "' cannot run this task" : avail.reason);
         }
         plugin::Result<plugin::SandboxEnv> prepared = env->Prepare(ctx);
         if (!prepared.value) {

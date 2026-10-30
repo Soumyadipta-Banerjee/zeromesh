@@ -48,8 +48,7 @@ struct BlobReceiver::Object {
     }
 };
 
-BlobReceiver::BlobReceiver(store::CasStore& cas, std::string peer_id)
-    : cas_(cas), peer_id_(std::move(peer_id)) {}
+BlobReceiver::BlobReceiver(store::CasStore& cas, std::string peer_id) : cas_(cas), peer_id_(std::move(peer_id)) {}
 
 BlobReceiver::~BlobReceiver() = default;
 

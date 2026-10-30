@@ -48,22 +48,12 @@ bool LandlockSandbox::RestrictCurrentProcess() {
         return false;
     }
 
-    uint64_t ro_access = LANDLOCK_ACCESS_FS_EXECUTE |
-                         LANDLOCK_ACCESS_FS_READ_FILE |
-                         LANDLOCK_ACCESS_FS_READ_DIR;
+    uint64_t ro_access = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
 
-    uint64_t rw_access = ro_access |
-                         LANDLOCK_ACCESS_FS_WRITE_FILE |
-                         LANDLOCK_ACCESS_FS_REMOVE_DIR |
-                         LANDLOCK_ACCESS_FS_REMOVE_FILE |
-                         LANDLOCK_ACCESS_FS_MAKE_CHAR |
-                         LANDLOCK_ACCESS_FS_MAKE_DIR |
-                         LANDLOCK_ACCESS_FS_MAKE_REG |
-                         LANDLOCK_ACCESS_FS_MAKE_SOCK |
-                         LANDLOCK_ACCESS_FS_MAKE_FIFO |
-                         LANDLOCK_ACCESS_FS_MAKE_BLOCK |
-                         LANDLOCK_ACCESS_FS_MAKE_SYM |
-                         LANDLOCK_ACCESS_FS_REFER |
+    uint64_t rw_access = ro_access | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR |
+                         LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR |
+                         LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO |
+                         LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER |
                          LANDLOCK_ACCESS_FS_TRUNCATE;
 
     struct landlock_ruleset_attr ruleset_attr = {};

@@ -70,7 +70,9 @@ TEST(TeamIdStableAndPublic) {
     TeamKey b = zeromesh::net::GenerateTeamKey();
     std::string id = zeromesh::net::TeamId(a);
     ASSERT_EQ(id.size(), static_cast<size_t>(32));
-    ASSERT_TRUE(std::all_of(id.begin(), id.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) && !std::isupper(static_cast<unsigned char>(c)); }));
+    ASSERT_TRUE(std::all_of(id.begin(), id.end(), [](char c) {
+        return std::isxdigit(static_cast<unsigned char>(c)) && !std::isupper(static_cast<unsigned char>(c));
+    }));
     ASSERT_EQ(zeromesh::net::TeamId(a), id);
     ASSERT_NE(zeromesh::net::TeamId(b), id);
     // Known answer: SHA-256("zm-team-id" || 16 zero bytes), first 16 bytes.
@@ -85,7 +87,8 @@ TEST(TeamMacDiffersByLabel) {
     ASSERT_FALSE(zeromesh::net::MacEqual(m1, zeromesh::net::Mac(k, "announce", "payloaD")));
     // The separator keeps label/data boundaries unambiguous.
     ASSERT_FALSE(zeromesh::net::MacEqual(zeromesh::net::Mac(k, "ab", "c"), zeromesh::net::Mac(k, "a", "bc")));
-    ASSERT_FALSE(zeromesh::net::MacEqual(m1, zeromesh::net::Mac(zeromesh::net::GenerateTeamKey(), "announce", "payload")));
+    ASSERT_FALSE(
+        zeromesh::net::MacEqual(m1, zeromesh::net::Mac(zeromesh::net::GenerateTeamKey(), "announce", "payload")));
 }
 
 TEST(TeamFileMode0600) {
@@ -94,7 +97,7 @@ TEST(TeamFileMode0600) {
     ASSERT_FALSE(zeromesh::net::TeamFile::Load(state).has_value());
     TeamKey k = zeromesh::net::GenerateTeamKey();
     zeromesh::net::TeamFile::Save(state, k);
-    struct stat st {};
+    struct stat st{};
     ASSERT_EQ(::stat((state / "team").c_str(), &st), 0);
     ASSERT_EQ(st.st_mode & 0777, static_cast<mode_t>(0600));
     auto loaded = zeromesh::net::TeamFile::Load(state);

@@ -18,7 +18,9 @@ std::filesystem::path PluginDir() {
 class StaticEnv final : public zeromesh::plugin::IEnvProvider {
 public:
     std::string_view Name() const override { return "static"; }
-    zeromesh::plugin::Availability Check(const zeromesh::plugin::EnvParams&) override { return {.ok = true, .reason = {}}; }
+    zeromesh::plugin::Availability Check(const zeromesh::plugin::EnvParams&) override {
+        return {.ok = true, .reason = {}};
+    }
     zeromesh::plugin::Result<zeromesh::plugin::SandboxEnv> Prepare(const zeromesh::plugin::TaskContext&) override {
         return {.value = zeromesh::plugin::SandboxEnv{}, .error = {}};
     }
@@ -85,8 +87,7 @@ TEST(PluginFrontendsStartAndStop) {
     ASSERT_EQ(reg.Frontends().size(), static_cast<size_t>(1));
 
     auto handle = zeromesh::plugin::ClientApiHandle(
-        "/tmp/zm-test.sock",
-        grpc::CreateChannel("unix:///tmp/zm-test.sock", grpc::InsecureChannelCredentials()));
+        "/tmp/zm-test.sock", grpc::CreateChannel("unix:///tmp/zm-test.sock", grpc::InsecureChannelCredentials()));
     reg.StartFrontends(handle, {});
     ASSERT_EQ(starts, 1);
     ASSERT_EQ(stops, 0);

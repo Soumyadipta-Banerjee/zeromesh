@@ -64,7 +64,9 @@ bool EventStream::closed() const {
 
 namespace {
 
-bool IsTerminal(v1::TaskState s) { return s == v1::SUCCEEDED || s == v1::FAILED || s == v1::CANCELLED; }
+bool IsTerminal(v1::TaskState s) {
+    return s == v1::SUCCEEDED || s == v1::FAILED || s == v1::CANCELLED;
+}
 
 std::string RandomHex(size_t bytes) {
     std::vector<unsigned char> buf(bytes);
@@ -100,17 +102,17 @@ std::string JoinPath(const std::string& dest, const std::string& rel) {
 
 struct TaskRun {
     v1::TaskSpec spec;
-    std::vector<size_t> deps;  // depends_on and inputs_from tasks, deduplicated
+    std::vector<size_t> deps; // depends_on and inputs_from tasks, deduplicated
     std::vector<size_t> dependents;
     v1::TaskState state{v1::QUEUED};
-    bool started{false};    // claimed for cache lookup / execution
-    bool executing{false};  // handed to the executor
+    bool started{false};   // claimed for cache lookup / execution
+    bool executing{false}; // handed to the executor
     std::string task_id;
     std::string task_key;
-    std::string worker_id;  // set at PLACED, before the task finishes
+    std::string worker_id; // set at PLACED, before the task finishes
     v1::TaskResult result;
     bool has_result{false};
-    bool hidden{false};  // cleared from the monitor; result is still served by GetJob
+    bool hidden{false}; // cleared from the monitor; result is still served by GetJob
     size_t retained_log_bytes{0};
 };
 
@@ -161,7 +163,8 @@ void ProtectOutputEntry(std::unordered_set<std::string>& out, store::MerkleBuild
     }
 }
 
-void ProtectTaskResultBlobs(std::unordered_set<std::string>& out, store::MerkleBuilder& merkle, const v1::TaskResult& r) {
+void ProtectTaskResultBlobs(std::unordered_set<std::string>& out, store::MerkleBuilder& merkle,
+                            const v1::TaskResult& r) {
     if (!r.stdout().hash().empty()) out.insert(r.stdout().hash());
     if (!r.stderr().hash().empty()) out.insert(r.stderr().hash());
     for (const auto& o : r.outputs()) ProtectOutputEntry(out, merkle, o);
@@ -171,7 +174,7 @@ void ProtectTaskResultBlobs(std::unordered_set<std::string>& out, store::MerkleB
 struct Ready {
     size_t index;
     v1::TaskSpec spec;
-    std::vector<std::pair<std::string, v1::OutputEntry>> overlays;  // (destination, output)
+    std::vector<std::pair<std::string, v1::OutputEntry>> overlays; // (destination, output)
 };
 
 } // namespace
@@ -219,7 +222,7 @@ private:
 
     mutable std::mutex mu_;
     std::unordered_map<std::string, JobPtr> jobs_;
-    std::deque<std::string> job_order_;  // submit order (for monitor history)
+    std::deque<std::string> job_order_; // submit order (for monitor history)
 };
 
 std::string JobManager::Impl::Submit(v1::JobSpec spec) {
@@ -229,7 +232,8 @@ std::string JobManager::Impl::Submit(v1::JobSpec spec) {
     for (size_t i = 0; i < job->tasks.size(); ++i) {
         v1::TaskSpec& t = *spec.mutable_tasks(static_cast<int>(i));
         if (t.name().empty()) throw std::invalid_argument("task " + std::to_string(i) + " has no name");
-        if (!job->index.emplace(t.name(), i).second) throw std::invalid_argument("duplicate task name '" + t.name() + "'");
+        if (!job->index.emplace(t.name(), i).second)
+            throw std::invalid_argument("duplicate task name '" + t.name() + "'");
         Normalize(t);
         job->tasks[i].spec = std::move(t);
     }
@@ -421,7 +425,7 @@ void JobManager::Impl::Complete(const JobPtr& job, size_t i, v1::TaskResult resu
 }
 
 void JobManager::Impl::OnState(const JobPtr& job, size_t i, v1::TaskState state, std::string detail) {
-    if (IsTerminal(state)) return;  // terminal states arrive through on_done
+    if (IsTerminal(state)) return; // terminal states arrive through on_done
     std::lock_guard lock(mu_);
     TaskRun& t = job->tasks[i];
     if (IsTerminal(t.state)) return;
@@ -600,8 +604,10 @@ std::vector<v1::ActiveTask> JobManager::Impl::ListActive() const {
     for (auto it = job_order_.rbegin(); it != job_order_.rend(); ++it) {
         auto jt = jobs_.find(*it);
         if (jt == jobs_.end()) continue;
-        if (jt->second->done) finished.push_back(jt->second);
-        else open.push_back(jt->second);
+        if (jt->second->done)
+            finished.push_back(jt->second);
+        else
+            open.push_back(jt->second);
     }
     if (finished.size() > kFinishedJobsListed) {
         finished.resize(kFinishedJobsListed);
@@ -639,8 +645,10 @@ std::shared_ptr<EventStream> JobManager::Impl::Watch(const std::string& job_id) 
     Job& job = *it->second;
     auto stream = std::make_shared<EventStream>();
     for (const auto& ev : job.history) stream->Push(ev);
-    if (job.done) stream->End();
-    else job.watchers.push_back(stream);
+    if (job.done)
+        stream->End();
+    else
+        job.watchers.push_back(stream);
     return stream;
 }
 
@@ -653,13 +661,25 @@ JobManager::JobManager(std::shared_ptr<store::CasStore> cas, std::shared_ptr<sto
     impl_ = std::make_shared<Impl>(std::move(cas), std::move(merkle), std::move(cache), std::move(executor));
 }
 
-JobManager::~JobManager() { impl_->CancelAll(); }
+JobManager::~JobManager() {
+    impl_->CancelAll();
+}
 
-std::string JobManager::Submit(v1::JobSpec spec) { return impl_->Submit(std::move(spec)); }
-void JobManager::Cancel(const std::string& job_id) { impl_->Cancel(job_id); }
-std::optional<v1::JobStatus> JobManager::Get(const std::string& job_id) const { return impl_->Get(job_id); }
-std::vector<v1::ActiveTask> JobManager::ListActive() const { return impl_->ListActive(); }
-void JobManager::ClearFinished() { impl_->ClearFinished(); }
+std::string JobManager::Submit(v1::JobSpec spec) {
+    return impl_->Submit(std::move(spec));
+}
+void JobManager::Cancel(const std::string& job_id) {
+    impl_->Cancel(job_id);
+}
+std::optional<v1::JobStatus> JobManager::Get(const std::string& job_id) const {
+    return impl_->Get(job_id);
+}
+std::vector<v1::ActiveTask> JobManager::ListActive() const {
+    return impl_->ListActive();
+}
+void JobManager::ClearFinished() {
+    impl_->ClearFinished();
+}
 
 void JobManager::Impl::ClearFinished() {
     std::lock_guard lock(mu_);
@@ -685,8 +705,7 @@ std::unordered_set<std::string> JobManager::Impl::ProtectedBlobHashes() const {
         for (const auto& [_, job] : jobs_) {
             if (!job) continue;
             const bool in_grace =
-                job->done && job->finished_at &&
-                (now - *job->finished_at < g_finished_job_blob_grace);
+                job->done && job->finished_at && (now - *job->finished_at < g_finished_job_blob_grace);
             if (job->done && !in_grace) continue;
             JobSnap snap;
             snap.done = job->done;
@@ -697,8 +716,10 @@ std::unordered_set<std::string> JobManager::Impl::ProtectedBlobHashes() const {
             for (const auto& t : job->tasks) {
                 snap.specs.push_back(t.spec);
                 snap.has_result.push_back(t.has_result);
-                if (t.has_result) snap.results.push_back(t.result);
-                else snap.results.emplace_back();
+                if (t.has_result)
+                    snap.results.push_back(t.result);
+                else
+                    snap.results.emplace_back();
             }
             snaps.push_back(std::move(snap));
         }
@@ -707,8 +728,7 @@ std::unordered_set<std::string> JobManager::Impl::ProtectedBlobHashes() const {
     std::unordered_set<std::string> out;
     store::MerkleBuilder merkle(cas_);
     for (const auto& job : snaps) {
-        const bool in_grace =
-            job.done && job.finished_at && (now - *job.finished_at < g_finished_job_blob_grace);
+        const bool in_grace = job.done && job.finished_at && (now - *job.finished_at < g_finished_job_blob_grace);
         for (size_t i = 0; i < job.specs.size(); ++i) {
             if (!job.done) {
                 ProtectTreeHashes(out, merkle, FromProto(job.specs[i].input_root()));
@@ -721,7 +741,9 @@ std::unordered_set<std::string> JobManager::Impl::ProtectedBlobHashes() const {
     return out;
 }
 
-std::unordered_set<std::string> JobManager::ProtectedBlobHashes() const { return impl_->ProtectedBlobHashes(); }
+std::unordered_set<std::string> JobManager::ProtectedBlobHashes() const {
+    return impl_->ProtectedBlobHashes();
+}
 
 void JobManager::SetFinishedJobBlobGracePeriodForTesting(std::chrono::seconds period) {
     g_finished_job_blob_grace = period;
@@ -735,6 +757,8 @@ void JobManager::ResetProtectedBlobTestingHooks() {
     g_finished_job_blob_grace = std::chrono::minutes(10);
     g_job_clock = {};
 }
-std::shared_ptr<EventStream> JobManager::Watch(const std::string& job_id) { return impl_->Watch(job_id); }
+std::shared_ptr<EventStream> JobManager::Watch(const std::string& job_id) {
+    return impl_->Watch(job_id);
+}
 
 } // namespace zeromesh::node

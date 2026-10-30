@@ -86,8 +86,9 @@ int PortFromEnv(const char* name, int def) {
 // then forces its mode to 0700.
 void PrepareRuntimeDir(const fs::path& dir) {
     fs::create_directories(dir);
-    struct stat st {};
-    if (lstat(dir.c_str(), &st) != 0) throw std::runtime_error("cannot stat " + dir.string() + ": " + std::strerror(errno));
+    struct stat st{};
+    if (lstat(dir.c_str(), &st) != 0)
+        throw std::runtime_error("cannot stat " + dir.string() + ": " + std::strerror(errno));
     if (!S_ISDIR(st.st_mode)) throw std::runtime_error(dir.string() + " is not a directory");
     if (st.st_uid != getuid()) throw std::runtime_error(dir.string() + " is owned by another user");
     if (chmod(dir.c_str(), 0700) != 0) {
@@ -128,7 +129,7 @@ DaemonConfig DaemonConfig::FromEnv() {
 }
 
 bool UnixSocketAlive(const fs::path& path) {
-    sockaddr_un addr {};
+    sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     const std::string s = path.string();
     if (s.size() >= sizeof(addr.sun_path)) return false;
@@ -184,7 +185,7 @@ int Daemon::Run() {
             std::cerr << "zmd is already running\n";
             return 1;
         }
-        fs::remove(sock, ec);  // stale socket from a daemon that died
+        fs::remove(sock, ec); // stale socket from a daemon that died
     }
 
     int sfd = signalfd(-1, &sigs, SFD_CLOEXEC);
@@ -284,8 +285,8 @@ int Daemon::Run() {
             std::lock_guard lock(clients_mu);
             if (auto it = clients.find(p.id); it != clients.end()) return it->second;
             if (!pins->FingerprintFor(p.id)) return nullptr;
-            auto c = std::make_shared<NodeClient>(p.ip_address + ":" + std::to_string(p.node_port), identity, pins,
-                                                    p.id);
+            auto c =
+                std::make_shared<NodeClient>(p.ip_address + ":" + std::to_string(p.node_port), identity, pins, p.id);
             clients[p.id] = c;
             return c;
         };
@@ -299,8 +300,8 @@ int Daemon::Run() {
         local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, slots,
                                                          config_.state_dir / "scratch", cas, client_for_node);
 
-        placer = std::make_shared<sched::Placer>(local_executor, peers, client_factory, cas, merkle, node_id,
-                                                 telemetry_fn);
+        placer =
+            std::make_shared<sched::Placer>(local_executor, peers, client_factory, cas, merkle, node_id, telemetry_fn);
         jobs = std::make_shared<JobManager>(cas, merkle, cache, placer);
 
         ClientServiceOptions opts;
@@ -319,7 +320,7 @@ int Daemon::Run() {
         grpc::ServerBuilder client_builder;
         client_builder.AddListeningPort("unix:" + sock.string(), grpc::InsecureServerCredentials());
         client_builder.RegisterService(client_service.get());
-        mode_t old_umask = umask(0177);  // the socket is created 0600, closing the chmod race
+        mode_t old_umask = umask(0177); // the socket is created 0600, closing the chmod race
         client_server = client_builder.BuildAndStart();
         umask(old_umask);
         if (!client_server) throw std::runtime_error("cannot listen on " + sock.string());
@@ -330,8 +331,7 @@ int Daemon::Run() {
         // Front-ends (e.g. frontend-reapi) talk back to this daemon over the ClientApi unix socket.
         // Keep the handle alive for the daemon lifetime — ReapiServer holds a reference into it.
         frontend_handle = std::make_shared<plugin::ClientApiHandle>(
-            sock.string(),
-            grpc::CreateChannel("unix:" + sock.string(), grpc::InsecureChannelCredentials()));
+            sock.string(), grpc::CreateChannel("unix:" + sock.string(), grpc::InsecureChannelCredentials()));
         plugin::PluginConfig frontend_cfg;
         if (const char* en = std::getenv("ZM_ENABLE_REAPI")) {
             frontend_cfg.values["enabled"] = en;
@@ -394,7 +394,7 @@ int Daemon::Run() {
                         }
                         if (p.ip_address.empty() || p.node_port <= 0) continue;
                         auto c = std::make_shared<NodeClient>(p.ip_address + ":" + std::to_string(p.node_port),
-                                                                identity, pins, p.id);
+                                                              identity, pins, p.id);
                         std::string err;
                         if (c->Admit(*team_key, &err)) {
                             std::lock_guard lock(clients_mu);
@@ -430,12 +430,12 @@ int Daemon::Run() {
                                 if (auto it = clients.find(req_id); it != clients.end()) c = it->second;
                             }
                             if (!c && peers) {
-                                if (auto peer = peers->Get(req_id);
-                                    peer && !peer->ip_address.empty() && peer->node_port > 0 &&
-                                    pins->FingerprintFor(peer->id)) {
-                                    c = std::make_shared<NodeClient>(
-                                        peer->ip_address + ":" + std::to_string(peer->node_port), identity, pins,
-                                        peer->id);
+                                if (auto peer = peers->Get(req_id); peer && !peer->ip_address.empty() &&
+                                                                    peer->node_port > 0 &&
+                                                                    pins->FingerprintFor(peer->id)) {
+                                    c = std::make_shared<NodeClient>(peer->ip_address + ":" +
+                                                                         std::to_string(peer->node_port),
+                                                                     identity, pins, peer->id);
                                     std::lock_guard lock(clients_mu);
                                     clients[peer->id] = c;
                                 }
@@ -454,8 +454,7 @@ int Daemon::Run() {
                         discovery->AnnounceNow();
                     }
                     if (node_service) node_service->SetDraining(false);
-                } else if (upd.draining && discovery &&
-                           discovery->local_state() != net::PeerState::Draining) {
+                } else if (upd.draining && discovery && discovery->local_state() != net::PeerState::Draining) {
                     discovery->SetLocalState(net::PeerState::Draining);
                 }
                 for (int i = 0; i < 10 && !admit_stop.load(); ++i) {
@@ -485,8 +484,8 @@ int Daemon::Run() {
             }
         });
 
-        std::cerr << "zmd: node " << node_id << " listening on " << sock.string() << " and NodeApi :"
-                  << config_.node_port << "\n";
+        std::cerr << "zmd: node " << node_id << " listening on " << sock.string()
+                  << " and NodeApi :" << config_.node_port << "\n";
     } catch (const std::exception& e) {
         std::cerr << "zmd: " << e.what() << "\n";
         admit_stop = true;
@@ -511,7 +510,7 @@ int Daemon::Run() {
             break;
         }
         if (fds[0].revents & POLLIN) {
-            signalfd_siginfo si {};
+            signalfd_siginfo si{};
             if (read(sfd, &si, sizeof(si)) == static_cast<ssize_t>(sizeof(si))) {
                 std::cerr << "zmd: " << strsignal(static_cast<int>(si.ssi_signo)) << ", shutting down\n";
             }
@@ -555,13 +554,13 @@ int Daemon::Run() {
     client_server.reset();
     node_service.reset();
     client_service.reset();
-    jobs.reset();      // cancels unfinished jobs
-    placer.reset();    // cancels remote work and joins workers
+    jobs.reset();   // cancels unfinished jobs
+    placer.reset(); // cancels remote work and joins workers
     {
         std::lock_guard lock(clients_mu);
         clients.clear();
     }
-    local_executor.reset();  // kills running sandboxes and joins its workers
+    local_executor.reset(); // kills running sandboxes and joins its workers
     discovery.reset();
     team.reset();
     pins.reset();

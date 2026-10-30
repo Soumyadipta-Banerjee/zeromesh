@@ -17,4 +17,6 @@ const zeromesh::plugin::PluginEntry kEntry{
 
 } // namespace
 
-extern "C" const zeromesh::plugin::PluginEntry* zm_plugin_entry() { return &kEntry; }
+extern "C" const zeromesh::plugin::PluginEntry* zm_plugin_entry() {
+    return &kEntry;
+}

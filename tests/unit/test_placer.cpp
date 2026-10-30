@@ -60,8 +60,10 @@ std::vector<v1::JobEvent> WaitDone(zeromesh::node::JobManager& jm, const std::st
     const auto deadline = std::chrono::steady_clock::now() + limit;
     while (std::chrono::steady_clock::now() < deadline) {
         auto ev = stream->Next(std::chrono::milliseconds(100));
-        if (ev) out.push_back(*ev);
-        else if (jm.Get(id)->done()) break;
+        if (ev)
+            out.push_back(*ev);
+        else if (jm.Get(id)->done())
+            break;
     }
     return out;
 }
@@ -80,8 +82,8 @@ TEST(PlacerRemoteOnlyRunsOnPeer) {
     TempDir src;
     zeromesh::testing::WriteFile(src / "in.txt", "payload\n");
     auto root = zeromesh::node::ToProto(a.merkle->BuildTree(src.path()));
-    auto job = RemoteOnly("mkdir -p out/sub && cp in.txt out/sub/copy && printf %s \"$ZM_NODE_ID\" > who && echo ran",
-                          root);
+    auto job =
+        RemoteOnly("mkdir -p out/sub && cp in.txt out/sub/copy && printf %s \"$ZM_NODE_ID\" > who && echo ran", root);
     job.mutable_tasks(0)->add_outputs("who");
     job.mutable_tasks(0)->add_outputs("out");
     const std::string id = req.jm->Submit(job);
@@ -153,7 +155,7 @@ TEST(PlacerPeerLostFailsFast) {
     Requester req(a);
 
     auto job = RemoteOnly("sleep 60");
-    job.mutable_tasks(0)->mutable_policy()->set_max_retries(0);  // no re-dispatch
+    job.mutable_tasks(0)->mutable_policy()->set_max_retries(0); // no re-dispatch
     const std::string id = req.jm->Submit(job);
     auto stream = req.jm->Watch(id);
     bool running = false;
@@ -207,8 +209,10 @@ TEST(PlacerRetriesOnPeerLoss) {
     }
     ASSERT_TRUE(running);
 
-    if (placed_on.find("node-b") != std::string::npos) b.Stop();
-    else c.Stop();
+    if (placed_on.find("node-b") != std::string::npos)
+        b.Stop();
+    else
+        c.Stop();
 
     auto events = WaitDone(*req.jm, id, std::chrono::seconds(20));
     auto st = req.jm->Get(id);
@@ -382,8 +386,8 @@ TEST(PlacerInFlightCapSpread) {
     donor.Start();
     requester.Admit(donor);
     auto peer = donor.AsPeer();
-    peer.cores = 1;       // hardware capacity used by the in-flight cap
-    peer.cores_free = 0;  // load spike must not change the cap
+    peer.cores = 1;      // hardware capacity used by the in-flight cap
+    peer.cores_free = 0; // load spike must not change the cap
     requester.peers->Upsert(peer);
     Requester req(requester);
 

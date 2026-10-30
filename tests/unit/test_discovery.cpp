@@ -22,14 +22,19 @@ AnnounceFields SampleFields(uint64_t seq = 1, int64_t timestamp_ms = 0) {
         .hostname = "box\twith\ntabs",
         .node_port = 18981,
         .arch = "riscv64",
-        .telemetry = Telemetry{.cores_total = 16, .cores_free = 12, .mem_total = 1000,
-                               .mem_available = 600, .cpu_load_pct = 25.5, .battery_pct = 42,
-                               .on_ac = false, .arch = "riscv64"},
+        .telemetry = Telemetry{.cores_total = 16,
+                               .cores_free = 12,
+                               .mem_total = 1000,
+                               .mem_available = 600,
+                               .cpu_load_pct = 25.5,
+                               .battery_pct = 42,
+                               .on_ac = false,
+                               .arch = "riscv64"},
     };
     if (a.timestamp_ms == 0) {
-        a.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::system_clock::now().time_since_epoch())
-                             .count();
+        a.timestamp_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
     }
     return a;
 }
@@ -43,9 +48,9 @@ DrainFields SampleDrain(uint64_t seq = 1, int64_t timestamp_ms = 0) {
         .reason = "user\tis back",
     };
     if (d.timestamp_ms == 0) {
-        d.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::system_clock::now().time_since_epoch())
-                             .count();
+        d.timestamp_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
     }
     return d;
 }
@@ -120,9 +125,9 @@ TEST(DrainRoundTrip) {
 
 TEST(ReplayTrackerRejectsReplayedSeq) {
     ReplayTracker tracker;
-    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch())
-                            .count();
+    const int64_t now =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     ASSERT_TRUE(tracker.Accept("node-a", "boot1", 1, now));
     ASSERT_FALSE(tracker.Accept("node-a", "boot1", 1, now));
     ASSERT_TRUE(tracker.Accept("node-a", "boot1", 2, now));
@@ -130,9 +135,9 @@ TEST(ReplayTrackerRejectsReplayedSeq) {
 
 TEST(ReplayTrackerRejectsStaleTimestamp) {
     ReplayTracker tracker;
-    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch())
-                            .count();
+    const int64_t now =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     ASSERT_FALSE(tracker.Accept("node-a", "boot1", 1, now - 60'000));
     ASSERT_FALSE(TimestampAcceptable(now - 60'000));
     ASSERT_TRUE(TimestampAcceptable(now));
@@ -140,9 +145,9 @@ TEST(ReplayTrackerRejectsStaleTimestamp) {
 
 TEST(ReplayTrackerAcceptsNewBootIdWithFreshTimestamp) {
     ReplayTracker tracker;
-    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch())
-                            .count();
+    const int64_t now =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     ASSERT_TRUE(tracker.Accept("node-a", "boot1", 5, now));
     ASSERT_TRUE(tracker.Accept("node-a", "boot2", 1, now));
 }

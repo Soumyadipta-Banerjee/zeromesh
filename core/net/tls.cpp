@@ -77,8 +77,8 @@ std::shared_ptr<grpc::ChannelCredentials> ClientCreds(const Identity& self,
     return grpc::experimental::TlsCredentials(options);
 }
 
-std::shared_ptr<grpc::Channel> PeerChannel(const std::string& address,
-                                           std::shared_ptr<grpc::ChannelCredentials> creds, bool keepalive) {
+std::shared_ptr<grpc::Channel> PeerChannel(const std::string& address, std::shared_ptr<grpc::ChannelCredentials> creds,
+                                           bool keepalive) {
     grpc::ChannelArguments args;
     args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
     if (keepalive) {

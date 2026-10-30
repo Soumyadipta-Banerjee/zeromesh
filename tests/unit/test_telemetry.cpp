@@ -17,7 +17,7 @@ std::string ProcStat(int busy, int idle) {
                  "cpu2 0 0 0 0 0 0 0 0 0 0\ncpu3 0 0 0 0 0 0 0 0 0 0\nintr 0\n";
 }
 
-}  // namespace
+} // namespace
 
 TEST(TelemetryFakeSysroot) {
     TempDir root;
@@ -32,7 +32,7 @@ TEST(TelemetryFakeSysroot) {
     auto first = sampler.Sample();
     ASSERT_EQ(first.cpu_load_pct, 0.0);
 
-    WriteFile(root / "proc/stat", ProcStat(500, 1500));  // +500 busy, +500 idle
+    WriteFile(root / "proc/stat", ProcStat(500, 1500)); // +500 busy, +500 idle
     auto t = sampler.Sample();
     ASSERT_TRUE(std::fabs(t.cpu_load_pct - 50.0) <= 1.0);
     ASSERT_EQ(t.cores_total, 4);
@@ -71,22 +71,19 @@ TEST(TelemetryUserActiveFromInterrupts) {
     TempDir root;
     WriteFile(root / "proc/stat", ProcStat(0, 100));
     WriteFile(root / "proc/meminfo", "MemTotal: 1000 kB\nMemAvailable: 500 kB\n");
-    WriteFile(root / "proc/interrupts",
-              "           CPU0       CPU1\n"
-              "  1:         10         10   IO-APIC   1-edge      i8042\n"
-              " 12:          5          5   IO-APIC  12-edge      i8042\n");
+    WriteFile(root / "proc/interrupts", "           CPU0       CPU1\n"
+                                        "  1:         10         10   IO-APIC   1-edge      i8042\n"
+                                        " 12:          5          5   IO-APIC  12-edge      i8042\n");
     TelemetrySampler sampler(root.path());
-    ASSERT_FALSE(sampler.Sample().user_active);  // first sample establishes the baseline
+    ASSERT_FALSE(sampler.Sample().user_active); // first sample establishes the baseline
     // Small bump (<8 IRQs) is noise, not activity.
-    WriteFile(root / "proc/interrupts",
-              "           CPU0       CPU1\n"
-              "  1:         14         10   IO-APIC   1-edge      i8042\n"
-              " 12:          5          5   IO-APIC  12-edge      i8042\n");
+    WriteFile(root / "proc/interrupts", "           CPU0       CPU1\n"
+                                        "  1:         14         10   IO-APIC   1-edge      i8042\n"
+                                        " 12:          5          5   IO-APIC  12-edge      i8042\n");
     ASSERT_FALSE(sampler.Sample().user_active);
-    WriteFile(root / "proc/interrupts",
-              "           CPU0       CPU1\n"
-              "  1:        100        100   IO-APIC   1-edge      i8042\n"
-              " 12:         50         50   IO-APIC  12-edge      i8042\n");
+    WriteFile(root / "proc/interrupts", "           CPU0       CPU1\n"
+                                        "  1:        100        100   IO-APIC   1-edge      i8042\n"
+                                        " 12:         50         50   IO-APIC  12-edge      i8042\n");
     ASSERT_TRUE(sampler.Sample().user_active);
 }
 
@@ -94,13 +91,11 @@ TEST(TelemetryUserActiveFromI2cTouchpad) {
     TempDir root;
     WriteFile(root / "proc/stat", ProcStat(0, 100));
     WriteFile(root / "proc/meminfo", "MemTotal: 1000 kB\nMemAvailable: 500 kB\n");
-    WriteFile(root / "proc/interrupts",
-              "           CPU0\n"
-              " 33:          0          i2c_designware\n");
+    WriteFile(root / "proc/interrupts", "           CPU0\n"
+                                        " 33:          0          i2c_designware\n");
     TelemetrySampler sampler(root.path());
     ASSERT_FALSE(sampler.Sample().user_active);
-    WriteFile(root / "proc/interrupts",
-              "           CPU0\n"
-              " 33:         12          i2c_designware\n");
+    WriteFile(root / "proc/interrupts", "           CPU0\n"
+                                        " 33:         12          i2c_designware\n");
     ASSERT_TRUE(sampler.Sample().user_active);
 }

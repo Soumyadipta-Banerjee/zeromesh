@@ -22,21 +22,21 @@ inline constexpr size_t kLogHeadBytes = 64 * 1024;
 struct RunSpec {
     std::vector<std::string> argv;
     std::vector<std::pair<std::string, std::string>> env;
-    store::Digest input_root;          // empty hash: start with an empty /work
-    std::string working_dir{"."};      // relative to /work
-    std::vector<std::string> outputs;  // paths relative to /work
-    bool capture_changed{false};       // also capture every new or modified file under /work
+    store::Digest input_root;         // empty hash: start with an empty /work
+    std::string working_dir{"."};     // relative to /work
+    std::vector<std::string> outputs; // paths relative to /work
+    bool capture_changed{false};      // also capture every new or modified file under /work
     std::chrono::seconds timeout{3600};
     bool allow_network{false};
-    plugin::SandboxEnv sandbox_env;    // from the task's environment provider
-    std::string node_id;               // exported as ZM_NODE_ID
-    int cores{0};                      // 0 means 1 when applying a CPU cgroup quota
-    uint64_t mem_bytes{0};             // 0 means no memory cap
+    plugin::SandboxEnv sandbox_env; // from the task's environment provider
+    std::string node_id;            // exported as ZM_NODE_ID
+    int cores{0};                   // 0 means 1 when applying a CPU cgroup quota
+    uint64_t mem_bytes{0};          // 0 means no memory cap
 };
 
 struct OutputEntry {
     std::string path;
-    store::Digest digest;              // blob for files, tree for directories, empty for symlinks
+    store::Digest digest; // blob for files, tree for directories, empty for symlinks
     bool is_dir{false};
     bool is_executable{false};
     bool is_symlink{false};
@@ -49,14 +49,14 @@ struct RunResult {
     bool cancelled{false};
     store::Digest stdout_digest;
     store::Digest stderr_digest;
-    std::string stdout_head;           // first kLogHeadBytes bytes
+    std::string stdout_head; // first kLogHeadBytes bytes
     std::string stderr_head;
     std::vector<OutputEntry> outputs;
     std::chrono::milliseconds duration{0};
-    std::string error;                 // set when the sandbox itself could not run
+    std::string error; // set when the sandbox itself could not run
     bool memory_enforced{false};
     bool cpu_enforced{false};
-    std::string resource_note;         // e.g. CPU not capped without cgroups
+    std::string resource_note; // e.g. CPU not capped without cgroups
 };
 
 // Whether this process can create per-task cgroups (walks up from /proc/self/cgroup).

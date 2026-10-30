@@ -48,7 +48,7 @@ CpuTimes ReadProcStat(const fs::path& path) {
             uint64_t v = 0;
             for (int i = 0; i < 8 && (ls >> v); ++i) {
                 t.total += v;
-                if (i == 3 || i == 4) t.idle += v;  // idle + iowait
+                if (i == 3 || i == 4) t.idle += v; // idle + iowait
             }
         } else {
             ++t.cores;
@@ -65,8 +65,10 @@ void ReadMeminfo(const fs::path& path, Telemetry& out) {
     while (std::getline(in, line)) {
         std::istringstream ls(line);
         if (!(ls >> key >> kb)) continue;
-        if (key == "MemTotal:") out.mem_total = kb * 1024;
-        else if (key == "MemAvailable:") out.mem_available = kb * 1024;
+        if (key == "MemTotal:")
+            out.mem_total = kb * 1024;
+        else if (key == "MemAvailable:")
+            out.mem_available = kb * 1024;
     }
 }
 
@@ -98,8 +100,7 @@ void ReadPowerSupply(const fs::path& dir, Telemetry& out) {
 
 bool InputIrqLine(const std::string& lower) {
     static constexpr const char* kMarkers[] = {
-        "i8042", "keyboard", "mouse", "touchpad", "i2c_designware", "xhci_hcd", "hid",
-        "gpio-keys", "elan", "synaptics",
+        "i8042", "keyboard", "mouse", "touchpad", "i2c_designware", "xhci_hcd", "hid", "gpio-keys", "elan", "synaptics",
     };
     for (const char* m : kMarkers) {
         if (lower.find(m) != std::string::npos) return true;
@@ -133,7 +134,7 @@ std::optional<bool> ReadUserActiveOverride(const fs::path& path) {
     return std::nullopt;
 }
 
-}  // namespace
+} // namespace
 
 TelemetrySampler::TelemetrySampler(std::filesystem::path sysroot) : sysroot_(std::move(sysroot)) {}
 
@@ -162,8 +163,7 @@ Telemetry TelemetrySampler::Sample() {
         // activity do not flap the donor into sticky drain.
         const uint64_t irqs = ReadInputIrqs(sysroot_ / "proc/interrupts");
         constexpr uint64_t kActivityDelta = 8;
-        if (have_irq_prev_ && irqs > prev_input_irqs_ &&
-            (irqs - prev_input_irqs_) >= kActivityDelta) {
+        if (have_irq_prev_ && irqs > prev_input_irqs_ && (irqs - prev_input_irqs_) >= kActivityDelta) {
             t.user_active = true;
         }
         have_irq_prev_ = true;
@@ -175,4 +175,4 @@ Telemetry TelemetrySampler::Sample() {
     return t;
 }
 
-}  // namespace zeromesh::net
+} // namespace zeromesh::net

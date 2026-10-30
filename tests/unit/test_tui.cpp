@@ -32,13 +32,13 @@ TEST(Tui_RendersSelfAndPeers) {
     zeromesh::cli::RenderStatus(list, out, false);
     const std::string s = out.str();
 
-    ASSERT_TRUE(s.find("0123456789abcdef0123456789abcdef") != std::string::npos);  // full self id
+    ASSERT_TRUE(s.find("0123456789abcdef0123456789abcdef") != std::string::npos); // full self id
     ASSERT_TRUE(s.find("devbox-alpha") != std::string::npos);
-    ASSERT_TRUE(s.find("worker-") != std::string::npos);  // first 8 chars of peer id
+    ASSERT_TRUE(s.find("worker-") != std::string::npos); // first 8 chars of peer id
     ASSERT_TRUE(s.find("ADMITTED") != std::string::npos);
     ASSERT_TRUE(s.find("12/16") != std::string::npos);
     ASSERT_TRUE(s.find("32.0 GB") != std::string::npos);
-    ASSERT_TRUE(s.find('\033') == std::string::npos);  // no colour when asked for none
+    ASSERT_TRUE(s.find('\033') == std::string::npos); // no colour when asked for none
 }
 
 TEST(Tui_NoPeers) {
@@ -84,7 +84,7 @@ TEST(Tui_ActivityKeepsWorkingAndDone) {
     ASSERT_TRUE(s.find("DONE") != std::string::npos);
     ASSERT_TRUE(s.find("FAILED") != std::string::npos);
     ASSERT_TRUE(s.find("frames_1_8") != std::string::npos);
-    ASSERT_TRUE(s.find("frames_9_16") != std::string::npos);  // finished row stays listed
+    ASSERT_TRUE(s.find("frames_9_16") != std::string::npos); // finished row stays listed
     ASSERT_TRUE(s.find("submitted") != std::string::npos);
     ASSERT_TRUE(s.find("executing") != std::string::npos);
     ASSERT_TRUE(s.find('\033') == std::string::npos);

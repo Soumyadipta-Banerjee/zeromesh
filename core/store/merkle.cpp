@@ -12,23 +12,21 @@ namespace zeromesh::store {
 std::string DirectoryManifest::Serialize() const {
     // Make a sorted copy to guarantee deterministic hashing
     auto sorted_files = files;
-    std::sort(sorted_files.begin(), sorted_files.end(), [](const FileNode& a, const FileNode& b) {
-        return a.name < b.name;
-    });
+    std::sort(sorted_files.begin(), sorted_files.end(),
+              [](const FileNode& a, const FileNode& b) { return a.name < b.name; });
 
     auto sorted_dirs = directories;
-    std::sort(sorted_dirs.begin(), sorted_dirs.end(), [](const DirectoryNode& a, const DirectoryNode& b) {
-        return a.name < b.name;
-    });
+    std::sort(sorted_dirs.begin(), sorted_dirs.end(),
+              [](const DirectoryNode& a, const DirectoryNode& b) { return a.name < b.name; });
 
     auto sorted_links = symlinks;
-    std::sort(sorted_links.begin(), sorted_links.end(), [](const SymlinkNode& a, const SymlinkNode& b) {
-        return a.name < b.name;
-    });
+    std::sort(sorted_links.begin(), sorted_links.end(),
+              [](const SymlinkNode& a, const SymlinkNode& b) { return a.name < b.name; });
 
     std::ostringstream ss;
     for (const auto& f : sorted_files) {
-        ss << "F\t" << f.digest.hash << "\t" << f.digest.size_bytes << "\t" << (f.is_executable ? "1" : "0") << "\t" << f.name << "\n";
+        ss << "F\t" << f.digest.hash << "\t" << f.digest.size_bytes << "\t" << (f.is_executable ? "1" : "0") << "\t"
+           << f.name << "\n";
     }
     for (const auto& d : sorted_dirs) {
         ss << "D\t" << d.digest.hash << "\t" << d.digest.size_bytes << "\t" << d.name << "\n";
@@ -62,25 +60,25 @@ std::optional<DirectoryManifest> DirectoryManifest::Deserialize(std::string_view
         if (tokens.empty()) continue;
 
         try {
-        if (tokens[0] == "F" && tokens.size() >= 5) {
-            FileNode fn;
-            fn.digest.hash = tokens[1];
-            fn.digest.size_bytes = std::stoull(tokens[2]);
-            fn.is_executable = (tokens[3] == "1");
-            fn.name = tokens[4];
-            manifest.files.push_back(std::move(fn));
-        } else if (tokens[0] == "D" && tokens.size() >= 4) {
-            DirectoryNode dn;
-            dn.digest.hash = tokens[1];
-            dn.digest.size_bytes = std::stoull(tokens[2]);
-            dn.name = tokens[3];
-            manifest.directories.push_back(std::move(dn));
-        } else if (tokens[0] == "S" && tokens.size() >= 3) {
-            SymlinkNode sn;
-            sn.target = tokens[1];
-            sn.name = tokens[2];
-            manifest.symlinks.push_back(std::move(sn));
-        }
+            if (tokens[0] == "F" && tokens.size() >= 5) {
+                FileNode fn;
+                fn.digest.hash = tokens[1];
+                fn.digest.size_bytes = std::stoull(tokens[2]);
+                fn.is_executable = (tokens[3] == "1");
+                fn.name = tokens[4];
+                manifest.files.push_back(std::move(fn));
+            } else if (tokens[0] == "D" && tokens.size() >= 4) {
+                DirectoryNode dn;
+                dn.digest.hash = tokens[1];
+                dn.digest.size_bytes = std::stoull(tokens[2]);
+                dn.name = tokens[3];
+                manifest.directories.push_back(std::move(dn));
+            } else if (tokens[0] == "S" && tokens.size() >= 3) {
+                SymlinkNode sn;
+                sn.target = tokens[1];
+                sn.name = tokens[2];
+                manifest.symlinks.push_back(std::move(sn));
+            }
         } catch (const std::exception&) {
             return std::nullopt;
         }
@@ -89,8 +87,7 @@ std::optional<DirectoryManifest> DirectoryManifest::Deserialize(std::string_view
     return manifest;
 }
 
-MerkleBuilder::MerkleBuilder(std::shared_ptr<CasStore> store)
-    : store_(std::move(store)) {}
+MerkleBuilder::MerkleBuilder(std::shared_ptr<CasStore> store) : store_(std::move(store)) {}
 
 bool MerkleBuilder::IsSafeName(std::string_view name) {
     if (name.empty() || name == "." || name == "..") return false;
@@ -101,7 +98,8 @@ Digest MerkleBuilder::BuildTree(const std::filesystem::path& root_dir) {
     return BuildTree(root_dir, IgnoreRules::None(), nullptr);
 }
 
-Digest MerkleBuilder::BuildTree(const std::filesystem::path& root_dir, const IgnoreRules& rules, uint64_t* total_bytes) {
+Digest MerkleBuilder::BuildTree(const std::filesystem::path& root_dir, const IgnoreRules& rules,
+                                uint64_t* total_bytes) {
     std::error_code ec;
     if (!std::filesystem::is_directory(root_dir, ec)) {
         return Digest{"", 0};
@@ -122,26 +120,21 @@ Digest MerkleBuilder::BuildDirectoryRecursive(const std::filesystem::path& curre
 
         if (entry.is_symlink()) {
             if (rules.Ignored(child_rel, false)) continue;
-            manifest.symlinks.push_back(SymlinkNode{
-                .name = filename,
-                .target = std::filesystem::read_symlink(entry.path()).string()
-            });
+            manifest.symlinks.push_back(
+                SymlinkNode{.name = filename, .target = std::filesystem::read_symlink(entry.path()).string()});
         } else if (entry.is_directory()) {
             if (rules.Ignored(child_rel, true)) continue;
             manifest.directories.push_back(DirectoryNode{
-                .name = filename,
-                .digest = BuildDirectoryRecursive(entry.path(), child_rel, rules, total_bytes)
-            });
+                .name = filename, .digest = BuildDirectoryRecursive(entry.path(), child_rel, rules, total_bytes)});
         } else if (entry.is_regular_file()) {
             if (rules.Ignored(child_rel, false)) continue;
             Digest file_digest = store_->PutBlobFile(entry.path());
             if (total_bytes) *total_bytes += static_cast<uint64_t>(file_digest.size_bytes);
             auto perms = entry.status().permissions();
-            manifest.files.push_back(FileNode{
-                .name = filename,
-                .digest = file_digest,
-                .is_executable = (perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none
-            });
+            manifest.files.push_back(FileNode{.name = filename,
+                                              .digest = file_digest,
+                                              .is_executable = (perms & std::filesystem::perms::owner_exec) !=
+                                                               std::filesystem::perms::none});
         }
     }
 
@@ -168,9 +161,12 @@ bool MerkleBuilder::MaterializeDirectoryRecursive(const Digest& dir_digest, cons
     }
 
     // Validate every name before touching the disk, so a hostile manifest creates nothing.
-    for (const auto& f : manifest->files) if (!IsSafeName(f.name)) return false;
-    for (const auto& d : manifest->directories) if (!IsSafeName(d.name)) return false;
-    for (const auto& l : manifest->symlinks) if (!IsSafeName(l.name)) return false;
+    for (const auto& f : manifest->files)
+        if (!IsSafeName(f.name)) return false;
+    for (const auto& d : manifest->directories)
+        if (!IsSafeName(d.name)) return false;
+    for (const auto& l : manifest->symlinks)
+        if (!IsSafeName(l.name)) return false;
 
     std::filesystem::create_directories(current_path);
 
@@ -301,8 +297,8 @@ Digest MerkleBuilder::OverlayRecursive(const Digest& base, const std::vector<std
     return store_->PutBlob(m.Serialize());
 }
 
-Digest MerkleBuilder::Overlay(const Digest& base_tree, const std::string& at_path, const Digest& item, bool item_is_tree,
-                              bool item_executable) {
+Digest MerkleBuilder::Overlay(const Digest& base_tree, const std::string& at_path, const Digest& item,
+                              bool item_is_tree, bool item_executable) {
     std::vector<std::string> segs;
     size_t start = 0;
     while (start <= at_path.size()) {

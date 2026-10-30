@@ -20,7 +20,9 @@ PinStore::PinStore(std::filesystem::path state_dir) : path_(std::move(state_dir)
     }
 }
 
-bool PinStore::IsPinned(std::string_view fp) const { return NodeFor(fp).has_value(); }
+bool PinStore::IsPinned(std::string_view fp) const {
+    return NodeFor(fp).has_value();
+}
 
 std::optional<std::string> PinStore::NodeFor(std::string_view fp) const {
     if (!IsFingerprint(fp)) return std::nullopt;

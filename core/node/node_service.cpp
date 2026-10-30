@@ -18,13 +18,17 @@ namespace zeromesh::node {
 
 namespace {
 
-grpc::Status Denied(const std::string& why) { return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, why); }
+grpc::Status Denied(const std::string& why) {
+    return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, why);
+}
 
 grpc::Status NotConfigured(const char* what) {
     return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, std::string("this node does not serve ") + what);
 }
 
-grpc::Status Invalid(std::string why) { return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::move(why)); }
+grpc::Status Invalid(std::string why) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::move(why));
+}
 
 constexpr size_t kMaxTaskIdBytes = 256;
 // A RunTask stream buffers at most this much log output before the task's log
@@ -46,8 +50,8 @@ struct RunStream {
     std::condition_variable cv;
     std::deque<v1::JobEvent> events;
     size_t queued_log_bytes{0};
-    bool done{false};    // the final event is queued
-    bool closed{false};  // the caller is gone: drop logs, never wait
+    bool done{false};   // the final event is queued
+    bool closed{false}; // the caller is gone: drop logs, never wait
 
     void Push(v1::JobEvent ev, bool final_event) {
         std::lock_guard lock(mu);
@@ -75,7 +79,9 @@ struct RunStream {
     }
 };
 
-std::string MacBytes(const std::array<uint8_t, 32>& mac) { return std::string(mac.begin(), mac.end()); }
+std::string MacBytes(const std::array<uint8_t, 32>& mac) {
+    return std::string(mac.begin(), mac.end());
+}
 
 void ProtectTreeHashes(std::unordered_set<std::string>& out, store::MerkleBuilder& merkle, const store::Digest& root) {
     if (root.hash.empty()) return;
@@ -94,16 +100,9 @@ NodeService::NodeService(std::string node_id, std::shared_ptr<net::PinStore> pin
                          std::shared_ptr<plugin::Registry> registry, std::shared_ptr<LocalExecutor> executor,
                          std::function<net::Telemetry()> telemetry, DonorPolicy policy,
                          std::shared_ptr<net::PeerTable> peers)
-    : node_id_(std::move(node_id)),
-      pins_(std::move(pins)),
-      team_(std::move(team)),
-      self_fp_(std::move(self_fingerprint)),
-      self_info_(std::move(self_info)),
-      cas_(std::move(cas)),
-      registry_(std::move(registry)),
-      executor_(std::move(executor)),
-      telemetry_(std::move(telemetry)),
-      policy_(policy),
+    : node_id_(std::move(node_id)), pins_(std::move(pins)), team_(std::move(team)),
+      self_fp_(std::move(self_fingerprint)), self_info_(std::move(self_info)), cas_(std::move(cas)),
+      registry_(std::move(registry)), executor_(std::move(executor)), telemetry_(std::move(telemetry)), policy_(policy),
       peers_(std::move(peers)) {
     if (!pins_ || !team_ || !self_info_) throw std::invalid_argument("NodeService: missing dependency");
     if (!net::IsFingerprint(self_fp_)) throw std::invalid_argument("NodeService: bad self fingerprint");
@@ -111,7 +110,9 @@ NodeService::NodeService(std::string node_id, std::shared_ptr<net::PinStore> pin
 
 NodeService::~NodeService() = default;
 
-bool NodeService::RemoteExecConfigured() const { return cas_ && registry_ && executor_ && telemetry_; }
+bool NodeService::RemoteExecConfigured() const {
+    return cas_ && registry_ && executor_ && telemetry_;
+}
 
 void NodeService::PurgeExpiredLocked() {
     const auto now = std::chrono::steady_clock::now();
@@ -163,7 +164,7 @@ void NodeService::SetDraining(bool draining, std::string reason) {
 }
 
 bool NodeService::IsDraining() const {
-    std::lock_guard lock(mu_);  // mu_ is mutable
+    std::lock_guard lock(mu_); // mu_ is mutable
     return draining_;
 }
 
@@ -302,13 +303,13 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
     }
     const TaskKey key{peer, req->task_id()};
     if (running_.contains(key)) return reject("task " + req->task_id() + " is already running here");
-    reserved_.erase(key);  // a repeated offer replaces the old reservation
+    reserved_.erase(key); // a repeated offer replaces the old reservation
     if (auto why = policy_.Refuses(telemetry, spec, CoresInUseLocked())) return reject(*why);
 
     resp->set_accepted(true);
     for (auto& d : missing) *resp->add_missing() = std::move(d);
-    reserved_[key] = Reservation{std::move(spec), std::move(needed),
-                                 std::chrono::steady_clock::now() + kOfferReservation};
+    reserved_[key] =
+        Reservation{std::move(spec), std::move(needed), std::chrono::steady_clock::now() + kOfferReservation};
     return grpc::Status::OK;
 }
 
@@ -332,7 +333,8 @@ grpc::Status NodeService::PullBlobs(grpc::ServerContext* ctx, const v1::Digests*
     if (!cas_) return NotConfigured("blobs");
     for (const auto& d : req->digests()) {
         if (!store::CasStore::IsValidHash(d.hash())) return Invalid("invalid digest hash");
-        if (!cas_->HasBlob(d.hash())) return grpc::Status(grpc::StatusCode::NOT_FOUND, "blob " + d.hash() + " not found");
+        if (!cas_->HasBlob(d.hash()))
+            return grpc::Status(grpc::StatusCode::NOT_FOUND, "blob " + d.hash() + " not found");
     }
     auto write = [&](const v1::Chunk& c) { return !ctx->IsCancelled() && writer->Write(c); };
     for (const auto& d : req->digests()) {
@@ -351,8 +353,8 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
     if (!RemoteExecConfigured()) return NotConfigured("remote tasks");
     const TaskKey key{peer, req->task_id()};
     auto no_reservation = [&] {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                            "no reservation for task " + req->task_id() + " (offer it first; offers expire after 30 s)");
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "no reservation for task " + req->task_id() +
+                                                                       " (offer it first; offers expire after 30 s)");
     };
 
     std::vector<store::Digest> needed;
@@ -385,8 +387,7 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
         spec = std::move(it->second.spec);
         reserved_.erase(it);
         const bool preemptible = !spec.policy().has_preemptible() || spec.policy().preemptible();
-        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible, spec,
-                                  std::move(needed)};
+        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible, spec, std::move(needed)};
     }
 
     auto stream = std::make_shared<RunStream>();

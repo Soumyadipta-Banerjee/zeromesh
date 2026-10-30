@@ -12,17 +12,17 @@
 namespace zeromesh::cli {
 
 struct RunOptions {
-    std::vector<std::string> outputs;  // -o PATH (repeatable)
+    std::vector<std::string> outputs; // -o PATH (repeatable)
     bool remote_only{false};
     bool local_only{false};
     int cores{0};
     int64_t mem_bytes{0};
     std::string env{"host"};
-    std::vector<std::string> mirror_paths;  // --mirror (repeatable); required for --env mirror
+    std::vector<std::string> mirror_paths; // --mirror (repeatable); required for --env mirror
     bool force_large{false};
     // When set, one task per filesystem match of this glob (relative to cwd).
     std::optional<std::string> each_glob;
-    std::vector<std::string> argv;  // after "--"
+    std::vector<std::string> argv; // after "--"
 };
 
 // Parses the arguments after "run". nullopt with *error set on a usage error.
@@ -33,8 +33,8 @@ std::optional<int64_t> ParseSize(const std::string& s);
 
 // Expands a glob relative to `cwd`. Matches are paths relative to cwd, sorted.
 // Returns false with *error set when the pattern is empty, invalid, or matches nothing.
-bool ExpandEachGlob(const std::string& pattern, const std::filesystem::path& cwd,
-                    std::vector<std::string>* matches, std::string* error);
+bool ExpandEachGlob(const std::string& pattern, const std::filesystem::path& cwd, std::vector<std::string>* matches,
+                    std::string* error);
 
 // Replaces every "{}" in `s` with `replacement`.
 std::string ReplaceBraces(std::string_view s, std::string_view replacement);
