@@ -17,6 +17,7 @@
 #include "net/team.hpp"
 #include "net/telemetry.hpp"
 #include "node/admission.hpp"
+#include "node/departure.hpp"
 #include "node/donor_policy.hpp"
 #include "node/local_executor.hpp"
 #include "plugin/loader.hpp"
@@ -30,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -94,6 +96,33 @@ public:
     // Returns how many were cancelled.
     int CancelPreemptible();
 
+    // ---- freeze-first departure (see node/departure.hpp) ----
+    // Pauses or resumes one running task by its execution id ("<caller>/<task id>"); false when
+    // it cannot (no cgroup freezer). The daemon wires this to the task's cgroup.
+    using TaskFreezer = std::function<bool(const std::string& exec_id, bool freeze)>;
+    void SetTaskFreezer(TaskFreezer freezer);
+    // Past run times, used to tell which tasks will finish inside the grace window. Finished
+    // tasks are recorded here. Without it every task counts as "unknown" and is frozen.
+    void SetRuntimeHistory(std::shared_ptr<RuntimeHistory> history);
+
+    struct DepartureReport {
+        int kept{0};      // run on through the grace window (or are not preemptible)
+        int frozen{0};    // paused until the ttl
+        int cancelled{0}; // could not be frozen (or ttl is 0): killed at once, as before
+    };
+    // The donor is leaving: refuse new work, keep the tasks that fit `grace`, freeze the rest
+    // for `ttl`. ttl == 0, or a freezer that fails, falls back to killing preemptible tasks.
+    DepartureReport BeginDeparture(v1::DepartureReason reason, std::chrono::milliseconds ttl,
+                                   std::chrono::milliseconds grace,
+                                   std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+    // Call about once a second while departing: freezes kept tasks when the grace window is over
+    // and kills frozen tasks whose ttl ran out (the requester then re-dispatches them).
+    // Returns how many tasks it killed.
+    int TickDeparture(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+    // The donor is back: thaw every frozen task and accept work again. Returns how many it thawed.
+    int EndDeparture();
+    [[nodiscard]] bool Departing() const;
+
 private:
     // The pin gate: OK (and the caller's pinned node id in *peer_node_id, if given)
     // iff the caller's TLS certificate fingerprint is pinned; else PERMISSION_DENIED.
@@ -119,6 +148,14 @@ private:
         bool preemptible{true};
         v1::TaskSpec spec;
         std::vector<store::Digest> needed;
+        std::chrono::steady_clock::time_point started{};
+    };
+    struct Departure {
+        bool active{false};
+        std::chrono::milliseconds ttl{0};
+        std::chrono::steady_clock::time_point grace_ends{};
+        std::set<std::string> kept; // preemptible tasks running through the grace window
+        std::map<std::string, std::chrono::steady_clock::time_point> frozen; // exec id -> kill deadline
     };
     void PurgeExpiredLocked();
     int CoresInUseLocked() const;
@@ -141,6 +178,9 @@ private:
     std::map<TaskKey, Running> running_;
     bool draining_{false};
     std::string drain_reason_;
+    Departure departure_;
+    TaskFreezer freezer_;
+    std::shared_ptr<RuntimeHistory> history_;
 };
 
 inline constexpr std::chrono::seconds kOfferReservation{30};

@@ -1,5 +1,6 @@
 #include "node/job_manager.hpp"
 
+#include "exec/units.hpp"
 #include "node/convert.hpp"
 #include "node/mirror_manifest.hpp"
 #include "node/task_key.hpp"
@@ -202,6 +203,7 @@ private:
     void Complete(const JobPtr& job, size_t i, v1::TaskResult result);
     void OnState(const JobPtr& job, size_t i, v1::TaskState state, std::string detail);
     void OnLog(const JobPtr& job, size_t i, int fd, std::string_view chunk);
+    void OnUnit(const JobPtr& job, size_t i, const std::string& unit_id, const v1::Digest& digest);
 
     // The following require mu_.
     void Emit(Job& job, v1::JobEvent ev);
@@ -347,6 +349,23 @@ void JobManager::Impl::Start(const JobPtr& job, Ready r) {
         return;
     }
 
+    // Partial commit: units an earlier run of this same task (same key) finished before it was
+    // interrupted. The key was taken above, so adding them to the input does not change the
+    // task's identity, and a result produced from a resumed run is cached under the same key.
+    try {
+        const auto units = cache_->GetUnits(key);
+        if (!units.empty()) {
+            store::Digest root = FromProto(spec.input_root());
+            for (const auto& [unit_id, digest] : units) {
+                root = merkle_->Overlay(root, std::string(exec::kUnitsDirName) + "/" + unit_id, FromProto(digest),
+                                        /*item_is_tree=*/false);
+            }
+            *spec.mutable_input_root() = ToProto(root);
+        }
+    } catch (const std::exception&) {
+        // Units only save work; without them the task runs from scratch.
+    }
+
     bool cancelled = false;
     {
         std::lock_guard lock(mu_);
@@ -370,6 +389,9 @@ void JobManager::Impl::Start(const JobPtr& job, Ready r) {
     };
     cb.on_log = [weak, job, i](int fd, std::string_view chunk) {
         if (auto self = weak.lock()) self->OnLog(job, i, fd, chunk);
+    };
+    cb.on_unit = [weak, job, i](const std::string& unit_id, const v1::Digest& digest) {
+        if (auto self = weak.lock()) self->OnUnit(job, i, unit_id, digest);
     };
     cb.on_done = [weak, job, i](v1::TaskResult res) {
         if (auto self = weak.lock()) self->Complete(job, i, std::move(res));
@@ -452,6 +474,31 @@ void JobManager::Impl::OnLog(const JobPtr& job, size_t i, int fd, std::string_vi
     ev.set_state(t.state);
     ev.set_log_fd(fd);
     ev.set_log_chunk(std::string(chunk));
+    Emit(*job, std::move(ev));
+}
+
+void JobManager::Impl::OnUnit(const JobPtr& job, size_t i, const std::string& unit_id, const v1::Digest& digest) {
+    std::string key;
+    std::string task_name;
+    v1::TaskState state;
+    {
+        std::lock_guard lock(mu_);
+        const TaskRun& t = job->tasks[i];
+        key = t.task_key;
+        task_name = t.spec.name();
+        state = t.state;
+    }
+    // Kept even if the task has just ended: a unit is valid work whatever became of the run.
+    if (!key.empty()) cache_->PutUnit(key, unit_id, digest);
+
+    std::lock_guard lock(mu_);
+    if (IsTerminal(job->tasks[i].state)) return;
+    v1::JobEvent ev;
+    ev.set_task_name(task_name);
+    ev.set_state(state);
+    auto* unit = ev.mutable_unit_committed();
+    unit->set_unit_id(unit_id);
+    *unit->mutable_digest() = digest;
     Emit(*job, std::move(ev));
 }
 

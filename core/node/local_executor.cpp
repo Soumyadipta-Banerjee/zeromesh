@@ -254,6 +254,12 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
         rs.allow_network = spec.policy().allow_network();
         rs.sandbox_env = std::move(*prepared.value);
         rs.node_id = node_id_;
+        rs.task_tag = item.task_id;
+        if (item.cb.on_unit) {
+            rs.on_unit = [&item](const std::string& unit_id, const store::Digest& digest) {
+                item.cb.on_unit(unit_id, ToProto(digest));
+            };
+        }
         rs.cores = spec.resources().cores();
         if (spec.resources().mem_bytes() > 0) {
             rs.mem_bytes = static_cast<uint64_t>(spec.resources().mem_bytes());
