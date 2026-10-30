@@ -22,6 +22,7 @@
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <list>
@@ -64,6 +65,13 @@ public:
     // Tasks currently reserved/running on `node_id` (for tests).
     [[nodiscard]] int InFlightOn(const std::string& node_id) const;
 
+    // Payload bytes this requester has moved to / from each remote node.
+    struct NodeTraffic {
+        uint64_t bytes_pushed{0};
+        uint64_t bytes_pulled{0};
+    };
+    [[nodiscard]] std::map<std::string, NodeTraffic> Traffic() const;
+
     struct Task;
     struct Shared;
 
@@ -79,6 +87,24 @@ private:
                                                 int64_t total_bytes) const;
     void NoteInputsPushed(const std::string& node_id, const std::string& input_root_hash, int64_t bytes_pushed,
                           int64_t total_bytes);
+
+    void AddTraffic(const std::string& node_id, uint64_t pushed, uint64_t pulled);
+
+    // Blobs recently pushed to a donor. Offers made before a sibling task's push lands all
+    // report the same blobs as missing; the push lock plus this set sends each one once.
+    struct DonorSent {
+        std::mutex push_mu;
+        std::mutex mu;
+        std::unordered_map<std::string, std::chrono::steady_clock::time_point> sent;
+    };
+    std::shared_ptr<DonorSent> SentFor(const std::string& node_id);
+    static constexpr std::chrono::seconds kSentTtl{30};
+
+    std::mutex sent_mu_;
+    std::map<std::string, std::shared_ptr<DonorSent>> sent_;
+
+    mutable std::mutex traffic_mu_;
+    std::map<std::string, NodeTraffic> traffic_;
 
     mutable std::mutex push_cache_mu_;
     std::unordered_map<std::string, int64_t> push_cache_; // "node|root" -> bytes known on peer

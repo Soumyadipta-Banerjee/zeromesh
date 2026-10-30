@@ -66,12 +66,16 @@ public:
     std::optional<v1::OfferReply> Offer(const std::string& task_id, const v1::TaskSpec& spec,
                                         const std::vector<v1::Digest>& needed, std::string* error = nullptr);
 
-    // Uploads `digests` from `cas` to the peer, which verifies every object.
-    bool Push(const store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error = nullptr);
+    // Uploads `digests` from `cas` to the peer, which verifies every object. When `bytes_sent`
+    // is given, the payload bytes written to the wire are added to it, even on failure.
+    bool Push(const store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error = nullptr,
+              uint64_t* bytes_sent = nullptr);
 
-    // Downloads `digests` into `cas`. Every object is verified against its digest before it
+    // Downloads `digests` into `cas` (payload bytes received are added to `bytes_received`).
+    // Every object is verified against its digest before it
     // is stored, and the peer may send only what was asked for.
-    bool Pull(store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error = nullptr);
+    bool Pull(store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error = nullptr,
+              uint64_t* bytes_received = nullptr);
 
     // Runs a task the peer accepted, calling on_event for every event, and blocks until the
     // final event, whose result it returns. nullopt (with *error) when the stream broke

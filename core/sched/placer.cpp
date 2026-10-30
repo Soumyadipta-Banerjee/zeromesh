@@ -168,6 +168,25 @@ void Placer::NoteInputsPushed(const std::string& node_id, const std::string& inp
     }
 }
 
+std::map<std::string, Placer::NodeTraffic> Placer::Traffic() const {
+    std::lock_guard lock(traffic_mu_);
+    return traffic_;
+}
+
+void Placer::AddTraffic(const std::string& node_id, uint64_t pushed, uint64_t pulled) {
+    std::lock_guard lock(traffic_mu_);
+    auto& t = traffic_[node_id];
+    t.bytes_pushed += pushed;
+    t.bytes_pulled += pulled;
+}
+
+std::shared_ptr<Placer::DonorSent> Placer::SentFor(const std::string& node_id) {
+    std::lock_guard lock(sent_mu_);
+    auto& slot = sent_[node_id];
+    if (!slot) slot = std::make_shared<DonorSent>();
+    return slot;
+}
+
 Placer::~Placer() {
     std::vector<std::shared_ptr<Task>> tasks;
     {
@@ -290,7 +309,8 @@ v1::TaskResult Placer::RunLocal(const std::shared_ptr<Task>& task, const v1::Tas
 
 namespace {
 
-bool PullOutputs(node::NodeClient& client, store::CasStore& cas, const v1::TaskResult& r, std::string* error) {
+bool PullOutputs(node::NodeClient& client, store::CasStore& cas, const v1::TaskResult& r, std::string* error,
+                 uint64_t* bytes_received) {
     std::unordered_set<std::string> asked;
     std::vector<v1::Digest> blobs;
     std::vector<v1::Digest> trees;
@@ -310,7 +330,7 @@ bool PullOutputs(node::NodeClient& client, store::CasStore& cas, const v1::TaskR
         for (const auto& d : ds) {
             if (!cas.HasBlob(d.hash())) missing.push_back(d);
         }
-        return client.Pull(cas, missing, error);
+        return client.Pull(cas, missing, error, bytes_received);
     };
     if (!pull_missing(blobs)) return false;
     while (!trees.empty()) {
@@ -583,7 +603,30 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
         if (task->cb.on_state) task->cb.on_state(v1::PLACED, "node " + reserved->node_id);
 
         std::vector<v1::Digest> missing(reply->missing().begin(), reply->missing().end());
-        if (!client->Push(*cas_, missing, &err)) {
+        uint64_t wire_pushed = 0;
+        bool pushed_ok = true;
+        {
+            // One push at a time per donor: whatever a sibling task delivered while we waited
+            // is not sent again.
+            auto donor = SentFor(reserved->node_id);
+            std::lock_guard push_lock(donor->push_mu);
+            const auto now = std::chrono::steady_clock::now();
+            std::vector<v1::Digest> to_send;
+            {
+                std::lock_guard lock(donor->mu);
+                std::erase_if(donor->sent, [&](const auto& kv) { return now - kv.second > kSentTtl; });
+                for (const auto& d : missing) {
+                    if (!donor->sent.contains(d.hash())) to_send.push_back(d);
+                }
+            }
+            pushed_ok = client->Push(*cas_, to_send, &err, &wire_pushed);
+            if (pushed_ok) {
+                std::lock_guard lock(donor->mu);
+                for (const auto& d : to_send) donor->sent[d.hash()] = std::chrono::steady_clock::now();
+            }
+        }
+        AddTraffic(reserved->node_id, wire_pushed, 0);
+        if (!pushed_ok) {
             release(*reserved);
             const std::string reason = "node " + reserved->node_id + ": uploading inputs failed: " + err;
             if (infra_retry_or_fail(reserved->node_id, reason)) continue;
@@ -642,7 +685,10 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             release(*reserved);
             return task->Done(Cancelled(reserved->node_id));
         }
-        if (!PullOutputs(*client, *cas_, *result, &err)) {
+        uint64_t wire_pulled = 0;
+        const bool pulled_ok = PullOutputs(*client, *cas_, *result, &err, &wire_pulled);
+        AddTraffic(reserved->node_id, 0, wire_pulled);
+        if (!pulled_ok) {
             release(*reserved);
             v1::TaskResult lost =
                 Failed(reserved->node_id, "node " + reserved->node_id + " lost while sending outputs: " + err);
