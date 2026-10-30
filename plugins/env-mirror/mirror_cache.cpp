@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <vector>
 
@@ -65,8 +66,8 @@ void MirrorCache::Put(const std::string& chunk_hash, const std::string& data) {
         return;
     }
 
-    while (current_bytes_ + data.size() > max_bytes_ && !lru_list_.empty()) {
-        Evict();
+    // Pinned chunks are never dropped; if nothing else is evictable the cache overshoots its budget.
+    while (current_bytes_ + data.size() > max_bytes_ && Evict()) {
     }
 
     auto path = cache_dir_ / chunk_hash;
@@ -116,6 +117,18 @@ std::optional<size_t> MirrorCache::ReadRange(const std::string& chunk_hash, off_
     return static_cast<size_t>(in.gcount());
 }
 
+void MirrorCache::Pin(const std::string& chunk_hash) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++pins_[chunk_hash];
+}
+
+void MirrorCache::Unpin(const std::string& chunk_hash) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = pins_.find(chunk_hash);
+    if (it == pins_.end()) return;
+    if (--it->second == 0) pins_.erase(it);
+}
+
 void MirrorCache::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::error_code ec;
@@ -127,18 +140,19 @@ void MirrorCache::Clear() {
     current_bytes_ = 0;
 }
 
-void MirrorCache::Evict() {
-    if (lru_list_.empty()) return;
+bool MirrorCache::Evict() {
+    auto victim = std::find_if(lru_list_.rbegin(), lru_list_.rend(),
+                               [this](const CacheEntry& e) { return !pins_.contains(e.hash); });
+    if (victim == lru_list_.rend()) return false;
 
-    auto& victim = lru_list_.back();
-    auto victim_path = cache_dir_ / victim.hash;
     std::error_code ec;
-    std::filesystem::remove(victim_path, ec);
+    std::filesystem::remove(cache_dir_ / victim->hash, ec);
 
-    current_bytes_ -= victim.size_bytes;
-    lru_map_.erase(victim.hash);
-    lru_list_.pop_back();
+    current_bytes_ -= victim->size_bytes;
+    lru_map_.erase(victim->hash);
+    lru_list_.erase(std::next(victim).base());
     ++eviction_count_;
+    return true;
 }
 
 } // namespace zeromesh::mirror
