@@ -360,6 +360,10 @@ SandboxRunner::SandboxRunner(std::shared_ptr<store::CasStore> store, std::shared
     if (sodium_init() < 0) throw std::runtime_error("libsodium init failed");
     fs::create_directories(scratch_base_);
     bwrap_path_ = FindOnPath("bwrap");
+    if (!bwrap_path_.empty()) {
+        bwrap_error_ = CheckBwrapBinary(bwrap_path_);
+        if (!bwrap_error_.empty()) bwrap_path_.clear();
+    }
 }
 
 RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop_token stop) {
@@ -371,7 +375,7 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
         return result;
     }
     if (bwrap_path_.empty()) {
-        result.error = "bubblewrap (bwrap) is not installed on this node";
+        result.error = bwrap_error_.empty() ? "bubblewrap (bwrap) is not installed on this node" : bwrap_error_;
         return result;
     }
     if (!SafeRelative(spec.working_dir.empty() ? "." : spec.working_dir)) {

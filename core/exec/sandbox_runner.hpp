@@ -86,6 +86,7 @@ private:
     std::shared_ptr<store::MerkleBuilder> merkle_;
     std::filesystem::path scratch_base_;
     std::string bwrap_path_;
+    std::string bwrap_error_; // why bwrap_path_ was refused, if it was
 };
 
 } // namespace zeromesh::exec
