@@ -1,55 +1,55 @@
-# Handoff: core + plugin restructure (2026-10-26)
+# Handoff (updated 2026-10-29)
 
 For the next person or agent continuing this work. Read this first, then the
-[design](superpowers/specs/2026-10-26-core-plugin-architecture-design.md), the
-[Part 1 plan](superpowers/plans/2026-10-26-core-plugin-part1-m0-m3.md) and
-[team/TASKS.md](team/TASKS.md).
+[design](superpowers/specs/2026-10-26-core-plugin-architecture-design.md), [PLAN.md](../PLAN.md) and the
+[v2 blueprint](../ZeroMesh%20v2%20Blueprint.md).
 
 ## Where things are
 
-- **Branch:** `restructure/core-plugin`. All merged work is here. It is not pushed and not merged to `main`.
-- **Build:** `make build && make test`, giving 93/93 unit tests and the `integration_local` suite (10 tests). Everything passes and the build has no warnings.
-- **Unfinished work:** branch `rc/t17` has one WIP commit (`ae5c64c`, "DO NOT MERGE, unbuilt"), with partial Task 17 edits to `pin_store`, `client_service` and `common.proto`. Read it for ideas or discard it.
+- **Branch:** `demo/m5-all` holds the v1 code through M6. `main` is the old architecture.
+- **Build and test:**
 
-## Done (plan Tasks 1–16)
+  ```bash
+  python3 -m venv ~/.venvs/zeromesh && ~/.venvs/zeromesh/bin/pip install './sdk/python[dev]'
+  export PATH=~/.venvs/zeromesh/bin:$PATH   # meson records the interpreter when it configures
+  make build && make test
+  ```
 
-| Milestone | Status | Proof |
-|---|---|---|
-| M0 Honesty pass | Done locally; tick in PLAN.md once CI passes on GitHub | `frozen/README.md`, PLAN/README rewritten |
-| M1 Contracts | ✅ | `proto/zeromesh/v1/*.proto`, `core/plugin/plugin.hpp`, Python 3-task job test |
-| M2 Core + local daemon | ✅ | `zmd` + `zm run` end to end (`tests/integration/test_local_daemon.py`) |
-| M3 Remote execution | **Building blocks done, daemon wiring not done** | see below |
+  `make test` runs 10 meson tests: 171 unit tests plus the local, remote, fan-out, mirror, REAPI, SDK, `zm-render`
+  and `zm-cfd` suites. All 10 pass on a host with `/dev/fuse`, `recc`, `bwrap` ≥ 0.12.0 and Blender.
+- **Style:** `.clang-format` encodes the house style; `clang-format -i` any C++ you touch. `.clang-tidy` is a
+  small bugprone/performance set: `clang-tidy -p build <file>`.
+- **Baselines for the v2 comparison:** `scripts/baselines/htcondor.sh up [tuned]` starts a rootless HTCondor pool in
+  Podman (`docker.io/htcondor/mini`), `submit FILE` runs a job, `down` removes it. The "BOINC-style" baseline is a
+  policy in the harness (suspend on input, quorum 1 or 2), not the BOINC client.
 
-M3 pieces that exist and are unit-tested, but that `zmd` doesn't use yet:
-- `core/net/team.*`: team secret phrase, team id, HMAC (Task 12)
-- `core/net/discovery.*`: team-scoped, HMAC-authenticated multicast discovery (Task 13)
-- `core/net/{identity,pin_store,tls}.*` and `core/node/{admission,node_service,node_client}.*`: certificates, pinned mTLS, admission handshake (Task 14)
-- `core/node/{donor_policy,blob_transfer}.*`, plus NodeApi Offer/Push/Pull/Run/Cancel/Drain (Task 15)
-- `core/sched/{rank,placer}.*`: placement, local vs remote (Task 16). Tested in-process with two nodes in `tests/unit/test_placer.cpp`.
+## Status against PLAN.md
 
-## Task 17 status (done locally)
+| Milestone | Status |
+|---|---|
+| M0 Honesty pass | Docs now match the code; tick once CI passes on GitHub |
+| M1 Contracts, M2 Core + local daemon | Done |
+| M3 Remote execution + security | Built and tested on one host; **two-machine acceptance pending** |
+| M4 Fan-out + resilience | Built and tested (retries on node loss, sticky drain); three-machine acceptance pending |
+| M5 SDK, `zm-render`, `env-mirror` | Built and tested; the 240-frame, 4-machine run is pending |
+| M6 REAPI front-end | Done: `integration_reapi` passes with `recc` (both daemons on one host) |
 
-Daemon wiring, Team RPCs, `zm team`, Placer, admission loop, `integration_remote`, and
-`tests/acceptance/m3_two_machines.md` are in. Automated tests pass; **do not tick M3 in
-PLAN.md** until someone runs the two-machine acceptance. Next: whole-branch review, then
-push and open a PR (only when asked).
+## Known gaps
 
-`core/net/tls.cpp` uses the gRPC 1.51 `StaticDataCertificateProvider` API (Ubuntu noble /
-conda-forge). Newer gRPC renamed some of those types — re-check if you bump past 1.51.
-
-## Known gaps and decisions to revisit (from the ledger)
-
-- **Drain isn't sticky.** The next 2 s announcement marks a draining node active again. Part 2 (M4) should add sticky drain and resume.
-- **The keepalive-timeout path isn't tested.** A peer that vanishes without a clean shutdown is only covered by configuration. The clean-shutdown path is tested.
-- **The RAM column shows 0 for peers.** `mem_total` isn't in the discovery wire format.
-- **Overlaid single-file outputs lose the exec bit.** `MerkleBuilder::Overlay` stores files with `is_executable=false`.
-- **Retries and re-dispatch don't exist yet.** A lost peer fails the task. That's Part 2 (M4).
-- **Contract gaps for later streams** (details in `team/TASKS.md`):
-  - `plugin::TaskContext` has no requester id or blob access (needed for M5c env-mirror).
-  - `ClientApiHandle` and front-end loading aren't wired (needed for M6).
-- **No Landlock.** bwrap's mount layout is the write boundary; see ADR-012 in PLAN.md.
+- No committed measurement of speedup, bytes moved or owner impact. This is what the v2 blueprint is for.
+- Drain on low battery kills tasks; no `cgroup.freeze`, no partial results (`core/node/daemon.cpp`).
+- The REAPI front-end keeps its action cache in memory and stubs `WaitExecution`.
+- Plugin modules (`libzm_frontend_reapi.so`, `env-host`) are built but not installed by `meson install`, so the
+  Debian and Arch packages can't ship REAPI yet.
+- `zmd` is linked with `export_dynamic` so `dlopen`ed plugins can resolve the `zeromesh.v1` protobuf symbols.
+  Without it the REAPI plugin fails to load, and the loader does not log why.
+- No Landlock: bwrap's mount layout is the write boundary (ADR-012 in PLAN.md).
+- Recorded in the 2026-10-26 ledger and not re-checked since: the keepalive-timeout path has no test, the peer RAM
+  column shows 0 (`mem_total` is not in the discovery wire format), and `MerkleBuilder::Overlay` stores overlaid
+  single files with `is_executable=false`.
 
 ## Where the record lives
 
-- **Decision ledger** (every ruling, with its cost if wrong): `.superpowers/sdd/2026-10-26-core-plugin-part1-m0-m3/progress.md` in this worktree. It's git-ignored scratch, so copy the rulings out if you delete the worktree.
-- **Commit history** on `restructure/core-plugin`: one merge per task.
+- **Commit history** on `demo/m5-all`.
+- **Decision ledger** for Part 1: `.superpowers/sdd/2026-10-26-core-plugin-part1-m0-m3/progress.md` in the original
+  worktree. It is git-ignored scratch, so copy the rulings out if you delete that worktree.
