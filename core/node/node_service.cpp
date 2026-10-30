@@ -290,6 +290,12 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
         return reject("env provider '" + env_name + "': " + e.what());
     }
 
+    // A cached result is only valid for the toolchain that produced it: refuse tasks whose
+    // requester ran against a different compiler or library set than this node has.
+    if (!spec.toolchain_digest().empty() && LocalToolchainDigest(spec) != spec.toolchain_digest()) {
+        return reject("toolchain for '" + spec.argv(0) + "' differs from the requester's");
+    }
+
     const net::Telemetry telemetry = telemetry_();
     std::vector<v1::Digest> missing;
     for (const auto& d : needed) {

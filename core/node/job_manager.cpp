@@ -333,6 +333,7 @@ void JobManager::Impl::Start(const JobPtr& job, Ready r) {
         return;
     }
 
+    StampToolchain(spec);
     std::string key = TaskKey(spec);
     std::string task_id;
     {

@@ -59,6 +59,15 @@ TEST(TaskKeyInputRootMatters) {
     ASSERT_NE(zeromesh::node::TaskKey(a), zeromesh::node::TaskKey(b));
 }
 
+TEST(TaskKeyToolchainDigestMatters) {
+    auto a = Echo("hi");
+    auto b = Echo("hi");
+    a.set_toolchain_digest("gcc-15");
+    b.set_toolchain_digest("gcc-16");
+    ASSERT_NE(zeromesh::node::TaskKey(a), zeromesh::node::TaskKey(b));
+    ASSERT_NE(zeromesh::node::TaskKey(a), zeromesh::node::TaskKey(Echo("hi")));
+}
+
 TEST(TaskKeyIgnoresRetriesAndPlacement) {
     auto a = Echo("hi");
     auto b = Echo("hi");
