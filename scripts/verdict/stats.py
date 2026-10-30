@@ -55,10 +55,10 @@ def ratio_verdict(ratios, p_adj: float, margin: float = 0.05,
     r = np.asarray(ratios, dtype=float)
     med = float(np.median(r))
     lo, hi = bootstrap_ci(r, n=n_boot, seed=seed)
-    low_edge, high_edge = 1.0 / (1.0 + margin), 1.0 + margin
-    if p_adj < ALPHA and hi < 1.0 and med < low_edge:
+    low_edge, high_edge = 1.0 - margin, 1.0 + margin
+    if p_adj < ALPHA and hi < 1.0 and med <= low_edge:
         return "BETTER"
-    if p_adj < ALPHA and lo > 1.0 and med > high_edge:
+    if p_adj < ALPHA and lo > 1.0 and med >= high_edge:
         return "WORSE"
     if lo >= low_edge and hi <= high_edge:
         return "EQUIVALENT"
@@ -71,9 +71,9 @@ def diff_verdict(diffs_ms, p_adj: float, margin_ms: float = 2.0,
     d = np.asarray(diffs_ms, dtype=float)
     med = float(np.median(d))
     lo, hi = bootstrap_ci(d, n=n_boot, seed=seed)
-    if p_adj < ALPHA and hi < 0.0 and med < -margin_ms:
+    if p_adj < ALPHA and hi < 0.0 and med <= -margin_ms:
         return "BETTER"
-    if p_adj < ALPHA and lo > 0.0 and med > margin_ms:
+    if p_adj < ALPHA and lo > 0.0 and med >= margin_ms:
         return "WORSE"
     if lo >= -margin_ms and hi <= margin_ms:
         return "EQUIVALENT"

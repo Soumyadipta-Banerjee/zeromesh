@@ -42,3 +42,18 @@ def test_ratio_failure_sentinels():
 def test_diff_verdict_margin():
     assert diff_verdict(rng.normal(-5, 0.5, 20), 1e-4) == "BETTER"
     assert diff_verdict(rng.normal(0, 0.3, 20), 0.5) == "EQUIVALENT"
+
+
+def test_ratio_verdict_inclusive_boundaries():
+    assert ratio_verdict(np.full(20, 0.95), 1e-4) == "BETTER"
+    assert ratio_verdict(np.full(20, 1.05), 1e-4) == "WORSE"
+    assert ratio_verdict(np.full(20, 0.951), 1e-4) == "EQUIVALENT"
+    assert ratio_verdict(np.full(20, 1.049), 1e-4) == "EQUIVALENT"
+    assert ratio_verdict(np.full(20, 0.96), 0.5) == "EQUIVALENT"
+
+
+def test_diff_verdict_inclusive_boundaries():
+    assert diff_verdict(np.full(20, -2.0), 1e-4) == "BETTER"
+    assert diff_verdict(np.full(20, 2.0), 1e-4) == "WORSE"
+    assert diff_verdict(np.full(20, -1.9), 1e-4) == "EQUIVALENT"
+    assert diff_verdict(np.full(20, 1.9), 1e-4) == "EQUIVALENT"
