@@ -30,9 +30,24 @@ message OfferReply {
 
 message RunRequest { string task_id = 1; }
 message TaskRef { string task_id = 1; }
+// Why a donor is leaving. With ttl_ms > 0 the departure is freeze-first: running tasks are
+// paused, not killed, and only killed (and re-dispatched) if the donor has not come back
+// after ttl_ms.
+enum DepartureReason {
+  DEPARTURE_UNSPECIFIED = 0;
+  DEPARTURE_UNPLUG = 1;
+  DEPARTURE_BATTERY = 2;
+  DEPARTURE_LID = 3;
+  DEPARTURE_OWNER = 4;
+  DEPARTURE_SUSPEND = 5;
+}
+
 message DrainNotice {
   string node_id = 1;
   string reason = 2;
+  DepartureReason code = 3;
+  uint32 ttl_ms = 4;    // how long frozen tasks are held; 0 = kill-first drain
+  uint32 grace_ms = 5;  // tasks expected to finish within this window keep running
 }
 
 // Served by zmd on TCP 8981 over mTLS; only pinned team peers may call anything but Admit*.

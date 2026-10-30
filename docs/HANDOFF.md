@@ -37,7 +37,9 @@ For the next person or agent continuing this work. Read this first, then the
 ## Known gaps
 
 - No committed measurement of speedup, bytes moved or owner impact. This is what the v2 blueprint is for.
-- Drain on low battery kills tasks; no `cgroup.freeze`, no partial results (`core/node/daemon.cpp`).
+- Freeze-first departure (`core/node/departure.*`, `NodeService::BeginDeparture`) and partial commit
+  (`exec/units.hpp`, `ActionCache::PutUnit`, SDK `commit_unit`) exist but are tested on one host only. The ttl is a
+  fixed `freeze_ttl_s`, not yet derived from a departure hazard; suspend detection needs `busctl` and was not run against a live logind.
 - The REAPI front-end keeps its action cache in memory and stubs `WaitExecution`.
 - Plugin modules (`libzm_frontend_reapi.so`, `env-host`) are built but not installed by `meson install`, so the
   Debian and Arch packages can't ship REAPI yet.
