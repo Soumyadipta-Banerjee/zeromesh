@@ -22,6 +22,7 @@
 #include "node/node_client.hpp"
 #include "sched/seed_gate.hpp"
 #include "sched/hazard.hpp"
+#include "sched/bandwidth.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
@@ -115,6 +116,9 @@ public:
     };
     void SetHedging(HedgeConfig cfg);
     [[nodiscard]] HedgeStats Hedging() const;
+    // Per-peer throughput measured from this requester's own pushes and pulls; Rank uses it to
+    // turn missing bytes into transfer time.
+    [[nodiscard]] const BandwidthEstimator& Bandwidth() const { return bandwidth_; }
 
     struct Task;
     struct Shared;
@@ -173,6 +177,7 @@ private:
     [[nodiscard]] std::shared_ptr<const HazardModel> Hazard() const;
     mutable std::mutex hazard_mu_;
     std::shared_ptr<const HazardModel> hazard_;
+    BandwidthEstimator bandwidth_;
 
     mutable std::mutex traffic_mu_;
     std::map<std::string, NodeTraffic> traffic_;

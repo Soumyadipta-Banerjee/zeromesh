@@ -26,7 +26,13 @@ struct Candidate {
     // E[min(remaining life, task time)] in seconds from the departure-hazard model (sched/hazard.hpp);
     // <= 0 or non-finite = unknown (no history).
     double expected_min_s{-1.0};
+    double bandwidth_bytes_per_s{0.0}; // measured throughput to the node; 0 = unmeasured (default assumed)
 };
+
+// Estimated seconds to move the candidate's missing input to it: missing bytes (the caller's
+// `unknown_missing_bytes` when unknown) over its measured bandwidth (BandwidthEstimator's
+// default when unmeasured).
+double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes);
 
 // Keeps the candidates that can run `spec` and orders them best first.
 // Filter:
@@ -36,7 +42,7 @@ struct Candidate {
 //     a busy Cycles job does not shrink capacity to zero mid-job.
 //   - mem_available >= mem_bytes
 //   - policy.may_run_local / may_run_remote (unset = true)
-// Order: expected committed work descending, then missing_bytes, cpu_load_pct, AC, latency,
+// Order: expected committed work descending, then transfer time (missing_bytes / measured bandwidth), cpu_load_pct, AC, latency,
 // node_id. Expected committed work is free slots x expected_min_s (Parcae-style liveput: a
 // slot on a donor that will probably vanish mid-task is worth less). A candidate with unknown
 // expected_min_s counts as the average of the known ones. When every candidate has the same
