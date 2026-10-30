@@ -88,8 +88,7 @@ def test_headline_yes():
         ["w2_makespan", "w4_rerun", "w5_makespan", "w3_bytes", "w5_reexec", "w6_owner"]]
     hl = headline(res, {})
     assert hl["faster"] == "YES"
-    assert hl["better"] == "NO"          # 1 of 7 BETTER is under half, nothing inconclusive
-    assert "INCONCLUSIVE" not in (hl["faster"], hl["better"])
+    assert hl["better"] == "INCONCLUSIVE"     # spec 6.5: 1 of 7 BETTER, none WORSE -> not YES, not NO
     res[1:4] = [{"metric": m, "verdict": "BETTER"} for m in ["w2_makespan", "w4_rerun", "w5_makespan"]]
     assert headline(res, {})["better"] == "YES"      # 4 of 7 >= half
 
@@ -273,10 +272,13 @@ def test_smoke_no_verdict(tmp_path):
 
 def test_report_layout_and_scope(tmp_path):
     hl = {"faster": "YES", "better": "NO", "why": "x"}
-    write_outputs(_res(), hl, {"laptops": 3, "donors": 2, "git_sha": "abc"}, "VALID", tmp_path, smoke=False)
+    scope = {"laptops": 4, "donors": 3, "network": "5GHz", "condor_version": "24.x", "git_sha": "abc"}
+    write_outputs(_res(), hl, scope, "VALID", tmp_path, smoke=False, ctx={"config_hash": "deadbeef"})
     lines = (tmp_path / "report.md").read_text().splitlines()
-    assert lines[0].startswith("FASTER? YES — ") and "3 laptops" in lines[0] and "?" in lines[0]
-    assert lines[1].startswith("BETTER? NO — ")
+    sl = ("4 laptops (1 requester, 3 donors), 5GHz, HTCondor 24.x tuned, zeromesh@abc, n=20, "
+          "config deadbeef")
+    assert lines[0] == f"FASTER? YES — {sl}"
+    assert lines[1] == f"BETTER? NO — {sl}"
     text = "\n".join(lines).lower()
     for needle in ("real lid close", "wi-fi vs wired", "more than the tested number of nodes",
                    "w1_makespan"):
@@ -349,7 +351,51 @@ def test_cli_end_to_end_deterministic_and_needs_extension(tmp_path, repo):
     p2 = subprocess.run(cmd, capture_output=True, text=True)
     assert (tmp_path / "verdict.json").read_text() == j1 and (tmp_path / "report.md").read_text() == r1
     assert "NEEDS_EXTENSION" in p1.stdout
-    assert "3 laptops, 2 donors, wired, HTCondor 24.0" in r1
+    h8 = json.loads(reg.read_text())["hash"][:8]
+    assert (f"3 laptops (1 requester, 2 donors), wired, HTCondor 24.0 tuned, zeromesh@abc, n=20, "
+            f"config {h8}") in r1
     p3 = subprocess.run(cmd + ["--smoke"], capture_output=True, text=True)
     assert p3.returncode == 0 and "NEEDS_EXTENSION" not in p3.stdout
     assert "SMOKE — no verdict" in (tmp_path / "report.md").read_text()
+
+
+def test_scope_placeholders_when_unknown(tmp_path):
+    write_outputs(_res(), {"faster": "YES", "better": "NO", "why": "x"}, {}, "VALID", tmp_path, smoke=False)
+    line = (tmp_path / "report.md").read_text().splitlines()[0]
+    assert line == ("FASTER? YES — ? laptops (1 requester, ? donors), ?, HTCondor ? tuned, zeromesh@?, "
+                    "n=20, config ?")
+
+
+def test_vacuous_rows_fail_closed():
+    rows = make_rows(20, w1())
+    for r in rows:
+        if r["system"] == ZM and r["block"] in (1, 5, 9):
+            r["ok"], r["total"] = 0, 0
+    assert block_ratios(rows, M["w1_makespan"], CT)[1] == 1e9
+    assert disqualified(rows, 0.10) == {ZM: ["w1"]}
+
+
+def test_system_with_no_rows_is_disqualified():
+    wall = {("w1", ZM): 8.0, ("w1", CT): 10.0}           # condor-default never ran
+    rows = make_rows(20, wall)
+    assert disqualified(rows, 0.10) == {CD: ["w1"]}
+    zm_missing = [r for r in rows if r["system"] != ZM]
+    assert disqualified(zm_missing, 0.10) == {ZM: ["w1"], CD: ["w1"]}
+
+
+def test_extension_line(tmp_path):
+    hl = {"faster": "YES", "better": "NO", "why": "x"}
+    for used, word in ((True, "used"), (False, "not used"), (None, "unknown")):
+        scope = {} if used is None else {"extension_used": used}
+        write_outputs(_res(), hl, scope, "VALID", tmp_path, smoke=False, ctx={"extend_to": 40})
+        assert f"Extension to n=40: {word}\n" in (tmp_path / "report.md").read_text()
+
+
+def test_smoke_report_has_no_verdict_column_or_why(tmp_path):
+    hl = {"faster": "YES", "better": "YES", "why": "WHYTEXT"}
+    write_outputs(_res("BETTER"), hl, {}, "VALID", tmp_path, smoke=True)
+    text = (tmp_path / "report.md").read_text()
+    assert "WHYTEXT" not in text and "Verdict" not in text and "BETTER" not in text
+    assert "smoke data, not a verdict" in text and "0.8" in text
+    j = json.loads((tmp_path / "verdict.json").read_text())
+    assert "why" not in j["headline"] and all("verdict" not in m for m in j["metrics"])

@@ -146,7 +146,7 @@ def _workload_ok(clean, wl):
         if r["workload"] != wl:
             continue
         blocks.add(r["block"])
-        correct = r["ok"] is not None and r["ok"] == r["total"]
+        correct = r["ok"] is not None and r["total"] is not None and r["total"] > 0 and r["ok"] == r["total"]
         key = (r["system"], r["block"])
         state[key] = state.get(key, True) and correct
     return state, blocks
@@ -158,7 +158,7 @@ def disqualified(rows, frac: float) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for wl in sorted({r["workload"] for r in clean}):
         state, blocks = _workload_ok(clean, wl)
-        for system in sorted({s for s, _ in state}):
+        for system in (ZM,) + BASELINES:
             bad = sum(1 for b in blocks if not state.get((system, b), False))
             if bad > frac * len(blocks) + 1e-12:
                 out.setdefault(system, []).append(wl)
@@ -339,8 +339,6 @@ def _call(c, n, yes) -> str:
         return "NO"
     if n and c["EQUIVALENT"] == n:
         return "TIE"
-    if not c["INCONCLUSIVE"] and n:
-        return "NO"        # everything decided, but not enough BETTER and nothing WORSE
     return "INCONCLUSIVE"
 
 
@@ -367,10 +365,17 @@ def needs_extension(results) -> bool:
 
 # ---- outputs ---------------------------------------------------------------------------------
 
-def _scope_line(scope: dict) -> str:
+def _scope_line(scope: dict, n=None, config_hash=None) -> str:
     g = lambda k: scope.get(k, "?")  # noqa: E731
-    return (f"{g('laptops')} laptops, {g('donors')} donors, {g('network')}, "
-            f"HTCondor {g('condor_version')}, git {g('git_sha')}")
+    return (f"{g('laptops')} laptops (1 requester, {g('donors')} donors), {g('network')}, "
+            f"HTCondor {g('condor_version')} tuned, zeromesh@{g('git_sha')}, "
+            f"n={'?' if n is None else n}, config {config_hash or '?'}")
+
+
+def _extension_line(scope: dict, extend_to) -> str:
+    used = scope.get("extension_used")
+    state = "used" if used is True else "not used" if used is False else "unknown"
+    return f"Extension to n={extend_to if extend_to is not None else '?'}: {state}"
 
 
 def _fmt(v, kind="ratio") -> str:
@@ -410,20 +415,25 @@ def _report(results, hl, scope, validity, smoke, ctx) -> str:
     if smoke:
         L.append("SMOKE — no verdict")
     else:
-        sl = _scope_line(scope)
+        n = max((r["n"] for r in results), default=None)
+        sl = _scope_line(scope, n, ctx.get("config_hash"))
         L.append(f"FASTER? {hl['faster']} — {sl}")
         L.append(f"BETTER? {hl['better']} — {sl}")
-    L += ["", hl.get("why", ""), "", "## Per-metric results", "",
+    L += ["", _extension_line(scope, ctx.get("extend_to")), ""]
+    if not smoke:
+        L += [hl.get("why", ""), ""]
+    L += ["## Per-metric results" + (" (smoke data, not a verdict)" if smoke else ""), "",
           "Effect is the median per-block ratio ZeroMesh/baseline (below 1 favours ZeroMesh); "
           "w6_owner is the median difference in ms (below 0 favours ZeroMesh). "
           "Bootstrap: percentile. p is Wilcoxon signed-rank, Holm-adjusted across all metrics.", "",
-          "| Metric | Baseline | n | Effect (median) | 95% CI | p | p (Holm) | Verdict |",
-          "|---|---|---|---|---|---|---|---|"]
+          "| Metric | Baseline | n | Effect (median) | 95% CI | p | p (Holm) |"
+          + ("" if smoke else " Verdict |"),
+          "|---|---|---|---|---|---|---|" + ("" if smoke else "---|")]
     for r in results:
         k = r.get("kind", "ratio")
         L.append(f"| {r['metric']} | {r['baseline']} | {r['n']} | {_fmt(r['median'], k)} | "
-                 f"[{_fmt(r['ci_lo'], k)}, {_fmt(r['ci_hi'], k)}] | {r['p']:.3g} | {r['p_adj']:.3g} | "
-                 f"{r['verdict']} |")
+                 f"[{_fmt(r['ci_lo'], k)}, {_fmt(r['ci_hi'], k)}] | {r['p']:.3g} | {r['p_adj']:.3g} |"
+                 + ("" if smoke else f" {r['verdict']} |"))
     sec = ctx.get("secondary") or []
     if sec:
         L += ["", "## Secondary metrics (reported only, no verdict)", "",
@@ -460,17 +470,19 @@ def _report(results, hl, scope, validity, smoke, ctx) -> str:
 
 def write_outputs(results, headline, scope: dict, validity: str, outdir: Path, smoke: bool,
                   *, ctx: dict | None = None) -> None:
-    """ctx (optional): rows, dq, secondary, seed, n_boot -- richer report and verdict.json."""
+    """ctx (optional): rows, dq, secondary, seed, n_boot, config_hash, extend_to -- richer report/json."""
     ctx = ctx or {}
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     hl = headline
     if smoke:
-        hl = {"faster": "SMOKE — no verdict", "better": "SMOKE — no verdict", "why": hl.get("why", "")}
-    doc = {"validity": validity, "smoke": smoke, "headline": hl, "scope": scope, "metrics": results,
+        hl = {"faster": "SMOKE — no verdict", "better": "SMOKE — no verdict"}
+    metrics = [{k: v for k, v in r.items() if k != "verdict"} for r in results] if smoke else results
+    doc = {"validity": validity, "smoke": smoke, "headline": hl, "scope": scope, "metrics": metrics,
            "secondary": ctx.get("secondary", []), "disqualified": ctx.get("dq", {}),
            "needs_extension": needs_extension(results),
-           "bootstrap": "percentile", "seed": ctx.get("seed"), "n_boot": ctx.get("n_boot")}
+           "bootstrap": "percentile", "seed": ctx.get("seed"), "n_boot": ctx.get("n_boot"),
+           "extension_used": scope.get("extension_used"), "config_hash": ctx.get("config_hash")}
     (outdir / "verdict.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
     (outdir / "report.md").write_text(_report(results, headline, scope, validity, smoke, ctx))
 
@@ -492,6 +504,10 @@ def main(argv=None) -> int:
         valid = register.check(Path(a.root), Path(a.registration))
     except Exception:
         valid = False
+    try:
+        config_hash = json.loads(Path(a.registration).read_text())["hash"][:8]
+    except Exception:
+        config_hash = None
     scope_path = out / "scope.json"
     scope = json.loads(scope_path.read_text()) if scope_path.exists() else {}
 
@@ -499,7 +515,8 @@ def main(argv=None) -> int:
     dq = disqualified(rows, cfg["run"]["disqualify_frac"])
     hl = headline(results, dq)
     ctx = {"rows": rows, "dq": dq, "secondary": secondary(rows, cfg),
-           "seed": cfg["run"]["seed"], "n_boot": cfg["run"]["bootstrap"]}
+           "seed": cfg["run"]["seed"], "n_boot": cfg["run"]["bootstrap"],
+           "config_hash": config_hash, "extend_to": cfg["run"]["extend_to"]}
     write_outputs(results, hl, scope, "VALID" if valid else "INVALID", out, a.smoke, ctx=ctx)
     if needs_extension(results) and not a.smoke:
         print("NEEDS_EXTENSION")
