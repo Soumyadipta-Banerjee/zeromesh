@@ -207,7 +207,8 @@ std::optional<v1::OfferReply> NodeClient::Offer(const std::string& task_id, cons
     return reply;
 }
 
-bool NodeClient::Push(const store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error) {
+bool NodeClient::Push(const store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error,
+                      uint64_t* bytes_sent) {
     if (digests.empty()) return true;
     auto stub = PinnedStub(error);
     if (!stub) return false;
@@ -217,8 +218,12 @@ bool NodeClient::Push(const store::CasStore& cas, const std::vector<v1::Digest>&
     auto writer = stub->PushBlobs(&ctx, &empty);
     std::string local_err;
     bool transport_failed = false;
+    uint64_t sent = 0;
     auto write = [&](const v1::Chunk& c) {
-        if (writer->Write(c)) return true;
+        if (writer->Write(c)) {
+            sent += c.data().size();
+            return true;
+        }
         transport_failed = true;
         return false;
     };
@@ -231,13 +236,15 @@ bool NodeClient::Push(const store::CasStore& cas, const std::vector<v1::Digest>&
         writer->WritesDone();
     }
     grpc::Status st = writer->Finish();
+    if (bytes_sent) *bytes_sent += sent;
     if (!local_err.empty() && !transport_failed) return SetError(error, "PushBlobs: " + local_err), false;
     if (!st.ok()) return SetError(error, Describe("PushBlobs", st)), false;
     if (!local_err.empty()) return SetError(error, "PushBlobs: " + local_err), false;
     return true;
 }
 
-bool NodeClient::Pull(store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error) {
+bool NodeClient::Pull(store::CasStore& cas, const std::vector<v1::Digest>& digests, std::string* error,
+                      uint64_t* bytes_received) {
     if (digests.empty()) return true;
     auto stub = PinnedStub(error);
     if (!stub) return false;
@@ -254,7 +261,9 @@ bool NodeClient::Pull(store::CasStore& cas, const std::vector<v1::Digest>& diges
     BlobReceiver receiver(cas);
     std::string local_err;
     v1::Chunk chunk;
+    uint64_t received_bytes = 0;
     while (reader->Read(&chunk)) {
+        received_bytes += chunk.data().size();
         if (chunk.has_digest() && !wanted.contains(chunk.digest().hash())) {
             local_err = "peer sent blob " + chunk.digest().hash() + ", which was not requested";
         } else {
@@ -266,6 +275,7 @@ bool NodeClient::Pull(store::CasStore& cas, const std::vector<v1::Digest>& diges
         }
     }
     grpc::Status st = reader->Finish();
+    if (bytes_received) *bytes_received += received_bytes;
     if (!local_err.empty()) return SetError(error, "PullBlobs: " + local_err), false;
     if (!st.ok()) return SetError(error, Describe("PullBlobs", st)), false;
     if (std::string err = receiver.Finish(); !err.empty()) return SetError(error, "PullBlobs: " + err), false;
