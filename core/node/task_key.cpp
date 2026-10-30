@@ -1,9 +1,12 @@
 #include "node/task_key.hpp"
 
+#include "exec/toolchain_digest.hpp"
+
 #include <openssl/evp.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <iomanip>
 #include <map>
 #include <sstream>
@@ -93,7 +96,26 @@ std::string TaskKey(const v1::TaskSpec& in) {
     w.Str(spec.resources().arch());
     w.Tag('N');
     w.Num(spec.policy().allow_network() ? 1 : 0);
+    w.Tag('T');
+    w.Str(spec.toolchain_digest());
     return Sha256Hex(w.bytes());
+}
+
+std::string LocalToolchainDigest(const v1::TaskSpec& spec) {
+    if (spec.argv().empty()) return "";
+    if (!spec.env_spec().name().empty() && spec.env_spec().name() != "host") return "";
+    std::string path;
+    if (auto it = spec.env().find("PATH"); it != spec.env().end()) {
+        path = it->second;
+    } else if (const char* p = std::getenv("PATH")) {
+        path = p;
+    }
+    return exec::ToolchainDigest(spec.argv(0), path);
+}
+
+void StampToolchain(v1::TaskSpec& spec) {
+    if (!spec.toolchain_digest().empty()) return;
+    spec.set_toolchain_digest(LocalToolchainDigest(spec));
 }
 
 } // namespace zeromesh::node

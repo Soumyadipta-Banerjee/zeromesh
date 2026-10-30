@@ -61,6 +61,8 @@ message TaskSpec {
   Policy policy = 10;
   repeated string depends_on = 11;
   repeated InputFrom inputs_from = 12;
+  // Identity of the host toolchain the task runs (set by the requester for env "host").
+  string toolchain_digest = 13;
 }
 
 message JobSpec {
