@@ -19,6 +19,7 @@
 #include "node/executor.hpp"
 #include "node/local_executor.hpp"
 #include "node/node_client.hpp"
+#include "sched/hazard.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
@@ -58,6 +59,11 @@ public:
 
     void Execute(const std::string& task_id, const v1::TaskSpec& spec, node::TaskCallbacks cb) override;
     void Cancel(const std::string& task_id) override;
+
+    // Rank donors by expected committed work (slots x E[min(remaining life, task time)]) from
+    // this departure-hazard model. Without a model, or until it has any history, placement
+    // ranks by free slots as before. Safe to call while tasks are being placed.
+    void SetHazardModel(std::shared_ptr<const HazardModel> model);
 
     // Node ids of remote peers that currently have at least one task in flight here.
     [[nodiscard]] std::vector<std::string> NodesWithInFlight() const;
@@ -102,6 +108,10 @@ private:
 
     std::mutex sent_mu_;
     std::map<std::string, std::shared_ptr<DonorSent>> sent_;
+
+    [[nodiscard]] std::shared_ptr<const HazardModel> Hazard() const;
+    mutable std::mutex hazard_mu_;
+    std::shared_ptr<const HazardModel> hazard_;
 
     mutable std::mutex traffic_mu_;
     std::map<std::string, NodeTraffic> traffic_;

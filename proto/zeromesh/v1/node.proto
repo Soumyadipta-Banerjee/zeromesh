@@ -26,6 +26,9 @@ message OfferReply {
   repeated Digest missing = 3;
   // Owner-comfort ladder step on the donor (0 = unthrottled .. 4 = frozen). Set on accept and reject.
   uint32 comfort_level = 4;
+  // The donor's own departure hazard (expected abrupt departures per hour), when it has a
+  // record to report one from. Absent = unknown. Informational for the placer.
+  optional double hazard_per_hour = 5;
 }
 
 message RunRequest { string task_id = 1; }

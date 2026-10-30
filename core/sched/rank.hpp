@@ -23,6 +23,9 @@ struct Candidate {
     std::chrono::milliseconds latency{0};
     int64_t missing_bytes{-1}; // input bytes the node lacks; -1 = unknown
     int in_flight{0};          // tasks this node already runs for us
+    // E[min(remaining life, task time)] in seconds from the departure-hazard model (sched/hazard.hpp);
+    // <= 0 or non-finite = unknown (no history).
+    double expected_min_s{-1.0};
 };
 
 // Keeps the candidates that can run `spec` and orders them best first.
@@ -33,7 +36,13 @@ struct Candidate {
 //     a busy Cycles job does not shrink capacity to zero mid-job.
 //   - mem_available >= mem_bytes
 //   - policy.may_run_local / may_run_remote (unset = true)
-// Order: free slots descending, then missing_bytes, cpu_load_pct, AC, latency, node_id.
+// Order: expected committed work descending, then missing_bytes, cpu_load_pct, AC, latency,
+// node_id. Expected committed work is free slots x expected_min_s (Parcae-style liveput: a
+// slot on a donor that will probably vanish mid-task is worth less). A candidate with unknown
+// expected_min_s counts as the average of the known ones. When every candidate has the same
+// life (including none known: no history) the work is just the free-slot count, i.e. the
+// plain "most free slots first" order. When lives differ, work is compared in ~5% buckets,
+// so near-equal work still falls through to the missing_bytes tie-break.
 // When candidate.missing_bytes is -1 (unknown), it is ranked as `unknown_missing_bytes`
 // (typically total input transfer size — worst case).
 std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates,

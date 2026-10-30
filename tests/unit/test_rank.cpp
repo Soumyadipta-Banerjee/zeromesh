@@ -171,3 +171,72 @@ TEST(RankCapacityIgnoresLoadDerivedCoresFree) {
     // Both eligible; idle ranks first.
     ASSERT_EQ(Ids(Rank(spec, {hot, idle})), (std::vector<std::string>{"idle", "hot"}));
 }
+
+// ---- liveput: slots x E[min(remaining life, task time)] (Parcae-style) ----
+
+namespace {
+
+Candidate WithLife(Candidate c, double expected_min_s) {
+    c.expected_min_s = expected_min_s;
+    return c;
+}
+
+} // namespace
+
+TEST(RankFlakyDonorLosesToStableDonorWithEqualCapacity) {
+    zeromesh::v1::TaskSpec spec;
+    // Same cores, and the flaky one even holds all the inputs already; it still loses because
+    // little of what it is given will ever finish.
+    Candidate flaky = WithLife(Node("flaky", 0), 60.0);
+    Candidate stable = WithLife(Node("stable", 5'000'000), 600.0);
+    ASSERT_EQ(Ids(Rank(spec, {flaky, stable}, 1000)), (std::vector<std::string>{"stable", "flaky"}));
+    ASSERT_EQ(Ids(Rank(spec, {stable, flaky}, 1000)), (std::vector<std::string>{"stable", "flaky"}));
+}
+
+TEST(RankLiveputWeighsSlotsTimesExpectedLife) {
+    zeromesh::v1::TaskSpec spec;
+    Candidate big_flaky = WithLife(Node("big-flaky", 0), 100.0); // 16 slots x 100 = 1600
+    big_flaky.cores_total = 16;
+    Candidate small_stable = WithLife(Node("small-stable", 0), 600.0); // 4 x 600 = 2400
+    ASSERT_EQ(Ids(Rank(spec, {big_flaky, small_stable})), (std::vector<std::string>{"small-stable", "big-flaky"}));
+
+    big_flaky.expected_min_s = 300.0; // 16 x 300 = 4800 now beats 2400
+    ASSERT_EQ(Ids(Rank(spec, {big_flaky, small_stable})), (std::vector<std::string>{"big-flaky", "small-stable"}));
+}
+
+TEST(RankNoHistoryKeepsTheExistingOrder) {
+    zeromesh::v1::TaskSpec spec;
+    Candidate local = Node("local", 0, true);
+    local.cores_total = 12;
+    Candidate peer = Node("peer", -1);
+    peer.cores_total = 20;
+    Candidate near_peer = Node("near", 10);
+    Candidate far_peer = Node("far", 5000);
+    std::vector<Candidate> all{far_peer, local, near_peer, peer};
+    const auto baseline = Ids(Rank(spec, all, 10000));
+    ASSERT_EQ(baseline, (std::vector<std::string>{"peer", "local", "near", "far"}));
+
+    // All unknown (the default, -1): identical.
+    for (auto& c : all) c.expected_min_s = -1.0;
+    ASSERT_EQ(Ids(Rank(spec, all, 10000)), baseline);
+    // All equally known: still identical, whatever the common value.
+    for (auto& c : all) c.expected_min_s = 321.0;
+    ASSERT_EQ(Ids(Rank(spec, all, 10000)), baseline);
+}
+
+TEST(RankUnknownLifeCountsAsTheAverageOfTheKnown) {
+    zeromesh::v1::TaskSpec spec;
+    // One known candidate and one unknown: the unknown one is neutral, so the old
+    // missing-bytes order decides.
+    Candidate known = WithLife(Node("known", 900), 300.0);
+    Candidate unknown = Node("unknown", 0);
+    ASSERT_EQ(Ids(Rank(spec, {known, unknown})), (std::vector<std::string>{"unknown", "known"}));
+}
+
+TEST(RankNearlyEqualLiveputFallsBackToMissingBytes) {
+    zeromesh::v1::TaskSpec spec;
+    // 150 s versus 151 s of expected life is noise; the cheaper transfer wins.
+    Candidate warm = WithLife(Node("warm", 0), 150.0);
+    Candidate cold = WithLife(Node("cold", 500), 151.0);
+    ASSERT_EQ(Ids(Rank(spec, {cold, warm})), (std::vector<std::string>{"warm", "cold"}));
+}

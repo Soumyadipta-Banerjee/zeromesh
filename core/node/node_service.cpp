@@ -9,6 +9,7 @@
 #include "store/merkle.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <set>
@@ -250,6 +251,11 @@ void NodeService::SetComfortLevelProvider(std::function<int()> provider) {
     comfort_level_ = std::move(provider);
 }
 
+void NodeService::SetHazardProvider(std::function<double()> provider) {
+    std::lock_guard lock(comfort_mu_);
+    hazard_per_hour_ = std::move(provider);
+}
+
 grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* req, v1::OfferReply* resp) {
     std::string peer;
     if (auto st = RequirePinned(*ctx, &peer); !st.ok()) return st;
@@ -275,11 +281,14 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
     if (!root.hash().empty()) add(root);
 
     int comfort = 0;
+    double hazard = -1.0;
     {
         std::lock_guard lock(comfort_mu_);
         if (comfort_level_) comfort = std::clamp(comfort_level_(), 0, 4);
+        if (hazard_per_hour_) hazard = hazard_per_hour_();
     }
     resp->set_comfort_level(static_cast<uint32_t>(comfort));
+    if (std::isfinite(hazard) && hazard >= 0.0) resp->set_hazard_per_hour(hazard);
 
     auto reject = [&](std::string reason) {
         resp->set_accepted(false);
