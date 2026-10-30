@@ -348,6 +348,44 @@ grpc::Status NodeService::PushBlobs(grpc::ServerContext* ctx, grpc::ServerReader
     return grpc::Status::OK;
 }
 
+void NodeService::SetPeerClientFactory(NodeClientFactory factory) {
+    std::lock_guard lock(peer_factory_mu_);
+    peer_client_factory_ = std::move(factory);
+}
+
+grpc::Status NodeService::SeedBlobs(grpc::ServerContext* ctx, const v1::SeedRequest* req, v1::SeedReply* resp) {
+    if (auto st = RequirePinned(*ctx); !st.ok()) return st;
+    if (!cas_) return NotConfigured("blobs");
+    constexpr int kMaxSeedDigests = 100000;
+    if (req->digests_size() > kMaxSeedDigests) return Invalid("too many digests");
+    std::vector<v1::Digest> wanted;
+    for (const auto& d : req->digests()) {
+        if (!store::CasStore::IsValidHash(d.hash()) || d.size_bytes() < 0) return Invalid("invalid digest in seed request");
+        if (!cas_->HasBlob(d.hash())) wanted.push_back(d);
+    }
+    if (!wanted.empty()) {
+        NodeClientFactory factory;
+        {
+            std::lock_guard lock(peer_factory_mu_);
+            factory = peer_client_factory_;
+        }
+        const std::string& source = req->source_hint();
+        std::shared_ptr<NodeClient> client;
+        if (factory && !source.empty() && source != node_id_) client = factory(source);
+        if (!client) {
+            resp->set_error("no route to source " + source);
+        } else {
+            std::string err;
+            // Pull verifies every object against its digest; what it stored before a failure stays.
+            if (!client->Pull(*cas_, wanted, &err)) resp->set_error(err);
+        }
+    }
+    for (const auto& d : req->digests()) {
+        if (cas_->HasBlob(d.hash())) *resp->add_fetched() = d;
+    }
+    return grpc::Status::OK;
+}
+
 grpc::Status NodeService::PullBlobs(grpc::ServerContext* ctx, const v1::Digests* req,
                                     grpc::ServerWriter<v1::Chunk>* writer) {
     if (auto st = RequirePinned(*ctx); !st.ok()) return st;
