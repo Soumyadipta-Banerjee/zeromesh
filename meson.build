@@ -344,3 +344,8 @@ test('integration_cfd', python3,
   is_parallel: false,
 )
 
+test('verdict_analysis', python3,
+  args: ['-m', 'pytest', '-q', meson.project_source_root() / 'scripts/verdict/tests'],
+  timeout: 300,
+  is_parallel: false,
+)

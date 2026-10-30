@@ -1,0 +1,46 @@
+# Pre-registered parameters for the ZeroMesh vs HTCondor verdict suite.
+# Hashed by register.py; do not edit after 'verdict register'.
+
+[run]
+blocks = 20
+extend_to = 40
+warmup_blocks = 1
+settle_s = 15
+seed = 20261030
+alpha = 0.05
+ratio_margin = 0.05
+owner_margin_ms = 2.0
+disqualify_frac = 0.10
+bootstrap = 10000
+reexec_smooth_s = 1.0   # added by this plan: avoids 0/0 on W5 re-executed CPU-seconds
+
+# task counts may be shrunk to fit the run budget BEFORE 'verdict register'
+[w1]
+tasks = 200
+task_secs = 1
+
+[w2]
+tasks = 24
+task_secs = 60
+
+[w3]
+tasks = 48
+task_secs = 5
+input_mb = 256
+
+[w4]
+changed_case = "003"
+
+[w5]
+tasks = 60
+task_secs = 10
+kill_frac = 0.30
+kill_mode = "kill"
+
+[w6]
+tasks = 24
+task_secs = 30
+probe_period_ms = 100
+
+[condor]
+tuned_conf = "scripts/baselines/condor_tuned.conf"
