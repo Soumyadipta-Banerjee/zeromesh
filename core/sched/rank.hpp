@@ -23,7 +23,13 @@ struct Candidate {
     std::chrono::milliseconds latency{0};
     int64_t missing_bytes{-1}; // input bytes the node lacks; -1 = unknown
     int in_flight{0};          // tasks this node already runs for us
+    double bandwidth_bytes_per_s{0.0}; // measured throughput to the node; 0 = unmeasured (default assumed)
 };
+
+// Estimated seconds to move the candidate's missing input to it: missing bytes (the caller's
+// `unknown_missing_bytes` when unknown) over its measured bandwidth (BandwidthEstimator's
+// default when unmeasured).
+double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes);
 
 // Keeps the candidates that can run `spec` and orders them best first.
 // Filter:
@@ -33,7 +39,8 @@ struct Candidate {
 //     a busy Cycles job does not shrink capacity to zero mid-job.
 //   - mem_available >= mem_bytes
 //   - policy.may_run_local / may_run_remote (unset = true)
-// Order: free slots descending, then missing_bytes, cpu_load_pct, AC, latency, node_id.
+// Order: free slots descending, then transfer time (missing_bytes / bandwidth), cpu_load_pct,
+// AC, latency, node_id.
 // When candidate.missing_bytes is -1 (unknown), it is ranked as `unknown_missing_bytes`
 // (typically total input transfer size — worst case).
 std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates,

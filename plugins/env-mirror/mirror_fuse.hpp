@@ -2,6 +2,7 @@
 
 #include "plugins/env-mirror/chunk_source.hpp"
 #include "plugins/env-mirror/mirror_cache.hpp"
+#include "plugins/env-mirror/mirror_reader.hpp"
 #include "store/ignore.hpp"
 
 #include <filesystem>
@@ -68,6 +69,15 @@ public:
 
     /// Finds a node by its virtual path (e.g. "/project/main.c").
     [[nodiscard]] std::shared_ptr<VirtualNode> Lookup(std::string_view path);
+
+    /// Records the order files are first read in (call before Mount).
+    void SetRecorder(std::shared_ptr<AccessRecorder> recorder);
+
+    /// Read operations and requester round trips so far (per task: one MirrorFuse per task).
+    [[nodiscard]] MirrorStats Stats() const;
+
+    /// The read path, for prefetching into the same cache the mount reads from.
+    [[nodiscard]] std::shared_ptr<MirrorReader> Reader() const;
 
     struct Impl;
 

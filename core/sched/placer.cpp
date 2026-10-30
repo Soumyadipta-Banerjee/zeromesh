@@ -428,7 +428,8 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                           .arch = p.arch,
                           .latency = p.latency,
                           .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
-                          .in_flight = shared_->InFlightLocked(p.id)});
+                          .in_flight = shared_->InFlightLocked(p.id),
+                          .bandwidth_bytes_per_s = bandwidth_.Measured(p.id).value_or(0.0)});
         }
         for (const Candidate& c : Rank(spec, std::move(candidates), input_tree_bytes)) {
             shared_->AddLocked(c.node_id, 1);
@@ -629,7 +630,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                     if (!donor->sent.contains(d.hash())) to_send.push_back(d);
                 }
             }
+            const auto push_start = std::chrono::steady_clock::now();
             pushed_ok = client->Push(*cas_, to_send, &err, &wire_pushed);
+            if (pushed_ok) bandwidth_.Observe(reserved->node_id, wire_pushed, std::chrono::steady_clock::now() - push_start);
             if (pushed_ok) {
                 std::lock_guard lock(donor->mu);
                 for (const auto& d : to_send) donor->sent[d.hash()] = std::chrono::steady_clock::now();
@@ -696,7 +699,9 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             return task->Done(Cancelled(reserved->node_id));
         }
         uint64_t wire_pulled = 0;
+        const auto pull_start = std::chrono::steady_clock::now();
         const bool pulled_ok = PullOutputs(*client, *cas_, *result, &err, &wire_pulled);
+        if (pulled_ok) bandwidth_.Observe(reserved->node_id, wire_pulled, std::chrono::steady_clock::now() - pull_start);
         AddTraffic(reserved->node_id, 0, wire_pulled);
         if (!pulled_ok) {
             release(*reserved);

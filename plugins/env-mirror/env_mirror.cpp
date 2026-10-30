@@ -1,10 +1,15 @@
 #include "plugins/env-mirror/env_mirror.hpp"
 
+#include "plugins/env-mirror/env_profile.hpp"
+#include "plugins/env-mirror/mirror_prefetch.hpp"
 #include "store/store.hpp"
 
 #include <filesystem>
+#include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 namespace zeromesh::mirror {
@@ -34,12 +39,22 @@ std::string RootDigest(const plugin::TaskContext& ctx) {
     return RootDigestFromParams(ctx.env.params);
 }
 
+// One mounted environment: the mount plus what the access profile needs while it lives.
+struct ActiveMount {
+    std::shared_ptr<MirrorFuse> fuse;
+    std::string root_digest;
+    fs::path profile_dir;
+    std::shared_ptr<AccessRecorder> recorder;    // set on the first run of an environment (no profile yet)
+    std::unique_ptr<BackgroundPrefetch> prefetch; // set when a profile exists
+};
+
 class MirrorEnv final : public plugin::IEnvProvider {
 public:
     ~MirrorEnv() override {
         std::lock_guard<std::mutex> lock(mu_);
-        for (auto& [task_id, fuse_inst] : active_mounts_) {
-            if (fuse_inst) fuse_inst->Unmount();
+        for (auto& [task_id, mount] : active_mounts_) {
+            mount.prefetch.reset(); // join before the mount goes away
+            if (mount.fuse) mount.fuse->Unmount();
         }
         active_mounts_.clear();
     }
@@ -94,13 +109,33 @@ public:
         auto cache = std::make_shared<MirrorCache>(cache_dir, 512 * 1024 * 1024);
         auto fuse_inst = std::make_shared<MirrorFuse>(mount_dir, chunk_source, cache);
 
+        // First run of this environment: record what the task reads. Later runs: prefetch it.
+        ActiveMount mount;
+        mount.fuse = fuse_inst;
+        mount.root_digest = root_digest;
+        mount.profile_dir = ctx.profile_dir;
+        std::optional<EnvProfile> profile;
+        if (!ctx.profile_dir.empty()) {
+            ProfileStore profiles(ctx.profile_dir);
+            if (auto it = ctx.env.params.find("profile_id"); it != ctx.env.params.end() && !it->second.empty()) {
+                profile = profiles.LoadById(it->second);
+            }
+            if (!profile) profile = profiles.LoadForRoot(root_digest);
+            if (profile && profile->root_hash != root_digest) profile.reset(); // a profile of another environment
+            if (!profile) {
+                mount.recorder = std::make_shared<AccessRecorder>();
+                fuse_inst->SetRecorder(mount.recorder);
+            }
+        }
+
         if (!fuse_inst->Mount(root_digest)) {
             return {.value = std::nullopt, .error = "failed to mount FUSE mirror filesystem"};
         }
+        if (profile) mount.prefetch = std::make_unique<BackgroundPrefetch>(std::move(*profile), fuse_inst->Reader());
 
         {
             std::lock_guard<std::mutex> lock(mu_);
-            active_mounts_[ctx.task_id] = fuse_inst;
+            active_mounts_[ctx.task_id] = std::move(mount);
         }
 
         plugin::SandboxEnv env;
@@ -149,18 +184,28 @@ public:
     }
 
     void Release(const plugin::TaskContext& ctx) override {
-        std::shared_ptr<MirrorFuse> fuse_inst;
+        std::optional<ActiveMount> mount;
         {
             std::lock_guard<std::mutex> lock(mu_);
             auto it = active_mounts_.find(ctx.task_id);
             if (it != active_mounts_.end()) {
-                fuse_inst = it->second;
+                mount = std::move(it->second);
                 active_mounts_.erase(it);
             }
         }
 
-        if (fuse_inst) {
-            fuse_inst->Unmount();
+        if (mount) {
+            mount->prefetch.reset(); // stop and join before unmounting
+            if (mount->fuse) {
+                const MirrorStats st = mount->fuse->Stats();
+                std::cerr << "mirror: task " << ctx.task_id << ": " << st.read_ops << " reads, " << st.on_demand_fetches
+                          << " on-demand fetches, " << st.cache_hits << " cache hits, " << st.prefetch_fetches
+                          << " prefetched (" << st.prefetch_bytes << " bytes)\n";
+                mount->fuse->Unmount();
+            }
+            if (mount->recorder && !mount->profile_dir.empty()) {
+                ProfileStore(mount->profile_dir).Save(mount->recorder->Snapshot(mount->root_digest));
+            }
         }
 
         if (!SafeTaskIdForPath(ctx.task_id)) return;
@@ -176,7 +221,7 @@ public:
 
 private:
     std::mutex mu_;
-    std::unordered_map<std::string, std::shared_ptr<MirrorFuse>> active_mounts_;
+    std::unordered_map<std::string, ActiveMount> active_mounts_;
 };
 
 } // namespace

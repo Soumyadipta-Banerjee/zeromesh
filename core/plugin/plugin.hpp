@@ -64,6 +64,8 @@ struct TaskContext {
     std::string requester_node_id;
     /// Blob source connected to the requester; null for local / host-env tasks.
     IBlobSource* blob_source{nullptr};
+    /// Where this node keeps environment access profiles (recorded prefetch); empty = none.
+    std::filesystem::path profile_dir;
 };
 
 template <class T>

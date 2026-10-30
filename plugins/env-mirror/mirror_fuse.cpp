@@ -47,6 +47,7 @@ struct MirrorFuse::Impl {
     std::filesystem::path mount_point;
     std::shared_ptr<IChunkSource> chunk_source;
     std::shared_ptr<MirrorCache> cache;
+    std::shared_ptr<MirrorReader> reader; // every fetch and read goes through it
 
     std::shared_ptr<VirtualNode> root;
     std::mutex tree_mu;
@@ -81,16 +82,7 @@ struct MirrorFuse::Impl {
     void LoadDirectoryChildren(std::shared_ptr<VirtualNode> dir_node) {
         if (!dir_node || dir_node->digest_hash.empty()) return;
 
-        std::optional<std::string> data;
-        if (cache) {
-            data = cache->Get(dir_node->digest_hash);
-        }
-        if (!data && chunk_source) {
-            data = chunk_source->FetchChunk(dir_node->digest_hash);
-            if (data && cache) {
-                cache->Put(dir_node->digest_hash, *data);
-            }
-        }
+        std::optional<std::string> data = reader->GetObject(dir_node->digest_hash, FetchOrigin::kOnDemand);
         if (!data) return;
 
         auto manifest = store::DirectoryManifest::Deserialize(*data);
@@ -220,30 +212,11 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
     if (!node) return -ENOENT;
     if (node->is_directory) return -EISDIR;
 
-    if (offset < 0 || static_cast<uint64_t>(offset) >= node->size_bytes) {
-        return 0;
-    }
+    if (offset < 0) return 0;
 
-    size_t available = static_cast<size_t>(node->size_bytes - offset);
-    size = std::min(size, available);
-    if (size == 0) return 0;
-
-    if (impl->cache) {
-        if (auto n = impl->cache->ReadRange(node->digest_hash, offset, buf, size)) {
-            return static_cast<int>(*n);
-        }
-    }
-    if (!impl->chunk_source) return -EIO;
-
-    std::optional<std::string> file_data = impl->chunk_source->FetchChunk(node->digest_hash);
-    if (!file_data) return -EIO;
-    if (impl->cache) impl->cache->Put(node->digest_hash, *file_data);
-
-    if (static_cast<size_t>(offset) >= file_data->size()) return 0;
-    size_t tail = file_data->size() - static_cast<size_t>(offset);
-    size = std::min(size, tail);
-    std::memcpy(buf, file_data->data() + offset, size);
-    return static_cast<int>(size);
+    const auto n = impl->reader->Read(node->digest_hash, node->size_bytes, static_cast<uint64_t>(offset), buf, size);
+    if (n < 0) return -EIO;
+    return static_cast<int>(n);
 }
 
 int FuseReadlink(const char* path, char* buf, size_t size) {
@@ -321,6 +294,19 @@ MirrorFuse::MirrorFuse(std::filesystem::path mount_point, std::shared_ptr<IChunk
     impl_->mount_point = mount_point_;
     impl_->chunk_source = chunk_source_;
     impl_->cache = cache_;
+    impl_->reader = std::make_shared<MirrorReader>(chunk_source_, cache_);
+}
+
+void MirrorFuse::SetRecorder(std::shared_ptr<AccessRecorder> recorder) {
+    impl_->reader->SetRecorder(std::move(recorder));
+}
+
+MirrorStats MirrorFuse::Stats() const {
+    return impl_->reader->Stats();
+}
+
+std::shared_ptr<MirrorReader> MirrorFuse::Reader() const {
+    return impl_->reader;
 }
 
 MirrorFuse::~MirrorFuse() {
