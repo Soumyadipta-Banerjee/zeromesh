@@ -3,8 +3,7 @@
 > **For developers and AI agents:** keep this file true. A box is ticked only when the
 > milestone's acceptance test has passed. Never tick work that is stubbed or simulated.
 
-**Design:** [`docs/superpowers/specs/2026-10-26-core-plugin-architecture-design.md`](docs/superpowers/specs/2026-10-26-core-plugin-architecture-design.md)
-**Current implementation plan:** [`docs/superpowers/plans/2026-10-26-core-plugin-part1-m0-m3.md`](docs/superpowers/plans/2026-10-26-core-plugin-part1-m0-m3.md)
+**Design:** [`docs/design/architecture.md`](docs/design/architecture.md)
 
 ---
 

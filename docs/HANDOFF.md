@@ -1,7 +1,7 @@
 # Handoff (updated 2026-10-29)
 
 For the next person or agent continuing this work. Read this first, then the
-[design](superpowers/specs/2026-10-26-core-plugin-architecture-design.md), [PLAN.md](../PLAN.md) and the
+[design](design/architecture.md), [PLAN.md](../PLAN.md) and the
 [v2 blueprint](../ZeroMesh%20v2%20Blueprint.md).
 
 ## Where things are
@@ -19,9 +19,6 @@ For the next person or agent continuing this work. Read this first, then the
   and `zm-cfd` suites. All 10 pass on a host with `/dev/fuse`, `recc`, `bwrap` ≥ 0.12.0 and Blender.
 - **Style:** `.clang-format` encodes the house style; `clang-format -i` any C++ you touch. `.clang-tidy` is a
   small bugprone/performance set: `clang-tidy -p build <file>`.
-- **Baselines for the v2 comparison:** `scripts/baselines/baseline.sh up [tuned]` starts a rootless a baseline scheduler pool in
-  Podman (`docker.io/baseline/mini`), `submit FILE` runs a job, `down` removes it. The "BOINC-style" baseline is a
-  policy in the harness (suspend on input, quorum 1 or 2), not the BOINC client.
 
 ## Status against PLAN.md
 
@@ -52,6 +49,4 @@ For the next person or agent continuing this work. Read this first, then the
 
 ## Where the record lives
 
-- **Commit history** on `demo/m5-all`.
-- **Decision ledger** for Part 1: `.superpowers/sdd/2026-10-26-core-plugin-part1-m0-m3/progress.md` in the original
-  worktree. It is git-ignored scratch, so copy the rulings out if you delete that worktree.
+- **Commit history.**
