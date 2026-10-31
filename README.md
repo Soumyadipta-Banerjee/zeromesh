@@ -78,3 +78,7 @@ tests/      unit, integration and acceptance tests
 frozen/     parked modules: not built, kept for later milestones
 docs/       design spec (docs/design) and team notes
 ```
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

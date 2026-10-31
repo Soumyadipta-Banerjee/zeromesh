@@ -3,6 +3,7 @@ requires = ["setuptools>=61.0", "wheel", "grpcio-tools>=1.84.0,<1.85"]
 build-backend = "setuptools.build_meta"
 
 [project]
+license = {text = "Apache-2.0"}
 name = "zeromesh"
 version = "0.1.0"
 description = "ZeroMesh Python SDK for zero-setup compute mesh"
