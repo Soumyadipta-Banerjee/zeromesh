@@ -21,7 +21,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, TextIO
@@ -58,8 +58,20 @@ class BuildOptions:
     verbose: bool = False
 
 
-def build_job_spec(*, input_root: Any, tasks: list[RemoteTask], opts: BuildOptions, common_pb2: Any) -> Any:
-    """One TaskSpec per RemoteTask. ``common_pb2`` is passed in so tests can stub it."""
+def build_job_spec(
+    *,
+    input_root: Any = None,
+    tasks: list[RemoteTask],
+    opts: BuildOptions,
+    common_pb2: Any,
+    input_roots: Optional[dict[str, Any]] = None,
+    mem_bytes: Optional[dict[str, int]] = None,
+) -> Any:
+    """One TaskSpec per RemoteTask. ``common_pb2`` is passed in so tests can stub it.
+
+    ``input_roots`` gives each task its own root by task name; without it every task shares ``input_root``.
+    A donor copies the whole root into the task's work dir, so a shared root makes every task copy every file.
+    """
     policy = common_pb2.Policy(may_run_local=opts.may_run_local, may_run_remote=True)
     params: dict[str, str] = {}
     if opts.env == "mirror" and opts.mirror_paths:
@@ -71,15 +83,57 @@ def build_job_spec(*, input_root: Any, tasks: list[RemoteTask], opts: BuildOptio
             common_pb2.TaskSpec(
                 name=t.name,
                 argv=list(t.argv),
-                input_root=input_root,
+                input_root=input_roots[t.name] if input_roots is not None else input_root,
                 outputs=["out/"],
                 env_spec=common_pb2.EnvSpec(name=opts.env, params=params),
-                resources=common_pb2.Resources(cores=opts.cores),
+                resources=common_pb2.Resources(
+                    cores=opts.cores, mem_bytes=(mem_bytes or {}).get(t.name, 0)
+                ),
                 policy=policy,
                 env=env,
             )
         )
     return common_pb2.JobSpec(name="zm-cc", tasks=specs)
+
+
+# cc1plus peaks near 700 MB on an 8 MB preprocessed protobuf/gRPC unit and near 250 MB on a 2 MB one.
+# The estimate is what a donor reserves for the task, so it is kept above those measurements.
+_MEM_BASE = 250 * 1024 * 1024
+_MEM_PER_INPUT_BYTE = 100
+
+
+def estimate_task_mem(sizes: list[int]) -> int:
+    """Memory to reserve for a task whose units compile one after another: the largest unit's."""
+    return _MEM_BASE + _MEM_PER_INPUT_BYTE * max(sizes, default=0)
+
+
+def _upload_task_inputs(
+    client: Any, tasks: list[RemoteTask], stage: Path, scratch: Path, timeout: float, workers: int = 1
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Upload each task's own files as its input root, several at a time.
+
+    Returns (task name -> root digest, task name -> memory estimate in bytes).
+    """
+    mems: dict[str, int] = {}
+
+    def one(t: RemoteTask) -> tuple[str, Any]:
+        tdir = scratch / t.name
+        (tdir / "out").mkdir(parents=True)
+        (tdir / "out" / ".zm-keep").touch()  # an empty out/ must survive the upload
+        sizes = []
+        for u in t.units:
+            src, dst = stage / u.stage_name, tdir / u.stage_name
+            sizes.append(src.stat().st_size)
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copyfile(src, dst)
+        mems[t.name] = estimate_task_mem(sizes)
+        return t.name, client.upload(tdir, timeout=timeout)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks)))) as pool:
+        roots = dict(pool.map(one, tasks))
+    return roots, mems
 
 
 def _tail(err: str, lines: int = 3) -> str:
@@ -252,8 +306,40 @@ def run_build(
         stage = Path(td) / "in"
         (stage / "out").mkdir(parents=True)
         (stage / "out" / ".zm-keep").touch()  # an empty out/ must survive the upload
+
+        # --- preprocess with live progress ---
+        n_total = len(remote)
+        n_done = 0
+        n_failed = 0
+        pp_t0 = time.monotonic()
+        print(f"zm-cc: preprocessing {n_total} unit(s) with -j{opts.jobs} ...", file=prog, flush=True)
+
+        staged: list[tuple[int, str]] = [None] * n_total  # type: ignore[list-item]
+        futures_map: dict[Any, int] = {}
         with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
-            staged = list(pool.map(lambda u: _stage_unit(u, stage, runner), remote))
+            for i, u in enumerate(remote):
+                futures_map[pool.submit(_stage_unit, u, stage, runner)] = i
+            for fut in as_completed(futures_map):
+                i = futures_map[fut]
+                staged[i] = fut.result()
+                n_done += 1
+                size, err = staged[i]
+                if err:
+                    n_failed += 1
+                label = remote[i].label
+                print(
+                    f"  preprocess [{n_done}/{n_total}]{'  FAIL' if err else '  ok  '}"
+                    f"  {size // 1024:>6} KB  {label}",
+                    file=prog, flush=True,
+                )
+
+        pp_secs = time.monotonic() - pp_t0
+        pp_mb = sum(s for s, _ in staged if s) / 1_048_576
+        print(
+            f"zm-cc: preprocess done in {pp_secs:.1f}s  —  {pp_mb:.1f} MB staged"
+            f"  ({n_failed} failed)",
+            file=prog, flush=True,
+        )
 
         ready: list[Unit] = []
         for u, (size, err) in zip(remote, staged):
@@ -261,7 +347,6 @@ def run_build(
             if err:
                 rec.status = "failed"
                 rec.error = explain(err)
-                _event(prog, "FAILED", u.label, rec.error)
                 if not opts.keep_going:
                     stop.set()
             else:
@@ -280,8 +365,20 @@ def run_build(
         if tasks:
             if client is None or common_pb2 is None:
                 raise RuntimeError("remote units need a daemon client")
-            root = client.upload(stage, timeout=opts.submit_timeout)
-            spec = build_job_spec(input_root=root, tasks=tasks, opts=opts, common_pb2=common_pb2)
+            stage_size_mb = sum(
+                f.stat().st_size for f in stage.rglob("*") if f.is_file()
+            ) / 1_048_576
+            print(
+                f"zm-cc: uploading {len(tasks)} task input(s) to CAS ({stage_size_mb:.1f} MB) ...",
+                file=prog, flush=True,
+            )
+            up_t0 = time.monotonic()
+            roots, mems = _upload_task_inputs(
+                client, tasks, stage, Path(td) / "tin", opts.submit_timeout, workers=opts.jobs
+            )
+            up_secs = time.monotonic() - up_t0
+            print(f"zm-cc: upload done in {up_secs:.1f}s — submitting {len(tasks)} task(s) ...", file=prog, flush=True)
+            spec = build_job_spec(input_roots=roots, mem_bytes=mems, tasks=tasks, opts=opts, common_pb2=common_pb2)
             job = client.submit(spec, timeout=opts.submit_timeout)
             print(f"zm-cc: submitted job {job.job_id} ({len(tasks)} task(s))", file=prog, flush=True)
 
@@ -327,3 +424,41 @@ def link_objects(plan: Plan, records: list[UnitRecord], *, output: Path, flags: 
     objs = [r.output for r in records if r.status == "ok" and r.output]
     argv = [_link_driver(plan), *objs, *shlex.split(flags), "-o", str(output)]
     return runner(argv, Path.cwd())
+
+
+def retry_failed_local(
+    plan: Plan,
+    records: list[UnitRecord],
+    opts: BuildOptions,
+    *,
+    runner: Runner = run_process,
+    progress: Any = None,
+) -> int:
+    """Compile units whose remote task failed here instead. Returns how many now succeeded.
+
+    A donor can fail a task for reasons that have nothing to do with the source (for example the
+    mirror filesystem not mounting), so one flaky donor must not fail the whole build.
+    """
+    by_index = {u.index: u for u in plan.units}
+    redo = [r for r in records if r.status == "failed" and r.mode == "remote" and r.index in by_index]
+    if not redo:
+        return 0
+    prog = progress if progress is not None else sys.stderr
+    print(f"zm-cc: retrying {len(redo)} failed remote unit(s) locally ...", file=prog, flush=True)
+    stop = threading.Event()
+    fixed = 0
+    with ThreadPoolExecutor(max_workers=max(1, min(opts.jobs, 4))) as pool:
+        futures = [(r, pool.submit(_run_local, by_index[r.index], runner, stop)) for r in redo]
+        for rec, fut in futures:
+            u = by_index[rec.index]
+            status, secs, err = fut.result()
+            if status == "ok":
+                rec.status, rec.mode, rec.wall_s = "ok", "local", secs
+                rec.node, rec.node_id, rec.error = "local (retry)", "", ""
+                rec.output = str(u.object_path)
+                fixed += 1
+                _event(prog, "LOCAL", u.label, f"retry ok {secs:.2f}s")
+            else:
+                rec.error = explain(err)
+                _event(prog, "FAILED", u.label, f"retry failed: {rec.error}")
+    return fixed

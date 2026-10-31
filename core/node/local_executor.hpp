@@ -6,6 +6,7 @@
 #include "plugin/loader.hpp"
 #include "store/store.hpp"
 
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
@@ -40,6 +41,9 @@ public:
 
     // Cores held by sandboxes that have started and not finished.
     [[nodiscard]] int CoresInUse() const;
+    // Memory promised (Resources.mem_bytes) by sandboxes that have started and not finished.
+    [[nodiscard]] int64_t MemInUse() const;
+
 
     // Snapshot of sandboxes on this node for zm monitor (queued/running + recent finished).
     struct ActiveItem {
@@ -62,9 +66,11 @@ private:
         std::stop_source stop;
         bool started{false};
         int cores_held{1};
+        int64_t mem_held{0};
     };
 
     void Worker(std::stop_token st);
+    [[nodiscard]] bool MemoryAllowsLocked(const Item& item) const;
     v1::TaskResult Run(Item& item);
     void RememberFinished(std::string task_id, v1::TaskSpec spec, v1::TaskState state);
 
@@ -73,6 +79,8 @@ private:
     std::string node_id_;
     int core_capacity_{1};
     int cores_in_use_{0};
+    int64_t mem_in_use_{0};
+    std::chrono::steady_clock::time_point last_start_{};
     std::filesystem::path scratch_root_;
     std::shared_ptr<store::CasStore> cas_;
     NodeClientFactory client_factory_;

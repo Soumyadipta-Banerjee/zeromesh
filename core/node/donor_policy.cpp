@@ -165,7 +165,7 @@ constexpr int kRetryBatteryMs = 15000; // battery state changes slowly
 } // namespace
 
 std::optional<Refusal> DonorPolicy::Evaluate(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                             int cores_in_use) const {
+                                             int cores_in_use, int64_t mem_promised) const {
     if (!t.on_ac && t.battery_pct >= 0) {
         if (ShouldDrain(t)) {
             return Refusal{RefusalKind::Busy,
@@ -203,18 +203,19 @@ std::optional<Refusal> DonorPolicy::Evaluate(const net::Telemetry& t, const v1::
                        kRetryCoresBusyMs};
     }
     const int64_t mem = spec.resources().mem_bytes();
-    if (mem > 0 && static_cast<uint64_t>(mem) > t.mem_available) {
+    if (mem > 0 && static_cast<uint64_t>(mem + std::max<int64_t>(mem_promised, 0)) > t.mem_available) {
         return Refusal{RefusalKind::Busy,
                        "task needs " + std::to_string(mem) + " bytes of memory, " + std::to_string(t.mem_available) +
-                           " are available",
+                           " are available and " + std::to_string(std::max<int64_t>(mem_promised, 0)) +
+                           " are promised to other tasks",
                        kRetryMemoryMs};
     }
     return std::nullopt;
 }
 
 std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                int cores_in_use) const {
-    if (auto r = Evaluate(t, spec, cores_in_use)) return std::move(r->reason);
+                                                int cores_in_use, int64_t mem_promised) const {
+    if (auto r = Evaluate(t, spec, cores_in_use, mem_promised)) return std::move(r->reason);
     return std::nullopt;
 }
 
