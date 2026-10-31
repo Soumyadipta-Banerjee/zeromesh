@@ -128,6 +128,14 @@ int NodeService::CoresInUseLocked() const {
     return n;
 }
 
+int64_t NodeService::MemPromisedLocked() const {
+    int64_t n = 0;
+    for (const auto& [key, r] : reserved_) n += std::max<int64_t>(r.spec.resources().mem_bytes(), 0);
+    for (const auto& [key, r] : running_) n += std::max<int64_t>(r.spec.resources().mem_bytes(), 0);
+    if (executor_) n += executor_->MemInUse();
+    return n;
+}
+
 std::unordered_set<std::string> NodeService::ProtectedBlobHashes() const {
     if (!cas_) return {};
     struct Snap {
@@ -478,7 +486,7 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
         return reject("task " + req->task_id() + " is already running here", v1::REJECT_BUSY, kRetryDuplicateMs);
     }
     reserved_.erase(key); // a repeated offer replaces the old reservation
-    if (auto why = policy_.Evaluate(telemetry, spec, CoresInUseLocked())) {
+    if (auto why = policy_.Evaluate(telemetry, spec, CoresInUseLocked(), MemPromisedLocked())) {
         return reject(std::move(why->reason),
                       why->kind == RefusalKind::Busy ? v1::REJECT_BUSY : v1::REJECT_UNSUPPORTED, why->retry_after_ms);
     }

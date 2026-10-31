@@ -163,6 +163,7 @@ private:
     };
     void PurgeExpiredLocked();
     int CoresInUseLocked() const;
+    int64_t MemPromisedLocked() const;
     bool RemoteExecConfigured() const;
 
     std::shared_ptr<store::CasStore> cas_;

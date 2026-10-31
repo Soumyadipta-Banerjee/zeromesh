@@ -388,6 +388,11 @@ bool MirrorFuse::MountWithRoot(std::shared_ptr<VirtualNode> root_node) {
     char* argv[] = {const_cast<char*>("zm_mirror_fuse"), nullptr};
     struct fuse_args args = FUSE_ARGS_INIT(1, argv);
 
+    // Mounts start in bursts (one per task). libfuse hands fusermount3 its socket through a process-wide
+    // fd/env, and concurrent mounts have failed with "fusermount3: fstat of comm fd N failed", so one at a time.
+    static std::mutex mount_mu;
+    std::lock_guard<std::mutex> mount_lock(mount_mu);
+
     impl_->fuse_handle = fuse_new(&args, &ops, sizeof(ops), impl_.get());
     fuse_opt_free_args(&args);
 

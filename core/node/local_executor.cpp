@@ -1,3 +1,4 @@
+#include <fstream>
 #include "node/local_executor.hpp"
 
 #include "node/convert.hpp"
@@ -151,18 +152,67 @@ int LocalExecutor::CoresInUse() const {
     return cores_in_use_;
 }
 
+namespace {
+
+constexpr std::chrono::milliseconds kMemoryPoll{100};
+// Free memory left after a task starts. A compiler's footprint grows over its first seconds, so a
+// burst of starts that each fit the free memory *now* can still add up to more than the node has.
+// The floor is a fraction of total memory because oom killers such as earlyoom act when free memory
+// falls below a share of it (10% by default); staying above that line is the point of the gate.
+constexpr uint64_t kMemoryHeadroomFloor = 768ull << 20;
+constexpr double kMemoryHeadroomShare = 0.15;
+constexpr std::chrono::milliseconds kStartSpacing{150};
+
+struct MemInfo {
+    uint64_t total{UINT64_MAX};
+    uint64_t available{UINT64_MAX};
+};
+
+MemInfo ReadMemInfo() {
+    std::ifstream in("/proc/meminfo");
+    std::string key, unit;
+    uint64_t kb = 0;
+    MemInfo m;
+    while (in >> key >> kb >> unit) {
+        if (key == "MemTotal:") m.total = kb * 1024;
+        if (key == "MemAvailable:") m.available = kb * 1024;
+    }
+    return m; // unreadable fields stay at UINT64_MAX: do not hold work back
+}
+
+} // namespace
+
+// A task that declares memory starts only when that much is free (plus headroom), and no sooner
+// than kStartSpacing after the previous start so the node's free-memory figure can catch up.
+// The first task always runs, so an undersized node still makes progress.
+bool LocalExecutor::MemoryAllowsLocked(const Item& item) const {
+    const int64_t need = item.spec.resources().mem_bytes();
+    if (need <= 0 || mem_in_use_ == 0) return true;
+    if (std::chrono::steady_clock::now() - last_start_ < kStartSpacing) return false;
+    const MemInfo m = ReadMemInfo();
+    if (m.available == UINT64_MAX) return true;
+    const auto headroom = std::max<uint64_t>(kMemoryHeadroomFloor, static_cast<uint64_t>(m.total * kMemoryHeadroomShare));
+    return m.available >= static_cast<uint64_t>(need) + headroom;
+}
+
+int64_t LocalExecutor::MemInUse() const {
+    std::lock_guard lock(mu_);
+    return mem_in_use_;
+}
+
 void LocalExecutor::Worker(std::stop_token st) {
     for (;;) {
         std::shared_ptr<Item> item;
         {
             std::unique_lock lock(mu_);
-            if (!cv_.wait(lock, st, [this] {
-                    if (queue_.empty()) return false;
-                    int need = std::max(queue_.front()->spec.resources().cores(), 1);
-                    if (need > core_capacity_) need = core_capacity_;
-                    return cores_in_use_ + need <= core_capacity_;
-                })) {
-                return;
+            // Polled, not only notified: free memory changes without anyone calling notify.
+            while (!cv_.wait_for(lock, st, kMemoryPoll, [this] {
+                if (queue_.empty()) return false;
+                int need = std::max(queue_.front()->spec.resources().cores(), 1);
+                if (need > core_capacity_) need = core_capacity_;
+                return cores_in_use_ + need <= core_capacity_ && MemoryAllowsLocked(*queue_.front());
+            })) {
+                if (st.stop_requested()) return;
             }
             item = queue_.front();
             queue_.pop_front();
@@ -170,6 +220,9 @@ void LocalExecutor::Worker(std::stop_token st) {
             if (need > core_capacity_) need = core_capacity_;
             item->cores_held = need;
             cores_in_use_ += need;
+            item->mem_held = std::max<int64_t>(item->spec.resources().mem_bytes(), 0);
+            mem_in_use_ += item->mem_held;
+            last_start_ = std::chrono::steady_clock::now();
             item->started = true;
         }
         v1::TaskResult result = Run(*item);
@@ -177,6 +230,7 @@ void LocalExecutor::Worker(std::stop_token st) {
         {
             std::lock_guard lock(mu_);
             cores_in_use_ -= item->cores_held;
+            mem_in_use_ -= item->mem_held;
             auto it = items_.find(item->task_id);
             if (it != items_.end() && it->second == item) items_.erase(it);
         }

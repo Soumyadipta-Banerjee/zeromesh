@@ -52,6 +52,21 @@ TEST(DonorPolicyDefaults) {
     ASSERT_TRUE(p.Refuses(Laptop(-1, true), big, 0).has_value());
 }
 
+TEST(DonorPolicyCountsMemoryPromisedToOtherTasks) {
+    DonorPolicy p;
+    auto t = Laptop(-1, true);
+    t.mem_available = 4ull << 30;
+    auto spec = Echo();
+    spec.mutable_resources()->set_mem_bytes(1ll << 30);
+    // 1 GiB fits in 4 GiB when nothing else is promised, and when 2 GiB is, but not when 3.5 GiB is.
+    ASSERT_FALSE(p.Evaluate(t, spec, 0, 0).has_value());
+    ASSERT_FALSE(p.Evaluate(t, spec, 0, 2ll << 30).has_value());
+    auto busy = p.Evaluate(t, spec, 0, 7ll << 29);
+    ASSERT_TRUE(busy.has_value());
+    ASSERT_TRUE(busy->kind == zeromesh::node::RefusalKind::Busy); // passing: the requester retries when memory frees
+    ASSERT_TRUE(busy->reason.find("promised") != std::string::npos);
+}
+
 TEST(DonorPolicyNetwork) {
     auto spec = Echo();
     spec.mutable_policy()->set_allow_network(true);

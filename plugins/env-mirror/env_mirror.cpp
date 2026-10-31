@@ -4,6 +4,7 @@
 #include "plugins/env-mirror/mirror_prefetch.hpp"
 #include "store/store.hpp"
 
+#include <cerrno>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -11,6 +12,8 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+
+#include <sys/stat.h>
 
 namespace zeromesh::mirror {
 
@@ -102,6 +105,12 @@ public:
         fs::path mount_dir = base_scratch / "mirror";
         fs::path cache_dir = base_scratch / "mirror_cache";
         std::error_code ec;
+        // A task killed mid-run leaves a dead FUSE mount here (stat fails with ENOTCONN), and
+        // mounting over it fails. Only a dead mount is cleared: a live one belongs to a running task.
+        struct stat mount_stat {};
+        if (::stat(mount_dir.c_str(), &mount_stat) != 0 && errno == ENOTCONN) {
+            MirrorFuse::FusermountUnmountLazy(mount_dir);
+        }
         fs::create_directories(mount_dir, ec);
         fs::create_directories(cache_dir, ec);
 

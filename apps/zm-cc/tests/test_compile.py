@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from zm_cc.compile import BuildOptions, build_job_spec, link_objects, run_build
-from zm_cc.plan import build_plan, entries_from_command, entries_from_files
+from zm_cc.plan import build_plan, entries_from_command, entries_from_files, make_tasks
 
 NODE = "abcdef1234567890"
 
@@ -159,8 +159,10 @@ def test_success_places_objects_and_records_nodes(tmp_path):
     assert records[0].node == "donor1 (abcdef12)"
     assert (records[0].task, records[2].task) == ("cc_0000", "cc_0001")
     assert records[0].ship_bytes > 0 and total >= 0
-    staged = client.uploads[0]
-    assert "out/.zm-keep" in staged
+    assert len(client.uploads) == 2  # one input root per task (chunk=2 over 3 units), not one shared root
+    assert all("out/.zm-keep" in up for up in client.uploads)
+    assert sorted(len([f for f in up if f.endswith(".i")]) for up in client.uploads) == [1, 2]
+    staged = [f for up in client.uploads for f in up]
     assert sum(f.endswith(".i") for f in staged) == 3  # preprocessed inputs, nothing else
 
 
@@ -278,3 +280,27 @@ def test_link_uses_cxx_driver_when_any_unit_is_cxx(tmp_path):
     assert argv[0] == "/usr/bin/c++"
     assert argv[-2:] == ["-o", str(tmp_path / "prog")] and "-lm" in argv
     assert all(Path(a).name.endswith(".o") for a in argv[1:3])
+
+
+def test_task_memory_estimate_follows_the_largest_unit():
+    from zm_cc.compile import estimate_task_mem
+
+    small, big = 2 * 1024 * 1024, 8 * 1024 * 1024
+    assert estimate_task_mem([small]) < estimate_task_mem([small, big]) == estimate_task_mem([big])
+    assert estimate_task_mem([big]) > 700 * 1024 * 1024  # above the measured cc1plus peak for such a unit
+    assert estimate_task_mem([]) > 0
+
+
+def test_parallel_uploads_give_each_task_its_own_root_and_memory(tmp_path):
+    from zm_cc.compile import _upload_task_inputs
+
+    plan = _plan(tmp_path)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    tasks = make_tasks(list(plan.units), 1)
+    for u in plan.units:
+        (stage / u.stage_name).write_bytes(b"x" * 1000)
+    client = FakeClient()
+    roots, mems = _upload_task_inputs(client, tasks, stage, tmp_path / "tin", 5.0, workers=3)
+    assert sorted(roots) == sorted(t.name for t in tasks) == sorted(mems)
+    assert len(client.uploads) == len(tasks)

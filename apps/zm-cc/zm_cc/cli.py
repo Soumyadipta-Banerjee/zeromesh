@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from zm_cc.compile import BuildOptions, link_objects, run_build
+from zm_cc.compile import BuildOptions, link_objects, retry_failed_local, run_build
 from zm_cc.plan import (
     Plan,
     PlanError,
@@ -87,6 +88,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--link-output", type=Path, default=None, metavar="PATH", help="link the objects into PATH locally")
     p.add_argument("--link-flags", default="", metavar="FLAGS", help="extra flags for the local link")
+    p.add_argument(
+        "--link-ninja",
+        type=Path,
+        default=None,
+        metavar="BUILD_DIR",
+        help="with --compdb: link the meson/ninja targets in BUILD_DIR from these objects (no recompile)",
+    )
+    p.add_argument(
+        "--link-targets", nargs="+", default=[], metavar="TARGET", help="ninja targets for --link-ninja"
+    )
+    p.add_argument(
+        "--no-retry-local",
+        action="store_true",
+        help="do not recompile units whose remote task failed on this machine",
+    )
     p.add_argument("--socket", default=None, help="override the zmd unix socket path")
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit; needs no daemon")
     p.add_argument("-v", "--verbose", action="store_true", help="print each local command")
@@ -115,6 +131,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         args = build_parser().parse_args(own)
     except SystemExit as e:
         return int(e.code or 0)
+
+    # A kill by `timeout` or a CI job must unwind like Ctrl-C so the staging directory (hundreds of MB) is removed.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     chosen = [args.compdb is not None, bool(args.sources), command is not None]
     if sum(chosen) != 1:
@@ -193,6 +212,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
         raise
 
+    if not args.no_retry_local:
+        retry_failed_local(plan, records, opts, progress=prog)
     return _finish(plan, records, total, args, opts, prog)
 
 
@@ -230,6 +251,20 @@ def _finish(
                 rc = 1
             else:
                 print(f"zm-cc: linked {len(objects)} object(s) into {args.link_output}", file=prog)
+
+    if args.link_ninja is not None:
+        if failed or args.compdb is None or not args.link_targets:
+            print("zm-cc: ninja link skipped (needs --compdb, --link-targets and no failed units)", file=prog)
+            rc = 1
+        else:
+            from zm_cc.ninja_link import link_build
+
+            code, err, used = link_build(args.link_ninja, args.compdb, records, args.link_targets)
+            if code != 0:
+                print(f"zm-cc: ninja link failed: {err.strip()[-400:]}", file=prog)
+                rc = 1
+            else:
+                print(f"zm-cc: linked {', '.join(args.link_targets)} from {used} zm-cc object(s)", file=prog)
 
     print(
         f"zm-cc: {len(objects)}/{len(records)} unit(s) compiled; objects are listed in {report_path} "

@@ -77,11 +77,13 @@ struct DonorPolicy {
 
     // nullopt when a task with `spec` is acceptable right now given the node's telemetry and
     // the cores already promised to other tasks; otherwise a human-readable reason.
+    // `mem_promised` is the memory already promised to reserved and running tasks; a burst of offers
+    // that each fit the node's free memory must not add up to more than it has.
     [[nodiscard]] std::optional<std::string> Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                     int cores_in_use) const;
+                                                     int cores_in_use, int64_t mem_promised = 0) const;
     // Refuses with the kind of refusal attached.
     [[nodiscard]] std::optional<Refusal> Evaluate(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                  int cores_in_use) const;
+                                                  int cores_in_use, int64_t mem_promised = 0) const;
 };
 
 // Sticky drain state machine. Call Update with each telemetry sample; it reports whether

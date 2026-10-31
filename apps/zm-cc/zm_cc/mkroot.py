@@ -132,19 +132,26 @@ def collect_strace(driver: str, workdir: Path) -> set[str]:
 
 
 def collect_tools(driver: str, cxx: bool) -> tuple[set[str], set[str]]:
-    """Paths the compiler needs, from ``-print-prog-name`` and ``-v``. Returns (paths, libraries)."""
+    """Paths the compiler needs, from ``-print-prog-name`` and ``-v``. Returns (paths, libraries).
+
+    Include-search dirs are intentionally excluded: preprocessed ``.ii`` files are
+    self-contained, so the donor never opens a header.  Staging them would add
+    hundreds of MB to the mirror root for no benefit.
+    """
     binaries = {driver}
     for prog in _PROGS:
         p = query(driver, f"-print-prog-name={prog}")
         if os.path.isabs(p):
             binaries.add(p)
-    paths = set(binaries) | {"/bin/sh"}
+        elif p:  # bare name (e.g. "as") — resolve via PATH
+            resolved = shutil.which(p)
+            if resolved:
+                binaries.add(resolved)
+    paths: set[str] = set(binaries) | {"/bin/sh"}
     libgcc = query(driver, "-print-libgcc-file-name")
     if os.path.isabs(libgcc):
         paths.add(os.path.dirname(libgcc))
-    if not Path(driver).name.startswith("gfortran"):
-        proc = _run([driver, "-E", "-x", "c++" if cxx else "c", "-v", "-"], stdin="")
-        paths |= set(parse_include_dirs(proc.stderr))
+    # NOTE: include dirs from ``cc -v`` are deliberately NOT added here.
     libs: set[str] = set()
     for b in binaries | {"/bin/sh"}:
         libs |= ldd_closure(b)
