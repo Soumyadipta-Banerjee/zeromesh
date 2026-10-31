@@ -34,3 +34,15 @@ __pycache__/
 cscope.out*
 .claude/
 zm-objs/
+
+# Local tooling, scratch and generated output
+.claude/
+.freebuff/
+.superpowers/
+.cache/
+.repo-map.json
+build*/
+dist/
+reports/
+research_notes/
+zm-objs/

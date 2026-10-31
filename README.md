@@ -9,9 +9,9 @@ runner are built on top as apps.
 ## Status: v1 built, v2 in progress
 
 ZeroMesh uses a **core + plugin architecture**. See the
-[design](docs/superpowers/specs/2026-10-26-core-plugin-architecture-design.md) and
+[design](docs/design/architecture.md) and
 [PLAN.md](PLAN.md) for milestones and what is ticked. Continuing the work? Start with [docs/HANDOFF.md](docs/HANDOFF.md).
-The v2 plan (data moved once, owner comfort, churn-proof completion, each measured against other schedulers) is in
+The v2 plan (data moved once, owner comfort, churn-proof completion) is in
 [ZeroMesh v2 Blueprint.md](ZeroMesh%20v2%20Blueprint.md).
 
 **What works today:**
@@ -73,8 +73,8 @@ proto/      zeromesh.v1 gRPC contracts
 sdk/        Python SDK (sdk/python)
 apps/       zm-render, zm-cfd, zm-cc
 packaging/  Debian and Arch packaging, systemd unit
-scripts/    install helpers, demo scripts, baselines/ (rootless a baseline scheduler for the v2 comparison)
+scripts/    install helpers and demo scripts
 tests/      unit, integration and acceptance tests
 frozen/     parked modules: not built, kept for later milestones
-docs/       design spec and implementation plans
+docs/       design spec (docs/design) and team notes
 ```

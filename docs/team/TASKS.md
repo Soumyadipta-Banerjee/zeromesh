@@ -1,8 +1,7 @@
 # ZeroMesh: team work breakdown (after M3)
 
 - **Date:** 2026-10-26
-- **Design:** [`docs/superpowers/specs/2026-10-26-core-plugin-architecture-design.md`](../superpowers/specs/2026-10-26-core-plugin-architecture-design.md)
-- **Part 1 plan (M0–M3):** [`docs/superpowers/plans/2026-10-26-core-plugin-part1-m0-m3.md`](../superpowers/plans/2026-10-26-core-plugin-part1-m0-m3.md)
+- **Design:** [`docs/design/architecture.md`](../design/architecture.md)
 - **Milestone status:** [`PLAN.md`](../../PLAN.md)
 
 This file splits the work after M3 into six streams that can run in parallel. Each stream
