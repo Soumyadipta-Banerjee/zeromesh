@@ -152,6 +152,18 @@ zm-cc --compdb core-cc.json --out zm-objs/core --chunk 4 --cores 2
 `zm-objs/core/`, and the mapping from object to source is in
 `zm-objs/core/zm-cc-report.json`.
 
+## Troubleshooting
+
+Remote units fail on the donor with `bwrap: loopback: Failed RTM_NEWADDR` (and `zm-cc`
+retries locally unless you pass `--no-retry-local`) when Ubuntu's AppArmor userns
+restriction is on. On every node:
+
+```bash
+sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+Also require bubblewrap ≥ 0.12.0 on the `PATH` (Ubuntu's packaged 0.9 is refused).
+
 ## Limits
 
 - Preprocessing happens locally, so the donor sees only the preprocessed text. Anything

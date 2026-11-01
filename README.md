@@ -49,6 +49,15 @@ Requirements: Linux, a C++20 compiler (GCC ≥ 11 or Clang ≥ 13), Meson + Ninj
 pytest: `python3 -m venv ~/.venvs/zeromesh && ~/.venvs/zeromesh/bin/pip install './sdk/python[dev]'`, then run
 `make test` with that venv's `bin` first on `PATH` (meson records the interpreter when it configures).
 
+On Ubuntu, AppArmor blocks unprivileged user namespaces by default. Without this, donors fail every
+sandboxed task with `bwrap: loopback: Failed RTM_NEWADDR` (shared compiles fall back to local or
+fail with `--no-retry-local`):
+
+```bash
+sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+# persist: copy packaging/sysctl/99-zeromesh-userns.conf to /etc/sysctl.d/
+```
+
 ```bash
 # Arch
 sudo pacman -S meson ninja bubblewrap grpc protobuf libsodium openssl python-grpcio python-grpcio-tools

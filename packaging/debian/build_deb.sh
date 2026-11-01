@@ -27,6 +27,7 @@ fi
 
 mkdir -p "$PKG_DIR/DEBIAN"
 mkdir -p "$PKG_DIR/usr/lib/systemd/user"
+mkdir -p "$PKG_DIR/usr/lib/sysctl.d"
 mkdir -p "$PKG_DIR/usr/share/doc/zeromesh"
 
 cp "$SCRIPT_DIR/control" "$PKG_DIR/DEBIAN/control"
@@ -34,6 +35,7 @@ cp "$SCRIPT_DIR/postinst" "$PKG_DIR/DEBIAN/postinst"
 chmod 0755 "$PKG_DIR/DEBIAN/postinst"
 
 cp "$SCRIPT_DIR/../systemd/zmd.service" "$PKG_DIR/usr/lib/systemd/user/zmd.service"
+cp "$SCRIPT_DIR/../sysctl/99-zeromesh-userns.conf" "$PKG_DIR/usr/lib/sysctl.d/99-zeromesh-userns.conf"
 cp "$REPO_ROOT/README.md" "$PKG_DIR/usr/share/doc/zeromesh/README.md"
 
 OUTPUT_DEB="$REPO_ROOT/zeromesh_0.1.0_amd64.deb"
