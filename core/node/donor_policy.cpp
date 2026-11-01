@@ -142,6 +142,8 @@ DonorPolicy DonorPolicy::Load(const std::filesystem::path& config_dir) {
 
 int DonorPolicy::CoreLimit(int cores_total) const {
     if (max_cores >= 0) return max_cores;
+    // Same idea as LocalExecutor slots: keep a spare core only when the machine has cores to spare.
+    if (cores_total <= 2) return std::max(cores_total, 0);
     return std::max(cores_total - 1, 0);
 }
 

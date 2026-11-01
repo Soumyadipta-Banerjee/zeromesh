@@ -15,11 +15,22 @@ def test_dry_run_compdb_prints_plan_and_exits_zero(capsys):
 
 
 def test_dry_run_explicit_files(capsys):
-    rc = main(["--dry-run", "--cc", "g++", "--flags", "-O2 -Iinc", "a.cpp", "b.cpp"])
+    rc = main(
+        ["--dry-run", "--mode", "distcc", "--cc", "g++", "--flags", "-O2 -Iinc", "a.cpp", "b.cpp"]
+    )
     out = capsys.readouterr().out
     assert rc == 0
     assert "remote  a.cpp" in out and "remote  b.cpp" in out
     assert "-x c++-cpp-output -c" in out
+
+
+def test_dry_run_tree_mode_shows_full_remote_c(capsys):
+    rc = main(["--dry-run", "--mode", "tree", "--cc", "g++", "--flags", "-O2 -Iinc", "a.cpp", "b.cpp"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "mode=tree" in out
+    assert "-x c++-cpp-output" not in out
+    assert " -c a.cpp " in out or " -c a.cpp\n" in out or "-c a.cpp -o" in out
 
 
 def test_dry_run_command_form_honours_o_when_out_not_given(tmp_path, capsys):
@@ -48,7 +59,7 @@ def test_usage_errors_return_2(tmp_path):
     assert main([]) == 2  # no input form at all
     assert main(["--compdb", str(FIXTURE), "a.c"]) == 2  # two input forms
     assert main(["--dry-run", "--"]) == 2  # nothing after --
-    assert main(["--dry-run", "--chunk", "0", "--", "cc", "-c", "a.c"]) == 2
+    assert main(["--dry-run", "--chunk", "-1", "--", "cc", "-c", "a.c"]) == 2
     assert main(["--dry-run", "--env", "mirror", "--", "cc", "-c", "a.c"]) == 2  # mirror needs --mirror
     assert main(["--dry-run", "--compdb", str(tmp_path / "missing.json")]) == 2
 

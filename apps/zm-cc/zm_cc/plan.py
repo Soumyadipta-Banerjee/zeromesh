@@ -82,6 +82,34 @@ class Unit:
         assert self.source is not None
         return self.command.remote_argv(self.source, self.driver_remote, self.stage_name, self.object_name)
 
+    def tree_remote_argv(self, root: Path) -> list[str]:
+        """Full remote ``-c`` against an uploaded source tree rooted at ``root``."""
+        assert self.source is not None
+        return self.command.tree_remote_argv(
+            self.source,
+            self.driver_remote,
+            self.object_name,
+            root=str(root),
+            cwd=str(self.directory),
+        )
+
+    def working_dir_under(self, root: Path) -> str:
+        """Task working_dir relative to the uploaded tree root.
+
+        Raises ``PlanError`` when ``directory`` is outside ``root`` (donors reject ``..``).
+        """
+        root_r = root.resolve()
+        dir_r = self.directory.resolve()
+        try:
+            rel = os.path.relpath(dir_r, root_r)
+        except ValueError as e:  # different drives on Windows
+            raise PlanError(f"unit cwd {dir_r} is outside --root {root_r}") from e
+        if rel == ".":
+            return "."
+        if rel.startswith(".." + os.sep) or rel == "..":
+            raise PlanError(f"unit cwd {dir_r} is outside --root {root_r}")
+        return rel
+
     def natural_object(self) -> Optional[Path]:
         """Where the local compiler writes the object if we do not redirect it."""
         if self.path is None:
@@ -113,6 +141,32 @@ class RemoteTask:
     name: str
     units: tuple[Unit, ...]
     argv: tuple[str, ...]
+    working_dir: str = "."
+
+
+def infer_workspace_root(units: Sequence[Unit], explicit: Optional[Path] = None) -> Path:
+    """Directory uploaded as the shared input tree for ``--mode tree``.
+
+    Defaults to the common ancestor of every remote unit's directory (and source path).
+    """
+    if explicit is not None:
+        root = explicit.expanduser().resolve()
+        if not root.is_dir():
+            raise PlanError(f"--root {root} is not a directory")
+        return root
+    remote = [u for u in units if u.remote and u.directory is not None]
+    if not remote:
+        raise PlanError("no remote units to infer --root from; pass --root PATH")
+    paths = [u.directory.resolve() for u in remote]
+    for u in remote:
+        if u.path is not None:
+            paths.append(u.path.resolve().parent)
+    try:
+        return Path(os.path.commonpath([str(p) for p in paths]))
+    except ValueError as e:
+        raise PlanError(
+            "remote units do not share a common directory; pass --root PATH for --mode tree"
+        ) from e
 
 
 def resolve_local(driver: str, which: Which = shutil.which) -> str:
@@ -227,12 +281,48 @@ def build_plan(
     return Plan(units=tuple(units), out_dir=out_dir)
 
 
-def make_tasks(units: Sequence[Unit], chunk: int) -> list[RemoteTask]:
+def make_tasks(
+    units: Sequence[Unit],
+    chunk: int,
+    *,
+    mode: str = "distcc",
+    root: Optional[Path] = None,
+) -> list[RemoteTask]:
     """Group remote units ``chunk`` at a time. Each group becomes one task."""
     if chunk < 1:
         raise PlanError(f"--chunk must be >= 1, got {chunk}")
+    if mode not in ("distcc", "tree"):
+        raise PlanError(f"unknown mode {mode!r}")
     remote = [u for u in units if u.remote]
     tasks: list[RemoteTask] = []
+    # Tree mode: never mix different working directories in one chunk (cwd is per-task).
+    if mode == "tree":
+        if root is None:
+            raise PlanError("make_tasks(mode='tree') needs root")
+        groups: list[list[Unit]] = []
+        cur: list[Unit] = []
+        cur_dir: Optional[Path] = None
+        for u in remote:
+            if cur and (u.directory != cur_dir or len(cur) >= chunk):
+                groups.append(cur)
+                cur = []
+            cur.append(u)
+            cur_dir = u.directory
+        if cur:
+            groups.append(cur)
+        for group_list in groups:
+            group = tuple(group_list)
+            wd = group[0].working_dir_under(root)
+            if len(group) == 1:
+                argv = tuple(group[0].tree_remote_argv(root))
+            else:
+                script = " && ".join(shlex.join(u.tree_remote_argv(root)) for u in group)
+                argv = ("/bin/sh", "-c", script)
+            tasks.append(
+                RemoteTask(name=f"cc_{len(tasks):04d}", units=group, argv=argv, working_dir=wd)
+            )
+        return tasks
+
     for start in range(0, len(remote), chunk):
         group = tuple(remote[start : start + chunk])
         if len(group) == 1:
@@ -245,19 +335,33 @@ def make_tasks(units: Sequence[Unit], chunk: int) -> list[RemoteTask]:
     return tasks
 
 
-def describe(plan: Plan, tasks: Sequence[RemoteTask], *, env: str, cores: int) -> str:
+def describe(
+    plan: Plan,
+    tasks: Sequence[RemoteTask],
+    *,
+    env: str,
+    cores: int,
+    mode: str = "distcc",
+    root: Optional[Path] = None,
+) -> str:
     """Human-readable plan for --dry-run and --verbose."""
     lines = [
         f"zm-cc plan: {len(plan.units)} unit(s): {len(plan.remote_units)} remote in "
-        f"{len(tasks)} task(s) (env={env}, cores={cores}), {len(plan.local_units)} local"
+        f"{len(tasks)} task(s) (mode={mode}, env={env}, cores={cores}), {len(plan.local_units)} local"
     ]
+    if mode == "tree" and root is not None:
+        lines.append(f"  tree root: {root}")
     for u in plan.units:
         target = str(u.object_path) if u.object_path is not None else "-"
         if u.remote:
             lines.append(f"  remote  {u.label}  ->  {target}")
-            lines.append(f"      preprocess: {shlex.join(u.preprocess_argv('<stage>/' + u.stage_name))}")
-            lines.append(f"      cwd:        {u.directory}")
-            lines.append(f"      compile:    {shlex.join(u.remote_argv())}")
+            if mode == "tree" and root is not None:
+                lines.append(f"      cwd:        {u.working_dir_under(root)}  (under {root})")
+                lines.append(f"      compile:    {shlex.join(u.tree_remote_argv(root))}")
+            else:
+                lines.append(f"      preprocess: {shlex.join(u.preprocess_argv('<stage>/' + u.stage_name))}")
+                lines.append(f"      cwd:        {u.directory}")
+                lines.append(f"      compile:    {shlex.join(u.remote_argv())}")
         else:
             lines.append(f"  local   {u.label}  ->  {target}  ({u.reason})")
             lines.append(f"      run:        {shlex.join(u.local_argv())}")
@@ -277,6 +381,7 @@ __all__ = [
     "describe",
     "entries_from_command",
     "entries_from_files",
+    "infer_workspace_root",
     "load_compdb",
     "make_tasks",
     "resolve_local",

@@ -166,6 +166,39 @@ def test_fortran_remote_compile_has_no_x_flag():
     assert "-cpp" in cmd.preprocess_argv(src, "gfortran", "/s/k.f90")
 
 
+def test_tree_remote_argv_keeps_preproc_and_rewrites_project_includes(tmp_path):
+    root = tmp_path / "proj"
+    src_dir = root / "src"
+    inc = root / "include"
+    src_dir.mkdir(parents=True)
+    inc.mkdir()
+    (src_dir / "a.c").write_text("int x;\n", encoding="utf-8")
+    cmd = parse(["cc", "-O2", "-I../include", "-I/usr/include", "-DFOO=1", "-c", "a.c", "-o", "a.o"])
+    src = cmd.sources[0]
+    argv = cmd.tree_remote_argv(
+        src, "/usr/bin/cc", "a.hash.o", root=str(root), cwd=str(src_dir)
+    )
+    assert argv[0] == "/usr/bin/cc"
+    assert "-O2" in argv and "-DFOO=1" in argv
+    assert "-I../include" in argv  # still relative to cwd under root
+    assert "-I/usr/include" in argv  # system path untouched
+    assert argv[-4:] == ["-c", "a.c", "-o", "out/a.hash.o"]
+    assert "-MD" not in argv and "a.o" not in argv  # driver / original -o dropped
+
+
+def test_tree_remote_argv_rewrites_absolute_paths_under_root(tmp_path):
+    root = tmp_path / "proj"
+    (root / "inc").mkdir(parents=True)
+    (root / "a.c").write_text("int x;\n", encoding="utf-8")
+    abs_inc = str((root / "inc").resolve())
+    abs_src = str((root / "a.c").resolve())
+    cmd = parse(["cc", f"-I{abs_inc}", "-c", abs_src, "-o", "a.o"])
+    src = cmd.sources[0]
+    argv = cmd.tree_remote_argv(src, "/usr/bin/cc", "a.hash.o", root=str(root.resolve()), cwd=str(root.resolve()))
+    assert f"-Iinc" in argv or "-I./inc" in argv
+    assert argv[-3] == "a.c"
+
+
 def test_multi_source_command_keeps_order_and_isolates_each_source():
     cmd = parse(["cc", "-O2", "-x", "c++", "a.c", "-c", "b.cc", "-Idir"])
     a, b = cmd.sources

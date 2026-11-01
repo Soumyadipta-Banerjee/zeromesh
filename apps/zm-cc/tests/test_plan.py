@@ -161,6 +161,40 @@ def test_make_tasks_chunk_one_is_plain_argv(tmp_path):
     assert task.argv == tuple(plan.units[0].remote_argv())
 
 
+def test_make_tasks_tree_mode_sets_working_dir_and_full_compile(tmp_path):
+    from zm_cc.plan import infer_workspace_root
+
+    sub = tmp_path / "src"
+    sub.mkdir()
+    (sub / "a.c").write_text("int a;\n", encoding="utf-8")
+    (sub / "b.c").write_text("int b;\n", encoding="utf-8")
+    entries = entries_from_files("cc", "-O2 -I.", ["a.c", "b.c"], sub)
+    plan = build_plan(entries, tmp_path / "o", which=fake_which)
+    root = infer_workspace_root(plan.remote_units, tmp_path)
+    tasks = make_tasks(plan.remote_units, chunk=2, mode="tree", root=root)
+    assert len(tasks) == 1
+    assert tasks[0].working_dir == "src"
+    assert "-E" not in " ".join(tasks[0].argv)
+    assert any(a.endswith("a.c") or a == "a.c" for a in tasks[0].argv) or "a.c" in tasks[0].argv[2]
+    joined = " ".join(tasks[0].argv)
+    assert "-c" in joined and "out/" in joined
+
+
+def test_infer_workspace_root_explicit_and_common_ancestor(tmp_path):
+    from zm_cc.plan import infer_workspace_root
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "x.c").write_text("int x;\n", encoding="utf-8")
+    (b / "y.c").write_text("int y;\n", encoding="utf-8")
+    entries = entries_from_files("cc", "", ["x.c"], a) + entries_from_files("cc", "", ["y.c"], b)
+    plan = build_plan(entries, tmp_path / "o", which=fake_which)
+    assert infer_workspace_root(plan.remote_units) == tmp_path.resolve()
+    assert infer_workspace_root(plan.remote_units, tmp_path) == tmp_path.resolve()
+
+
 def test_make_tasks_rejects_bad_chunk(tmp_path):
     plan = build_plan(entries_from_files("cc", "", ["a.c"], tmp_path), tmp_path / "o", which=fake_which)
     with pytest.raises(PlanError):

@@ -157,11 +157,12 @@ namespace {
 constexpr std::chrono::milliseconds kMemoryPoll{100};
 // Free memory left after a task starts. A compiler's footprint grows over its first seconds, so a
 // burst of starts that each fit the free memory *now* can still add up to more than the node has.
-// The floor is a fraction of total memory because oom killers such as earlyoom act when free memory
-// falls below a share of it (10% by default); staying above that line is the point of the gate.
-constexpr uint64_t kMemoryHeadroomFloor = 768ull << 20;
+// Headroom tracks a share of RAM (earlyoom-style ~10–15%). A fixed 768MiB *floor* serialized
+// donors on ≤2GiB nodes; keep a modest floor and cap so large machines still reserve enough.
+constexpr uint64_t kMemoryHeadroomFloor = 128ull << 20;
+constexpr uint64_t kMemoryHeadroomCeil = 768ull << 20;
 constexpr double kMemoryHeadroomShare = 0.15;
-constexpr std::chrono::milliseconds kStartSpacing{150};
+constexpr std::chrono::milliseconds kStartSpacing{50};
 
 struct MemInfo {
     uint64_t total{UINT64_MAX};
@@ -191,7 +192,9 @@ bool LocalExecutor::MemoryAllowsLocked(const Item& item) const {
     if (std::chrono::steady_clock::now() - last_start_ < kStartSpacing) return false;
     const MemInfo m = ReadMemInfo();
     if (m.available == UINT64_MAX) return true;
-    const auto headroom = std::max<uint64_t>(kMemoryHeadroomFloor, static_cast<uint64_t>(m.total * kMemoryHeadroomShare));
+    uint64_t headroom = static_cast<uint64_t>(m.total * kMemoryHeadroomShare);
+    if (headroom < kMemoryHeadroomFloor) headroom = kMemoryHeadroomFloor;
+    if (headroom > kMemoryHeadroomCeil) headroom = kMemoryHeadroomCeil;
     return m.available >= static_cast<uint64_t>(need) + headroom;
 }
 

@@ -304,3 +304,53 @@ def test_parallel_uploads_give_each_task_its_own_root_and_memory(tmp_path):
     roots, mems = _upload_task_inputs(client, tasks, stage, tmp_path / "tin", 5.0, workers=3)
     assert sorted(roots) == sorted(t.name for t in tasks) == sorted(mems)
     assert len(client.uploads) == len(tasks)
+
+
+def test_tree_mode_uploads_once_skips_preprocess_and_places_objects(tmp_path):
+    (tmp_path / "inc").mkdir()
+    (tmp_path / "a.c").write_text("int a;\n", encoding="utf-8")
+    (tmp_path / "b.c").write_text("int b;\n", encoding="utf-8")
+    plan = _plan(tmp_path, ("a.c", "b.c"), flags="-O2 -Iinc")
+    client = FakeClient()
+    runner = FakeRunner()
+    records, _ = run_build(
+        plan,
+        _opts(tmp_path, mode="tree", tree_root=tmp_path, chunk=1),
+        client,
+        common_pb2=PB,
+        runner=runner,
+        progress=io.StringIO(),
+    )
+    assert [r.status for r in records] == ["ok", "ok"]
+    assert len(client.uploads) == 1  # one shared tree, not per-task .i uploads
+    assert any(f.endswith("a.c") for f in client.uploads[0])
+    assert any(f.endswith("out/.zm-keep") for f in client.uploads[0])
+    assert not any("-E" in " ".join(argv) for argv, _ in runner.calls)
+    job = client.jobs[0]
+    assert all(getattr(t, "working_dir", None) in (".",) for t in job.spec.tasks)
+    assert all("-Iinc" in " ".join(t.argv) or "-I./inc" in " ".join(t.argv) for t in job.spec.tasks)
+    assert all(Path(r.output).is_file() for r in records)
+
+
+def test_tree_mode_subdir_working_dir(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.c").write_text("int a;\n", encoding="utf-8")
+    (src / "stale.o").write_bytes(b"old")
+    (tmp_path / "libfoo.a").write_bytes(b"ar")
+    entries = entries_from_files("cc", "-O2", ["a.c"], src)
+    plan = build_plan(entries, tmp_path / "objs", which=fake_which)
+    client = FakeClient()
+    records, _ = run_build(
+        plan,
+        _opts(tmp_path, mode="tree", tree_root=tmp_path),
+        client,
+        common_pb2=PB,
+        runner=FakeRunner(),
+        progress=io.StringIO(),
+    )
+    assert records[0].status == "ok"
+    assert client.jobs[0].spec.tasks[0].working_dir == "src"
+    assert any(f.startswith("src/") and f.endswith("a.c") for f in client.uploads[0])
+    assert "src/out/.zm-keep" in client.uploads[0]
+    assert not any(f.endswith(".o") or f.endswith(".a") for f in client.uploads[0] if "out/" not in f)

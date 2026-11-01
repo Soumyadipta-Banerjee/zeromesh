@@ -23,6 +23,8 @@
 #include <set>
 #include <sstream>
 
+// MaterializeCached uses a process-wide lock for first-fill of input-cache/<digest>.
+
 namespace zeromesh::exec {
 
 namespace {
@@ -140,6 +142,66 @@ void ForceRemove(const fs::path& dir) {
         }
     }
     fs::remove_all(dir, ec);
+}
+
+// Clone a materialized input tree with hard links (same CAS inodes). Used so many tasks that
+// share one input_root digest do not re-walk the blob store — the ZeroMesh win over per-TU distcc.
+bool HardlinkCloneTree(const fs::path& src, const fs::path& dst) {
+    std::error_code ec;
+    fs::create_directories(dst, ec);
+    if (ec) return false;
+    for (auto it = fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path rel = fs::relative(it->path(), src, ec);
+        if (ec) return false;
+        const fs::path out = dst / rel;
+        if (it->is_directory(ec)) {
+            fs::create_directories(out, ec);
+            if (ec) return false;
+        } else if (it->is_symlink(ec)) {
+            auto target = fs::read_symlink(it->path(), ec);
+            if (ec) return false;
+            fs::create_symlink(target, out, ec);
+            if (ec) return false;
+        } else if (it->is_regular_file(ec)) {
+            fs::create_directories(out.parent_path(), ec);
+            fs::create_hard_link(it->path(), out, ec);
+            if (ec) return false;
+        }
+    }
+    return !ec;
+}
+
+// Populate work/ from a per-digest cache under scratch_base/input-cache/<hash>.
+bool MaterializeCached(store::MerkleBuilder& merkle, const store::Digest& root, const fs::path& scratch_base,
+                       const fs::path& work) {
+    if (root.hash.empty()) return true;
+    static std::mutex cache_mu;
+    const fs::path cache_root = scratch_base / "input-cache";
+    const fs::path cache_dir = cache_root / root.hash;
+    std::error_code ec;
+    if (!fs::exists(cache_dir, ec)) {
+        std::lock_guard lock(cache_mu);
+        if (!fs::exists(cache_dir, ec)) {
+            fs::create_directories(cache_root, ec);
+            const fs::path tmp = cache_root / (root.hash + ".tmp-" + RandomHex(4));
+            ForceRemove(tmp);
+            if (!merkle.MaterializeTree(root, tmp)) {
+                ForceRemove(tmp);
+                return false;
+            }
+            fs::rename(tmp, cache_dir, ec);
+            if (ec) {
+                // Lost the race to another task; drop our tmp and use whichever cache won.
+                ForceRemove(tmp);
+                if (!fs::exists(cache_dir)) return false;
+            }
+        }
+    }
+    if (HardlinkCloneTree(cache_dir, work)) return true;
+    ForceRemove(work);
+    fs::create_directories(work, ec);
+    return merkle.MaterializeTree(root, work);
 }
 
 std::string Trim(std::string s) {
@@ -425,7 +487,7 @@ RunResult SandboxRunner::Run(const RunSpec& spec, const LogSink& sink, std::stop
     const fs::path work = scratch / "work";
     fs::create_directories(work);
 
-    if (!spec.input_root.hash.empty() && !merkle_->MaterializeTree(spec.input_root, work)) {
+    if (!spec.input_root.hash.empty() && !MaterializeCached(*merkle_, spec.input_root, scratch_base_, work)) {
         result.error = "failed to materialize inputs";
         ForceRemove(scratch);
         return result;

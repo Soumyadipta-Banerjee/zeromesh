@@ -177,15 +177,35 @@ bool MerkleBuilder::MaterializeDirectoryRecursive(const Digest& dir_digest, cons
             return false;
         }
         std::filesystem::path file_path = current_path / file.name;
-        std::filesystem::copy_file(src, file_path, std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) return false;
-        auto mode = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
-                    std::filesystem::perms::group_read | std::filesystem::perms::others_read;
-        if (file.is_executable) {
-            mode |= std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
-                    std::filesystem::perms::others_exec;
+        // Prefer a hard link into the workdir (distcc-like cheap materialize). Never chmod a
+        // hard-linked CAS blob — that would mutate the store. If the exec bit disagrees, copy.
+        bool linked = false;
+        std::filesystem::create_hard_link(src, file_path, ec);
+        if (!ec) {
+            linked = true;
+            const auto st = std::filesystem::status(file_path, ec);
+            const bool is_exec =
+                !ec && ((st.permissions() & std::filesystem::perms::owner_exec) !=
+                        std::filesystem::perms::none);
+            if (is_exec != file.is_executable) {
+                std::filesystem::remove(file_path, ec);
+                linked = false;
+            }
+        } else {
+            ec.clear();
         }
-        std::filesystem::permissions(file_path, mode, std::filesystem::perm_options::replace, ec);
+        if (!linked) {
+            std::filesystem::copy_file(src, file_path, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) return false;
+            auto mode = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+                        std::filesystem::perms::group_read | std::filesystem::perms::others_read;
+            if (file.is_executable) {
+                mode |= std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
+                        std::filesystem::perms::others_exec;
+            }
+            std::filesystem::permissions(file_path, mode, std::filesystem::perm_options::replace, ec);
+            if (ec) return false;
+        }
     }
 
     for (const auto& dir : manifest->directories) {

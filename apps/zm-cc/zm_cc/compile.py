@@ -1,14 +1,13 @@
-"""Run a Plan: preprocess remote units locally, compile them on the mesh, place the objects.
+"""Run a Plan: compile remote units on the mesh, place the objects.
 
-Flow for one build:
+Two modes:
 
-  1. ``cc -E`` every remote unit into a staging dir (in parallel, ``--jobs``).
-  2. Upload the staging dir once and submit one job. Each task is ``--chunk`` units.
-  3. Passthrough (local) units run here meanwhile.
-  4. Fetch each task's ``out/`` and move every object to its place in ``--out``.
+  * ``distcc`` (default): ``cc -E`` locally, ship preprocessed inputs, remote codegen.
+  * ``tree``: upload the source tree once, remote full ``cc -c`` (no local ``-E``).
 
-An object is good when it exists and is non-empty. A task can fail after some of
-its units have compiled, so placement is checked per unit, not per task.
+Passthrough (local) units always run here. An object is good when it exists and is
+non-empty. A task can fail after some of its units have compiled, so placement is
+checked per unit, not per task.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, TextIO
+from typing import Any, Callable, Optional, Sequence, TextIO
 
 from zm_cc.plan import Plan, RemoteTask, Unit, make_tasks
 from zm_cc.report import UnitRecord, explain, peer_names, task_failure, who
@@ -56,6 +55,9 @@ class BuildOptions:
     keep_going: bool = False
     submit_timeout: float = 1800.0
     verbose: bool = False
+    # distcc: preprocess locally, ship .i; tree: upload source tree, full remote -c
+    mode: str = "distcc"
+    tree_root: Optional[Path] = None
 
 
 def build_job_spec(
@@ -84,6 +86,7 @@ def build_job_spec(
                 name=t.name,
                 argv=list(t.argv),
                 input_root=input_roots[t.name] if input_roots is not None else input_root,
+                working_dir=t.working_dir or ".",
                 outputs=["out/"],
                 env_spec=common_pb2.EnvSpec(name=opts.env, params=params),
                 resources=common_pb2.Resources(
@@ -97,14 +100,21 @@ def build_job_spec(
 
 
 # cc1plus peaks near 700 MB on an 8 MB preprocessed protobuf/gRPC unit and near 250 MB on a 2 MB one.
-# The estimate is what a donor reserves for the task, so it is kept above those measurements.
-_MEM_BASE = 250 * 1024 * 1024
-_MEM_PER_INPUT_BYTE = 100
+# The estimate is what a donor reserves for the task. Keep large-TU headroom, but do not reserve
+# 250MB+ for tiny Redis-sized .i files — that serialized 1.5GiB VMs to ~1 task/node.
+_MEM_BASE = 96 * 1024 * 1024
+_MEM_PER_INPUT_BYTE = 80
 
 
 def estimate_task_mem(sizes: list[int]) -> int:
     """Memory to reserve for a task whose units compile one after another: the largest unit's."""
     return _MEM_BASE + _MEM_PER_INPUT_BYTE * max(sizes, default=0)
+
+
+def _wave_task_count(opts: BuildOptions) -> int:
+    """How many remote tasks to bundle per submitted job while preprocessing continues."""
+    # Fill a 2-node × 2-slot mesh quickly without waiting for the whole compile_commands set.
+    return max(4, opts.jobs, opts.chunk)
 
 
 def _upload_task_inputs(
@@ -169,6 +179,64 @@ def _stage_unit(u: Unit, stage: Path, runner: Runner) -> tuple[int, str]:
     if not dst.is_file() or dst.stat().st_size == 0:
         return 0, "preprocessor wrote nothing"
     return dst.stat().st_size, ""
+
+
+_SKIP_TREE_DIRS = frozenset({".git", ".hg", ".svn", "__pycache__", ".cache", "zm-objs"})
+_SKIP_TREE_SUFFIXES = (
+    ".o",
+    ".a",
+    ".so",
+    ".dylib",
+    ".dll",
+    ".pyc",
+    ".exe",
+    ".d",
+    ".gcda",
+    ".gcno",
+)
+
+
+def _skip_tree_file(name: str) -> bool:
+    """Build products and debug leftovers that remote ``-c`` does not need."""
+    lower = name.lower()
+    return lower.endswith(_SKIP_TREE_SUFFIXES) or lower.startswith("zm-objs")
+
+
+def _stage_tree_root(root: Path, dest: Path, working_dirs: Sequence[str] = (".",)) -> Path:
+    """Hardlink/copy ``root`` into ``dest`` and ensure ``out/`` under each task working_dir.
+
+    Donors materialize the upload at ``/work`` and ``cd`` into ``working_dir``; outputs are
+    collected from ``working_dir/out/``. An empty ``out/.zm-keep`` makes the directory survive CAS.
+    Object files and archives are skipped so a previously built tree stays small to ship.
+    """
+    root = root.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_TREE_DIRS]
+        rel = os.path.relpath(dirpath, root)
+        out_dir = dest if rel == "." else dest / rel
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name in filenames:
+            if _skip_tree_file(name):
+                continue
+            src = Path(dirpath) / name
+            dst = out_dir / name
+            if dst.exists() or not src.is_file():
+                continue
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
+    seen: set[str] = set()
+    for wd in working_dirs:
+        key = "." if wd in ("", ".") else wd
+        if key in seen:
+            continue
+        seen.add(key)
+        keep = (dest if key == "." else dest / key) / "out" / ".zm-keep"
+        keep.parent.mkdir(parents=True, exist_ok=True)
+        keep.touch()
+    return dest
 
 
 def _fresh(path: Path, before: Optional[int]) -> bool:
@@ -298,100 +366,266 @@ def run_build(
     stop = threading.Event()
     names = peer_names(client) if client is not None and plan.remote_units else {}
     remote = plan.remote_units
+    tree_mode = opts.mode == "tree"
     if opts.verbose:
         for u in remote:
-            print(f"preprocess {shlex.join(u.preprocess_argv('<stage>/' + u.stage_name))}", file=prog, flush=True)
-
-    with tempfile.TemporaryDirectory(prefix="zm-cc-") as td:
-        stage = Path(td) / "in"
-        (stage / "out").mkdir(parents=True)
-        (stage / "out" / ".zm-keep").touch()  # an empty out/ must survive the upload
-
-        # --- preprocess with live progress ---
-        n_total = len(remote)
-        n_done = 0
-        n_failed = 0
-        pp_t0 = time.monotonic()
-        print(f"zm-cc: preprocessing {n_total} unit(s) with -j{opts.jobs} ...", file=prog, flush=True)
-
-        staged: list[tuple[int, str]] = [None] * n_total  # type: ignore[list-item]
-        futures_map: dict[Any, int] = {}
-        with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
-            for i, u in enumerate(remote):
-                futures_map[pool.submit(_stage_unit, u, stage, runner)] = i
-            for fut in as_completed(futures_map):
-                i = futures_map[fut]
-                staged[i] = fut.result()
-                n_done += 1
-                size, err = staged[i]
-                if err:
-                    n_failed += 1
-                label = remote[i].label
+            if tree_mode and opts.tree_root is not None:
                 print(
-                    f"  preprocess [{n_done}/{n_total}]{'  FAIL' if err else '  ok  '}"
-                    f"  {size // 1024:>6} KB  {label}",
-                    file=prog, flush=True,
+                    f"tree-compile {shlex.join(u.tree_remote_argv(opts.tree_root))}",
+                    file=prog,
+                    flush=True,
+                )
+            else:
+                print(
+                    f"preprocess {shlex.join(u.preprocess_argv('<stage>/' + u.stage_name))}",
+                    file=prog,
+                    flush=True,
                 )
 
-        pp_secs = time.monotonic() - pp_t0
-        pp_mb = sum(s for s, _ in staged if s) / 1_048_576
-        print(
-            f"zm-cc: preprocess done in {pp_secs:.1f}s  —  {pp_mb:.1f} MB staged"
-            f"  ({n_failed} failed)",
-            file=prog, flush=True,
-        )
-
-        ready: list[Unit] = []
-        for u, (size, err) in zip(remote, staged):
-            rec = records[u.index]
-            if err:
-                rec.status = "failed"
-                rec.error = explain(err)
-                if not opts.keep_going:
-                    stop.set()
-            else:
-                rec.ship_bytes = size
-                ready.append(u)
-
+    with tempfile.TemporaryDirectory(prefix="zm-cc-") as td:
         tasks: list[RemoteTask] = []
-        if stop.is_set():
-            for u in ready:
-                records[u.index].status = "skipped"
-        elif ready:
-            tasks = make_tasks(ready, opts.chunk)
-
-        job: Any = None
+        job_batches: list[tuple[Any, list[RemoteTask]]] = []  # (job, its tasks)
         results: dict[str, Any] = {}
-        if tasks:
+
+        if tree_mode:
+            if opts.tree_root is None:
+                raise RuntimeError("tree mode needs BuildOptions.tree_root")
+            root = opts.tree_root.resolve()
+            ready = []
+            for u in remote:
+                rec = records[u.index]
+                if u.path is None or not u.path.is_file():
+                    rec.status = "failed"
+                    rec.error = explain("source file missing")
+                    if not opts.keep_going:
+                        stop.set()
+                    continue
+                rec.ship_bytes = u.path.stat().st_size
+                ready.append(u)
+            if stop.is_set():
+                for u in ready:
+                    records[u.index].status = "skipped"
+                ready = []
+            if ready:
+                tasks = make_tasks(ready, opts.chunk, mode="tree", root=root)
+            if tasks:
+                if client is None or common_pb2 is None:
+                    raise RuntimeError("remote units need a daemon client")
+                wds = [t.working_dir for t in tasks]
+                staged_root = _stage_tree_root(root, Path(td) / "tree", wds)
+                tree_mb = sum(f.stat().st_size for f in staged_root.rglob("*") if f.is_file()) / 1_048_576
+                print(
+                    f"zm-cc: tree mode — uploading workspace {root} once ({tree_mb:.1f} MB, "
+                    f"no local -E) ...",
+                    file=prog,
+                    flush=True,
+                )
+                up_t0 = time.monotonic()
+                shared_root = client.upload(staged_root, timeout=opts.submit_timeout)
+                up_secs = time.monotonic() - up_t0
+                print(
+                    f"zm-cc: upload done in {up_secs:.1f}s — submitting {len(tasks)} task(s) "
+                    f"(shared tree digest) ...",
+                    file=prog,
+                    flush=True,
+                )
+                mems = {
+                    t.name: estimate_task_mem(
+                        [u.path.stat().st_size for u in t.units if u.path is not None]
+                    )
+                    for t in tasks
+                }
+                spec = build_job_spec(
+                    input_root=shared_root,
+                    mem_bytes=mems,
+                    tasks=tasks,
+                    opts=opts,
+                    common_pb2=common_pb2,
+                )
+                job = client.submit(spec, timeout=opts.submit_timeout)
+                job_batches.append((job, tasks))
+                print(f"zm-cc: submitted job {job.job_id} ({len(tasks)} task(s))", file=prog, flush=True)
+        else:
+            # distcc mode: preprocess, and submit waves of tasks as soon as each wave is ready
+            # so donors compile while later units are still being preprocessed (classic distcc shape).
+            stage = Path(td) / "in"
+            (stage / "out").mkdir(parents=True)
+            (stage / "out" / ".zm-keep").touch()
             if client is None or common_pb2 is None:
-                raise RuntimeError("remote units need a daemon client")
-            stage_size_mb = sum(
-                f.stat().st_size for f in stage.rglob("*") if f.is_file()
+                if remote:
+                    raise RuntimeError("remote units need a daemon client")
+
+            n_total = len(remote)
+            n_done = 0
+            n_failed = 0
+            pp_t0 = time.monotonic()
+            wave_n = _wave_task_count(opts)
+            print(
+                f"zm-cc: preprocessing {n_total} unit(s) with -j{opts.jobs} "
+                f"(pipeline: submit every {wave_n} task(s)) ...",
+                file=prog,
+                flush=True,
+            )
+
+            # Preprocess concurrently, but form tasks in *plan order* so cc_0000 is always the
+            # first remote units (tests and reports stay stable). Submit a wave as soon as the
+            # next plan-ordered chunk is ready — donors run while later -E continues.
+            staged_ok: list[Optional[Unit]] = [None] * n_total
+            staged_done = [False] * n_total
+            wave: list[RemoteTask] = []
+            task_seq = 0
+            next_emit = 0  # next index into `remote` to consume into tasks
+            tin = Path(td) / "tin"
+
+            def _append_task(group: list[Unit]) -> None:
+                nonlocal task_seq
+                made = make_tasks(group, max(len(group), 1), mode="distcc")
+                for t in made:
+                    wave.append(
+                        RemoteTask(
+                            name=f"cc_{task_seq:04d}",
+                            units=t.units,
+                            argv=t.argv,
+                            working_dir=t.working_dir,
+                        )
+                    )
+                    task_seq += 1
+
+            def _emit_ready_prefix(*, final: bool = False) -> None:
+                """Emit plan-ordered tasks once each next chunk's units have finished -E."""
+                nonlocal next_emit
+                while next_emit < n_total:
+                    while next_emit < n_total and staged_done[next_emit] and staged_ok[next_emit] is None:
+                        next_emit += 1  # skip preprocess failures
+                    if next_emit >= n_total or not staged_done[next_emit]:
+                        return
+                    group: list[Unit] = []
+                    j = next_emit
+                    while j < n_total and len(group) < opts.chunk:
+                        if not staged_done[j]:
+                            if final:
+                                break
+                            return  # wait for the rest of this chunk
+                        if staged_ok[j] is None:
+                            break  # emit what we have before the failure hole
+                        group.append(staged_ok[j])
+                        j += 1
+                    if not group:
+                        return
+                    if len(group) < opts.chunk and not final and j < n_total and not staged_done[j]:
+                        return
+                    next_emit = j
+                    _append_task(group)
+
+            def _submit_wave(force: bool = False) -> None:
+                nonlocal wave
+                if not wave:
+                    return
+                if not force and len(wave) < wave_n:
+                    return
+                batch = list(wave)
+                wave = []
+                assert client is not None and common_pb2 is not None
+                roots, mems = _upload_task_inputs(
+                    client, batch, stage, tin / f"w{len(job_batches)}", opts.submit_timeout, workers=opts.jobs
+                )
+                spec = build_job_spec(
+                    input_roots=roots, mem_bytes=mems, tasks=batch, opts=opts, common_pb2=common_pb2
+                )
+                job = client.submit(spec, timeout=opts.submit_timeout)
+                job_batches.append((job, batch))
+                tasks.extend(batch)
+                print(
+                    f"zm-cc: submitted job {job.job_id} ({len(batch)} task(s); "
+                    f"{len(tasks)} remote task(s) so far)",
+                    file=prog,
+                    flush=True,
+                )
+
+            futures_map: dict[Any, int] = {}
+            with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
+                for i, u in enumerate(remote):
+                    futures_map[pool.submit(_stage_unit, u, stage, runner)] = i
+                for fut in as_completed(futures_map):
+                    if stop.is_set() and not opts.keep_going:
+                        break
+                    i = futures_map[fut]
+                    size, err = fut.result()
+                    n_done += 1
+                    u = remote[i]
+                    rec = records[u.index]
+                    staged_done[i] = True
+                    if err:
+                        n_failed += 1
+                        rec.status = "failed"
+                        rec.error = explain(err)
+                        staged_ok[i] = None
+                        if not opts.keep_going:
+                            stop.set()
+                    else:
+                        rec.ship_bytes = size
+                        staged_ok[i] = u
+                    _emit_ready_prefix(final=False)
+                    _submit_wave(force=False)
+                    print(
+                        f"  preprocess [{n_done}/{n_total}]{'  FAIL' if err else '  ok  '}"
+                        f"  {size // 1024:>6} KB  {u.label}",
+                        file=prog,
+                        flush=True,
+                    )
+
+            if stop.is_set():
+                for t in wave:
+                    for u in t.units:
+                        if records[u.index].status == "pending":
+                            records[u.index].status = "skipped"
+                wave = []
+                for i in range(next_emit, n_total):
+                    u = remote[i]
+                    if records[u.index].status == "pending":
+                        records[u.index].status = "skipped"
+            else:
+                _emit_ready_prefix(final=True)
+
+            _submit_wave(force=True)
+
+            pp_secs = time.monotonic() - pp_t0
+            pp_mb = sum(
+                (records[u.index].ship_bytes or 0) for u in remote if records[u.index].ship_bytes
             ) / 1_048_576
             print(
-                f"zm-cc: uploading {len(tasks)} task input(s) to CAS ({stage_size_mb:.1f} MB) ...",
-                file=prog, flush=True,
+                f"zm-cc: preprocess+pipeline done in {pp_secs:.1f}s  —  {pp_mb:.1f} MB staged"
+                f"  ({n_failed} failed, {len(job_batches)} job(s), {len(tasks)} task(s))",
+                file=prog,
+                flush=True,
             )
-            up_t0 = time.monotonic()
-            roots, mems = _upload_task_inputs(
-                client, tasks, stage, Path(td) / "tin", opts.submit_timeout, workers=opts.jobs
-            )
-            up_secs = time.monotonic() - up_t0
-            print(f"zm-cc: upload done in {up_secs:.1f}s — submitting {len(tasks)} task(s) ...", file=prog, flush=True)
-            spec = build_job_spec(input_roots=roots, mem_bytes=mems, tasks=tasks, opts=opts, common_pb2=common_pb2)
-            job = client.submit(spec, timeout=opts.submit_timeout)
-            print(f"zm-cc: submitted job {job.job_id} ({len(tasks)} task(s))", file=prog, flush=True)
 
         states = (
             (common_pb2.RUNNING, common_pb2.PLACED, common_pb2.SUCCEEDED, common_pb2.FAILED)
             if common_pb2 is not None
             else (None, None, None, None)
         )
-        with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
+
+        def _cancel_all_jobs() -> None:
+            for j, _batch in job_batches:
+                try:
+                    j.cancel()
+                except Exception:
+                    pass
+
+        def _watch_one(job: Any, batch: list[RemoteTask]) -> tuple[Any, list[RemoteTask], dict[str, Any]]:
+            part = _watch(job, batch, opts, names, prog, stop, states)
+            if stop.is_set() and not opts.keep_going:
+                _cancel_all_jobs()
+            return job, batch, part
+
+        with ThreadPoolExecutor(max_workers=max(opts.jobs, len(job_batches) or 1)) as pool:
             futures = [(u, pool.submit(_run_local, u, runner, stop)) for u in plan.local_units]
-            if job is not None:
-                results = _watch(job, tasks, opts, names, prog, stop, states)
-                _collect(job, tasks, results, Path(td) / "fetch", records, names)
+            watch_futs = [pool.submit(_watch_one, job, batch) for job, batch in job_batches]
+            for wf in as_completed(watch_futs):
+                job, batch, part = wf.result()
+                results.update(part)
+                _collect(job, batch, part, Path(td) / "fetch", records, names)
             for u, fut in futures:
                 status, secs, err = fut.result()
                 rec = records[u.index]

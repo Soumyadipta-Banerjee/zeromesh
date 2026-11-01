@@ -33,6 +33,8 @@ TEST(DonorPolicyDefaults) {
     DonorPolicy p;
     ASSERT_EQ(p.allow_on_battery_above, 50);
     ASSERT_EQ(p.CoreLimit(8), 7);
+    ASSERT_EQ(p.CoreLimit(2), 2); // dual-core: donate both (else only one compile slot)
+    ASSERT_EQ(p.CoreLimit(1), 1);
     ASSERT_FALSE(p.allow_network);
     ASSERT_EQ(p.drain_below_battery, 20);
 

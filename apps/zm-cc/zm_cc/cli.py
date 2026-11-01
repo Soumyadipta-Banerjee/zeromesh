@@ -26,6 +26,7 @@ from zm_cc.plan import (
     describe,
     entries_from_command,
     entries_from_files,
+    infer_workspace_root,
     load_compdb,
     make_tasks,
 )
@@ -35,7 +36,7 @@ from zm_cc.report import UnitRecord, who_did_what, write_report
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="zm-cc",
-        description="Distribute compilation across a ZeroMesh team: preprocess locally, compile remotely.",
+        description="Distribute compilation across a ZeroMesh team (distcc or tree mode).",
     )
     p.add_argument("sources", nargs="*", help="source files, compiled with --cc and --flags (form 2)")
     p.add_argument("--compdb", type=Path, metavar="FILE", help="compile_commands.json (form 1)")
@@ -48,13 +49,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="object directory (default: zm-objs/). With `-- CMD -o X` and no --out, the object goes to X.",
     )
-    p.add_argument("--chunk", type=int, default=1, help="translation units per task (default: 1)")
+    p.add_argument(
+        "--chunk",
+        type=int,
+        default=0,
+        help="translation units per task (default: tree sizes chunks to ~4 mesh tasks so "
+        "dual-core donors stay full; distcc default 1). Larger tree chunks amortize sandbox/CAS.",
+    )
     p.add_argument(
         "--cores",
         type=int,
-        default=2,
-        help="cores reserved per task (default: 2). Compilers are mostly single-threaded; "
-        "a donor with N cores and --cores 2 runs about (N-1)/2 tasks at once.",
+        default=1,
+        help="cores reserved per task (default: 1). Compilers are mostly single-threaded; "
+        "use 1 so a 2-core donor runs two compiles at once.",
     )
     p.add_argument(
         "-j",
@@ -62,6 +69,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="local preprocessing and passthrough concurrency (default: CPU count)",
+    )
+    p.add_argument(
+        "--mode",
+        choices=("tree", "distcc"),
+        default="tree",
+        help="tree: upload source tree once, full remote -c, no local -E (default); "
+        "distcc: preprocess locally and ship .i (compat path)",
+    )
+    p.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="workspace root to upload for --mode tree (default: common ancestor of remote units)",
     )
     p.add_argument("--env", choices=("host", "mirror"), default="host", help="env provider (default: host)")
     p.add_argument(
@@ -140,8 +161,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _usage("give exactly one of --compdb FILE, SOURCES..., or -- COMMAND")
     if command is not None and not command:
         return _usage("nothing after --")
-    if args.chunk < 1 or args.cores < 1:
-        return _usage("--chunk and --cores must be >= 1")
+    if args.chunk < 0 or args.cores < 1:
+        return _usage("--chunk must be >= 0 and --cores must be >= 1")
     if args.env == "mirror" and not args.mirror_paths:
         return _usage("--env mirror needs at least one --mirror PATH (make one with `zm-cc mkroot`)")
 
@@ -160,10 +181,36 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     if not plan.units:
         return _usage("no translation units to build")
+    if args.root is not None and args.mode != "tree":
+        return _usage("--root is only valid with --mode tree")
 
-    tasks = make_tasks(plan.remote_units, args.chunk)
+    # Tree mode is the ZeroMesh path: no local -E, one shared CAS digest. Size chunks so a
+    # 2-node × 2-slot mesh gets about four concurrent full remote -c streams (not a distcc clone).
+    if args.chunk > 0:
+        chunk = args.chunk
+    elif args.mode == "tree":
+        n_remote = len([u for u in plan.units if u.remote])
+        chunk = max(1, (n_remote + 3) // 4)
+    else:
+        chunk = 1
+
+    tree_root: Optional[Path] = None
+    try:
+        if args.mode == "tree" and plan.remote_units:
+            tree_root = infer_workspace_root(plan.remote_units, args.root)
+            for u in plan.remote_units:
+                # Fail early when a unit's cwd is outside the uploaded tree.
+                u.working_dir_under(tree_root)
+    except PlanError as e:
+        print(f"zm-cc: {e}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"zm-cc: --root {tree_root}: {e}", file=sys.stderr)
+        return 2
+
+    tasks = make_tasks(plan.remote_units, chunk, mode=args.mode, root=tree_root)
     if args.dry_run:
-        print(describe(plan, tasks, env=args.env, cores=args.cores))
+        print(describe(plan, tasks, env=args.env, cores=args.cores, mode=args.mode, root=tree_root))
         print(f"(dry run: nothing executed; {len(plan.remote_units)} remote, {len(plan.local_units)} local)")
         return 0
 
@@ -173,17 +220,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         mirror_paths=[str(p.resolve()) for p in (args.mirror_paths or [])],
         ld_library_path=args.ld_library_path,
         cores=args.cores,
-        chunk=args.chunk,
+        chunk=chunk,
         jobs=args.jobs or os.cpu_count() or 4,
         may_run_local=not args.remote_only,
         keep_going=args.keep_going,
         submit_timeout=args.submit_timeout,
         verbose=args.verbose,
+        mode=args.mode,
+        tree_root=tree_root,
     )
     prog = sys.stderr
+    mode_note = f", root={tree_root}" if tree_root is not None else ""
     print(
         f"zm-cc: {len(plan.units)} unit(s) -> {len(tasks)} remote task(s) "
-        f"(chunk={args.chunk}, env={args.env}, cores={args.cores}), {len(plan.local_units)} local",
+        f"(mode={args.mode}, chunk={chunk}, env={args.env}, cores={args.cores}"
+        f"{mode_note}), {len(plan.local_units)} local",
         file=prog,
         flush=True,
     )

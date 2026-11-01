@@ -204,7 +204,7 @@ class Command:
         return args + ["-o", out]
 
     def remote_argv(self, src: Source, driver: str, stage_name: str, object_name: str) -> list[str]:
-        """Remote compile of the preprocessed file: codegen options only."""
+        """Remote compile of the preprocessed file: codegen options only (distcc mode)."""
         if src.lang is None:
             raise ValueError(f"{src.text}: unsplittable input has no remote compile")
         args = [driver] + [t.text for t in self.tokens if t.kind is Kind.KEEP]
@@ -213,6 +213,112 @@ class Command:
             # (this is what -fpreprocessed would otherwise say).
             args += ["-x", src.lang.remote_x]
         return args + ["-c", stage_name, "-o", f"out/{object_name}"]
+
+    def tree_remote_argv(
+        self,
+        src: Source,
+        driver: str,
+        object_name: str,
+        *,
+        root: str,
+        cwd: str,
+    ) -> list[str]:
+        """Full remote ``-c`` with preprocessor flags kept (tree mode).
+
+        Project-local ``-I`` / ``-include`` paths under ``root`` are rewritten so they
+        resolve from ``cwd`` inside the uploaded tree. Absolute system paths (e.g.
+        ``/usr/include``) are left alone for ``env-host``.
+        """
+        if src.lang is None:
+            raise ValueError(f"{src.text}: unsplittable input has no remote compile")
+        root_r = os.path.realpath(root)
+        cwd_r = os.path.realpath(cwd)
+        args = [driver]
+        src_arg: Optional[str] = None
+        path_value_pending = False
+        for t in self.tokens:
+            if t.kind is Kind.SOURCE:
+                if t.text == src.text:
+                    if os.path.isabs(src.text):
+                        src_arg = os.path.relpath(os.path.realpath(src.text), cwd_r)
+                    else:
+                        src_arg = src.text
+                path_value_pending = False
+                continue
+            if t.kind is Kind.OUTPUT:
+                path_value_pending = False
+                continue
+            if t.kind is Kind.DRIVER:
+                path_value_pending = False
+                continue  # drop -c/-MD/...; we add our own -c/-o
+            if t.kind is Kind.PREPROC:
+                if path_value_pending:
+                    new = _path_under_tree(t.text, root_r, cwd_r)
+                    args.append(new if new is not None else t.text)
+                    path_value_pending = False
+                    continue
+                rewritten = _rewrite_glued_path_flag(t.text, root_r, cwd_r)
+                args.append(rewritten if rewritten is not None else t.text)
+                path_value_pending = _is_path_flag_name(t.text)
+                continue
+            if t.kind in (Kind.KEEP, Kind.LANG):
+                args.append(t.text)
+                path_value_pending = False
+        if src_arg is None:
+            src_arg = src.text
+        return args + ["-c", src_arg, "-o", f"out/{object_name}"]
+
+
+_PATH_FLAGS = (
+    "-I",
+    "-F",
+    "-include",
+    "-imacros",
+    "-isystem",
+    "-iquote",
+    "-idirafter",
+    "-iframework",
+    "-isysroot",
+    "--sysroot",
+)
+
+
+def _is_path_flag_name(text: str) -> bool:
+    """True when ``text`` is exactly a path-taking flag (value follows as next token)."""
+    return text in _PATH_FLAGS
+
+
+def _rewrite_glued_path_flag(text: str, root: str, cwd: str) -> Optional[str]:
+    """Rewrite glued ``-Idir`` / ``--sysroot=dir``; return None when not a glued path flag."""
+    for name in _PATH_FLAGS:
+        if text == name or not text.startswith(name):
+            continue
+        rest = text[len(name) :]
+        if name.startswith("--"):
+            if not rest.startswith("="):
+                continue
+            val, sep = rest[1:], "="
+        else:
+            if rest == "" or rest.startswith("-"):
+                continue
+            val, sep = rest, ""
+        new = _path_under_tree(val, root, cwd)
+        return f"{name}{sep}{new}" if new is not None else text
+    return None
+
+
+def _path_under_tree(val: str, root: str, cwd: str) -> Optional[str]:
+    """If ``val`` resolves under ``root``, return a path relative to ``cwd``; else None."""
+    if not val:
+        return None
+    p = val if os.path.isabs(val) else os.path.normpath(os.path.join(cwd, val))
+    try:
+        real = os.path.realpath(p)
+    except OSError:
+        return None
+    if real == root or real.startswith(root + os.sep):
+        return os.path.relpath(real, cwd)
+    return None
 
 
 def _is_other_source(t: Token, src: Optional[Source]) -> bool:

@@ -366,7 +366,9 @@ int Daemon::Run() {
             return peer ? client_factory(*peer) : nullptr;
         };
         int hw = static_cast<int>(std::thread::hardware_concurrency());
-        int slots = std::max(1, hw - 1);
+        // Leave a spare core on larger machines so zmd/OS stay responsive. On dual-core donors
+        // (common in small VMs) hw-1 leaves a single slot and loses to distcc-style N/N hosts.
+        int slots = hw <= 2 ? std::max(1, hw) : std::max(1, hw - 1);
         local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, slots,
                                                          config_.state_dir / "scratch", cas, client_for_node);
 
