@@ -1,7 +1,11 @@
 #include "store/merkle.hpp"
 
+#include <sys/stat.h>
+
 #include <algorithm>
 #include <fstream>
+#include <map>
+#include <set>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -94,21 +98,39 @@ bool MerkleBuilder::IsSafeName(std::string_view name) {
     return name.find('/') == std::string_view::npos && name.find('\0') == std::string_view::npos;
 }
 
-Digest MerkleBuilder::BuildTree(const std::filesystem::path& root_dir) {
-    return BuildTree(root_dir, IgnoreRules::None(), nullptr);
+bool MerkleBuilder::Skipped(const std::string& rel, bool is_dir, const TreeOptions& opts) {
+    if (opts.ignore && opts.ignore->Ignored(rel, is_dir)) return true;
+    if (opts.deny && opts.deny->Ignored(rel, is_dir)) {
+        if (opts.denied) opts.denied->push_back(rel);
+        return true;
+    }
+    return false;
 }
 
-Digest MerkleBuilder::BuildTree(const std::filesystem::path& root_dir, const IgnoreRules& rules,
-                                uint64_t* total_bytes) {
+Digest MerkleBuilder::HashFile(const std::filesystem::path& path, const TreeOptions& opts) {
+    struct stat st{};
+    const bool have_stat = ::stat(path.c_str(), &st) == 0;
+    if (opts.stat_cache && have_stat) {
+        if (auto cached = opts.stat_cache->Lookup(path.string(), st); cached && store_->HasBlob(cached->hash)) {
+            return *cached;
+        }
+    }
+    Digest d = store_->PutBlobFile(path);
+    if (d.hash.empty()) throw std::runtime_error("cannot read " + path.string());
+    if (opts.stat_cache && have_stat) opts.stat_cache->Store(path.string(), st, d);
+    return d;
+}
+
+Digest MerkleBuilder::BuildTree(const std::filesystem::path& root_dir, const TreeOptions& opts) {
     std::error_code ec;
     if (!std::filesystem::is_directory(root_dir, ec)) {
         return Digest{"", 0};
     }
-    return BuildDirectoryRecursive(root_dir, "", rules, total_bytes);
+    return BuildDirectoryRecursive(root_dir, "", opts);
 }
 
 Digest MerkleBuilder::BuildDirectoryRecursive(const std::filesystem::path& current_path, const std::string& rel,
-                                              const IgnoreRules& rules, uint64_t* total_bytes) {
+                                              const TreeOptions& opts) {
     DirectoryManifest manifest;
 
     for (const auto& entry : std::filesystem::directory_iterator(current_path)) {
@@ -117,19 +139,19 @@ Digest MerkleBuilder::BuildDirectoryRecursive(const std::filesystem::path& curre
             throw std::runtime_error("unsupported file name (contains newline or tab): " + entry.path().string());
         }
         std::string child_rel = rel.empty() ? filename : rel + "/" + filename;
-
         if (entry.is_symlink()) {
-            if (rules.Ignored(child_rel, false)) continue;
+            if (Skipped(child_rel, false, opts)) continue;
             manifest.symlinks.push_back(
                 SymlinkNode{.name = filename, .target = std::filesystem::read_symlink(entry.path()).string()});
         } else if (entry.is_directory()) {
-            if (rules.Ignored(child_rel, true)) continue;
-            manifest.directories.push_back(DirectoryNode{
-                .name = filename, .digest = BuildDirectoryRecursive(entry.path(), child_rel, rules, total_bytes)});
+            if (Skipped(child_rel, true, opts)) continue;
+            manifest.directories.push_back(
+                DirectoryNode{.name = filename, .digest = BuildDirectoryRecursive(entry.path(), child_rel, opts)});
         } else if (entry.is_regular_file()) {
-            if (rules.Ignored(child_rel, false)) continue;
-            Digest file_digest = store_->PutBlobFile(entry.path());
-            if (total_bytes) *total_bytes += static_cast<uint64_t>(file_digest.size_bytes);
+            if (Skipped(child_rel, false, opts)) continue;
+            Digest file_digest = HashFile(entry.path(), opts);
+            if (opts.total_bytes) *opts.total_bytes += static_cast<uint64_t>(file_digest.size_bytes);
+            if (opts.file_count) *opts.file_count += 1;
             auto perms = entry.status().permissions();
             manifest.files.push_back(FileNode{.name = filename,
                                               .digest = file_digest,
@@ -141,15 +163,151 @@ Digest MerkleBuilder::BuildDirectoryRecursive(const std::filesystem::path& curre
     return store_->PutBlob(manifest.Serialize());
 }
 
-bool MerkleBuilder::MaterializeTree(const Digest& root_digest, const std::filesystem::path& destination) {
+// ---- BuildFromPaths ---------------------------------------------------------------------------
+
+struct MerkleBuilder::PathNode {
+    enum class Kind { Directory, File, Symlink };
+    Kind kind{Kind::Directory};
+    Digest digest;
+    bool executable{false};
+    std::string target;
+    std::map<std::string, std::unique_ptr<PathNode>> children;
+
+    PathNode* Child(const std::string& name, Kind k) {
+        auto& slot = children[name];
+        if (!slot) {
+            slot = std::make_unique<PathNode>();
+            slot->kind = k;
+        }
+        return slot.get();
+    }
+};
+
+void MerkleBuilder::InsertDirectory(PathNode& node, const std::filesystem::path& dir, const std::string& rel,
+                                    const TreeOptions& opts) {
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(dir, std::filesystem::directory_options::skip_permission_denied, ec),
+         end;
+         !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.find_first_of("\n\t") != std::string::npos) continue;
+        const std::string child_rel = rel.empty() ? name : rel + "/" + name;
+        struct stat st{};
+        if (lstat(it->path().c_str(), &st) != 0) continue;
+        if (S_ISLNK(st.st_mode)) {
+            if (Skipped(child_rel, false, opts)) continue;
+            std::error_code lec;
+            auto target = std::filesystem::read_symlink(it->path(), lec);
+            if (lec) continue;
+            node.Child(name, PathNode::Kind::Symlink)->target = target.string();
+        } else if (S_ISDIR(st.st_mode)) {
+            if (Skipped(child_rel, true, opts)) continue;
+            PathNode* child = node.Child(name, PathNode::Kind::Directory);
+            if (child->kind != PathNode::Kind::Directory) continue;
+            InsertDirectory(*child, it->path(), child_rel, opts);
+        } else if (S_ISREG(st.st_mode)) {
+            if (Skipped(child_rel, false, opts)) continue;
+            PathNode* child = node.Child(name, PathNode::Kind::File);
+            if (!child->digest.hash.empty()) continue;
+            child->digest = HashFile(it->path(), opts);
+            child->executable = (st.st_mode & S_IXUSR) != 0;
+            if (opts.total_bytes) *opts.total_bytes += static_cast<uint64_t>(child->digest.size_bytes);
+            if (opts.file_count) *opts.file_count += 1;
+        }
+    }
+}
+
+void MerkleBuilder::InsertPath(PathNode& root, const std::filesystem::path& abs, const TreeOptions& opts, int depth) {
+    if (depth > 40 || !abs.is_absolute()) return; // a symlink loop, or nothing to anchor
+    const std::filesystem::path norm = abs.lexically_normal();
+    std::vector<std::string> parts;
+    for (const auto& p : norm.relative_path()) {
+        const std::string s = p.string();
+        if (s.empty() || s == ".") continue;
+        if (s == ".." || s.find_first_of("\n\t") != std::string::npos) return;
+        parts.push_back(s);
+    }
+    PathNode* node = &root;
+    std::filesystem::path fs_path = "/";
+    std::string rel;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        fs_path /= parts[i];
+        rel = rel.empty() ? parts[i] : rel + "/" + parts[i];
+        const bool last = i + 1 == parts.size();
+        struct stat st{};
+        if (lstat(fs_path.c_str(), &st) != 0) return;
+        if (S_ISLNK(st.st_mode)) {
+            if (Skipped(rel, false, opts)) return;
+            std::error_code ec;
+            const auto target = std::filesystem::read_symlink(fs_path, ec);
+            if (ec) return;
+            PathNode* link = node->Child(parts[i], PathNode::Kind::Symlink);
+            if (link->kind != PathNode::Kind::Symlink) return;
+            link->target = target.string();
+            std::filesystem::path resolved = target.is_absolute() ? target : fs_path.parent_path() / target;
+            for (size_t j = i + 1; j < parts.size(); ++j) resolved /= parts[j];
+            InsertPath(root, resolved, opts, depth + 1);
+            return;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            if (Skipped(rel, true, opts)) return;
+            PathNode* dir = node->Child(parts[i], PathNode::Kind::Directory);
+            if (dir->kind != PathNode::Kind::Directory) return;
+            if (last) InsertDirectory(*dir, fs_path, rel, opts);
+            node = dir;
+            continue;
+        }
+        if (S_ISREG(st.st_mode) && last) {
+            if (Skipped(rel, false, opts)) return;
+            PathNode* file = node->Child(parts[i], PathNode::Kind::File);
+            if (file->kind != PathNode::Kind::File || !file->digest.hash.empty()) return;
+            file->digest = HashFile(fs_path, opts);
+            file->executable = (st.st_mode & S_IXUSR) != 0;
+            if (opts.total_bytes) *opts.total_bytes += static_cast<uint64_t>(file->digest.size_bytes);
+            if (opts.file_count) *opts.file_count += 1;
+        }
+        return; // a path through a file, or a device/socket
+    }
+}
+
+Digest MerkleBuilder::StoreNode(const PathNode& node) {
+    DirectoryManifest m;
+    for (const auto& [name, child] : node.children) {
+        switch (child->kind) {
+        case PathNode::Kind::Directory:
+            m.directories.push_back({.name = name, .digest = StoreNode(*child)});
+            break;
+        case PathNode::Kind::File:
+            if (!child->digest.hash.empty())
+                m.files.push_back({.name = name, .digest = child->digest, .is_executable = child->executable});
+            break;
+        case PathNode::Kind::Symlink:
+            m.symlinks.push_back({.name = name, .target = child->target});
+            break;
+        }
+    }
+    return store_->PutBlob(m.Serialize());
+}
+
+Digest MerkleBuilder::BuildFromPaths(const std::vector<std::filesystem::path>& abs_paths, const TreeOptions& opts) {
+    PathNode root;
+    for (const auto& p : abs_paths) InsertPath(root, p, opts, 0);
+    return StoreNode(root);
+}
+
+// ---- Materialize ------------------------------------------------------------------------------
+
+bool MerkleBuilder::MaterializeTree(const Digest& root_digest, const std::filesystem::path& destination,
+                                    Materialize mode) {
     if (root_digest.hash.empty()) {
         return false;
     }
     std::filesystem::create_directories(destination);
-    return MaterializeDirectoryRecursive(root_digest, destination);
+    return MaterializeDirectoryRecursive(root_digest, destination, mode);
 }
 
-bool MerkleBuilder::MaterializeDirectoryRecursive(const Digest& dir_digest, const std::filesystem::path& current_path) {
+bool MerkleBuilder::MaterializeDirectoryRecursive(const Digest& dir_digest, const std::filesystem::path& current_path,
+                                                  Materialize mode) {
     auto manifest_data = store_->GetBlob(dir_digest.hash);
     if (!manifest_data.has_value()) {
         return false;
@@ -174,42 +332,37 @@ bool MerkleBuilder::MaterializeDirectoryRecursive(const Digest& dir_digest, cons
         auto src = store_->GetBlobPath(file.digest.hash);
         std::error_code ec;
         if (src.empty() || !std::filesystem::exists(src, ec)) {
-            return false;
+            // Small blobs can live only in the in-memory cache: write them through to disk.
+            auto blob = store_->GetBlob(file.digest.hash);
+            if (!blob) return false;
+            store_->PutBlob(*blob);
+            if (!std::filesystem::exists(src, ec)) return false;
         }
         std::filesystem::path file_path = current_path / file.name;
-        // Prefer a hard link into the workdir (distcc-like cheap materialize). Never chmod a
-        // hard-linked CAS blob — that would mutate the store. If the exec bit disagrees, copy.
-        bool linked = false;
-        std::filesystem::create_hard_link(src, file_path, ec);
-        if (!ec) {
-            linked = true;
-            const auto st = std::filesystem::status(file_path, ec);
-            const bool is_exec =
-                !ec && ((st.permissions() & std::filesystem::perms::owner_exec) !=
-                        std::filesystem::perms::none);
-            if (is_exec != file.is_executable) {
-                std::filesystem::remove(file_path, ec);
-                linked = false;
+        // A link shares the store's inode, so it is only made when the exec bit already agrees:
+        // changing the mode of the link would change the blob for every other user.
+        if (mode == Materialize::Link) {
+            struct stat st{};
+            if (::stat(src.c_str(), &st) == 0 && ((st.st_mode & S_IXUSR) != 0) == file.is_executable) {
+                std::filesystem::create_hard_link(src, file_path, ec);
+                if (!ec) continue;
+                ec.clear();
             }
-        } else {
-            ec.clear();
         }
-        if (!linked) {
-            std::filesystem::copy_file(src, file_path, std::filesystem::copy_options::overwrite_existing, ec);
-            if (ec) return false;
-            auto mode = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
-                        std::filesystem::perms::group_read | std::filesystem::perms::others_read;
-            if (file.is_executable) {
-                mode |= std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
-                        std::filesystem::perms::others_exec;
-            }
-            std::filesystem::permissions(file_path, mode, std::filesystem::perm_options::replace, ec);
-            if (ec) return false;
+        std::filesystem::copy_file(src, file_path, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) return false;
+        auto perms = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+                     std::filesystem::perms::group_read | std::filesystem::perms::others_read;
+        if (file.is_executable) {
+            perms |= std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
+                     std::filesystem::perms::others_exec;
         }
+        std::filesystem::permissions(file_path, perms, std::filesystem::perm_options::replace, ec);
+        if (ec) return false;
     }
 
     for (const auto& dir : manifest->directories) {
-        if (!MaterializeDirectoryRecursive(dir.digest, current_path / dir.name)) {
+        if (!MaterializeDirectoryRecursive(dir.digest, current_path / dir.name, mode)) {
             return false;
         }
     }
@@ -222,6 +375,97 @@ bool MerkleBuilder::MaterializeDirectoryRecursive(const Digest& dir_digest, cons
     }
 
     return true;
+}
+
+// ---- Reading trees ----------------------------------------------------------------------------
+
+TreeEntry MerkleBuilder::Lookup(const Digest& root, std::string_view rel) {
+    TreeEntry cur;
+    cur.kind = TreeEntry::Kind::Directory;
+    cur.digest = root;
+    size_t start = 0;
+    while (start <= rel.size()) {
+        size_t slash = rel.find('/', start);
+        if (slash == std::string_view::npos) slash = rel.size();
+        const std::string_view seg = rel.substr(start, slash - start);
+        start = slash + 1;
+        if (seg.empty() || seg == ".") continue;
+        if (cur.kind != TreeEntry::Kind::Directory || seg == "..") return {};
+        const DirectoryManifest m = LoadManifest(cur.digest);
+        TreeEntry next;
+        for (const auto& f : m.files) {
+            if (f.name == seg) next = {TreeEntry::Kind::File, f.digest, f.is_executable, {}};
+        }
+        for (const auto& d : m.directories) {
+            if (d.name == seg) next = {TreeEntry::Kind::Directory, d.digest, false, {}};
+        }
+        for (const auto& l : m.symlinks) {
+            if (l.name == seg) next = {TreeEntry::Kind::Symlink, {}, false, l.target};
+        }
+        if (next.kind == TreeEntry::Kind::Absent) return {};
+        cur = std::move(next);
+    }
+    if (cur.kind == TreeEntry::Kind::Directory && cur.digest.hash.empty()) return {};
+    return cur;
+}
+
+std::optional<std::vector<std::string>> MerkleBuilder::ListNames(const Digest& root, std::string_view rel) {
+    const TreeEntry e = Lookup(root, rel);
+    if (e.kind != TreeEntry::Kind::Directory) return std::nullopt;
+    const DirectoryManifest m = LoadManifest(e.digest);
+    std::vector<std::string> names;
+    for (const auto& f : m.files) names.push_back(f.name);
+    for (const auto& d : m.directories) names.push_back(d.name);
+    for (const auto& l : m.symlinks) names.push_back(l.name);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+void MerkleBuilder::DiffRecursive(const Digest& a, const Digest& b, const std::string& prefix, size_t limit,
+                                  std::vector<std::string>& out) {
+    if (out.size() >= limit || a.hash == b.hash) return;
+    struct Entry {
+        TreeEntry::Kind kind;
+        std::string id; // digest+mode or link target
+        Digest digest;
+    };
+    auto index = [&](const Digest& tree) {
+        std::map<std::string, Entry> m;
+        if (tree.hash.empty()) return m;
+        const DirectoryManifest man = LoadManifest(tree);
+        for (const auto& f : man.files)
+            m[f.name] = {TreeEntry::Kind::File, f.digest.hash + (f.is_executable ? "+x" : ""), f.digest};
+        for (const auto& d : man.directories) m[d.name] = {TreeEntry::Kind::Directory, d.digest.hash, d.digest};
+        for (const auto& l : man.symlinks) m[l.name] = {TreeEntry::Kind::Symlink, l.target, {}};
+        return m;
+    };
+    const auto ea = index(a);
+    const auto eb = index(b);
+    std::set<std::string> names;
+    for (const auto& [n, _] : ea) names.insert(n);
+    for (const auto& [n, _] : eb) names.insert(n);
+    for (const auto& name : names) {
+        if (out.size() >= limit) return;
+        const std::string path = prefix.empty() ? name : prefix + "/" + name;
+        auto ia = ea.find(name);
+        auto ib = eb.find(name);
+        if (ia != ea.end() && ib != eb.end() && ia->second.kind == ib->second.kind && ia->second.id == ib->second.id) {
+            continue;
+        }
+        if (ia != ea.end() && ib != eb.end() && ia->second.kind == TreeEntry::Kind::Directory &&
+            ib->second.kind == TreeEntry::Kind::Directory) {
+            DiffRecursive(ia->second.digest, ib->second.digest, path, limit, out);
+        } else {
+            out.push_back(path);
+        }
+    }
+}
+
+std::vector<std::string> MerkleBuilder::Diff(const Digest& a, const Digest& b, size_t limit) {
+    std::vector<std::string> out;
+    if (limit == 0) return out;
+    DiffRecursive(a, b, "", limit, out);
+    return out;
 }
 
 DirectoryManifest MerkleBuilder::LoadManifest(const Digest& tree) {

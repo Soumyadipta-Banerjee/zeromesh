@@ -186,7 +186,7 @@ bool MaterializeCached(store::MerkleBuilder& merkle, const store::Digest& root, 
             fs::create_directories(cache_root, ec);
             const fs::path tmp = cache_root / (root.hash + ".tmp-" + RandomHex(4));
             ForceRemove(tmp);
-            if (!merkle.MaterializeTree(root, tmp)) {
+            if (!merkle.MaterializeTree(root, tmp, store::Materialize::Link)) {
                 ForceRemove(tmp);
                 return false;
             }

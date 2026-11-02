@@ -1,6 +1,6 @@
 #include "node/mirror_manifest.hpp"
 
-#include "plugins/env-mirror/deny_list.hpp"
+#include "store/deny_list.hpp"
 
 #include <cstdlib>
 #include <sstream>
@@ -29,7 +29,7 @@ std::vector<fs::path> ParseMirrorPaths(const std::map<std::string, std::string>&
 store::Digest BuildMirrorManifest(store::MerkleBuilder& merkle, const std::vector<fs::path>& paths,
                                   uint64_t* total_bytes) {
     if (paths.empty()) throw std::invalid_argument("mirror requires at least one path");
-    auto rules = mirror::DenyList::CreateIgnoreRules();
+    const store::IgnoreRules deny = store::DenyRules();
     uint64_t total = 0;
     store::Digest root;
     for (const fs::path& path : paths) {
@@ -37,7 +37,10 @@ store::Digest BuildMirrorManifest(store::MerkleBuilder& merkle, const std::vecto
         if (!fs::exists(path, ec)) {
             throw std::invalid_argument("mirror path does not exist: " + path.string());
         }
-        store::Digest tree = merkle.BuildTree(path, rules, &total);
+        store::TreeOptions opts;
+        opts.deny = &deny;
+        opts.total_bytes = &total;
+        store::Digest tree = merkle.BuildTree(path, opts);
         std::string mount_name = path.filename().string();
         if (mount_name.empty()) mount_name = path.string();
         for (char& c : mount_name) {

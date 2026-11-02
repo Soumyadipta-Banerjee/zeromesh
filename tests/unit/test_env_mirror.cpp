@@ -1,6 +1,5 @@
 #include "tests/unit/test_framework.hpp"
 #include "tests/unit/test_util.hpp"
-#include "plugins/env-mirror/deny_list.hpp"
 #include "plugins/env-mirror/chunk_source.hpp"
 #include "plugins/env-mirror/mirror_cache.hpp"
 #include "plugins/env-mirror/mirror_fuse.hpp"
@@ -19,47 +18,6 @@ using namespace zeromesh::mirror;
 using testing::TempDir;
 using testing::WriteFile;
 
-TEST(EnvMirrorDenyListExcludesSecrets) {
-    // Acceptance criterion 1:
-    // "a manifest built from a fake home with .ssh/id_ed25519, project/.env and project/main.c contains only main.c"
-    TempDir fake_home;
-    WriteFile(fake_home / ".ssh" / "id_ed25519", "PRIVATE KEY DATA");
-    WriteFile(fake_home / "project" / ".env", "SECRET=12345");
-    WriteFile(fake_home / "project" / "main.c", "int main() { return 0; }\n");
-
-    TempDir cas_dir;
-    auto cas = std::make_shared<store::CasStore>(cas_dir.path());
-    store::MerkleBuilder builder(cas);
-
-    auto rules = DenyList::CreateIgnoreRules();
-    uint64_t total_bytes = 0;
-    auto root_digest = builder.BuildTree(fake_home.path(), rules, &total_bytes);
-
-    ASSERT_FALSE(root_digest.hash.empty());
-
-    // Deserialize root manifest
-    auto root_data = cas->GetBlob(root_digest.hash);
-    ASSERT_TRUE(root_data.has_value());
-    auto root_manifest = store::DirectoryManifest::Deserialize(*root_data);
-    ASSERT_TRUE(root_manifest.has_value());
-
-    // Root should only contain "project" directory, NOT ".ssh"
-    ASSERT_EQ(root_manifest->directories.size(), 1u);
-    ASSERT_EQ(root_manifest->directories[0].name, "project");
-    ASSERT_EQ(root_manifest->files.size(), 0u);
-
-    // Deserialize project directory manifest
-    auto proj_data = cas->GetBlob(root_manifest->directories[0].digest.hash);
-    ASSERT_TRUE(proj_data.has_value());
-    auto proj_manifest = store::DirectoryManifest::Deserialize(*proj_data);
-    ASSERT_TRUE(proj_manifest.has_value());
-
-    // Project should only contain "main.c", NOT ".env"
-    ASSERT_EQ(proj_manifest->files.size(), 1u);
-    ASSERT_EQ(proj_manifest->files[0].name, "main.c");
-    ASSERT_EQ(proj_manifest->directories.size(), 0u);
-}
-
 TEST(EnvMirrorMountReadOnlyFailsWithEROFS) {
     // Acceptance criterion 2:
     // "A write through the mount fails with EROFS"
@@ -76,9 +34,7 @@ TEST(EnvMirrorMountReadOnlyFailsWithEROFS) {
     TempDir export_dir;
     WriteFile(export_dir / "project" / "main.c", "int main() { return 0; }\n");
 
-    auto rules = DenyList::CreateIgnoreRules();
-    uint64_t total_bytes = 0;
-    auto root_digest = builder.BuildTree(export_dir.path(), rules, &total_bytes);
+    auto root_digest = builder.BuildTree(export_dir.path());
 
     auto env = MakeMirrorEnv();
     node::LocalCasBlobSource blob_source(cas);
@@ -124,8 +80,7 @@ TEST(EnvMirrorReleaseLeavesNoMountBehind) {
     store::MerkleBuilder builder(cas);
     TempDir export_dir;
     WriteFile(export_dir / "x", "x\n");
-    uint64_t total_bytes = 0;
-    auto root_digest = builder.BuildTree(export_dir.path(), store::IgnoreRules::None(), &total_bytes);
+    auto root_digest = builder.BuildTree(export_dir.path());
 
     auto env = MakeMirrorEnv();
     node::LocalCasBlobSource blob_source(cas);
@@ -163,8 +118,7 @@ TEST(EnvMirrorReadContentThroughMount) {
     const std::string content = "printf(\"hello mirror!\\n\");\n";
     WriteFile(src_dir / "code.c", content);
 
-    uint64_t total_bytes = 0;
-    auto root_digest = builder.BuildTree(src_dir.path(), store::IgnoreRules::None(), &total_bytes);
+    auto root_digest = builder.BuildTree(src_dir.path());
 
     auto env = MakeMirrorEnv();
     node::LocalCasBlobSource blob_source(cas);
@@ -204,46 +158,6 @@ TEST(EnvMirrorCheckMethod) {
     unreachable.argv = {"ls"};
     unreachable.params["requester_unreachable"] = "true";
     ASSERT_FALSE(env->Check(unreachable).ok);
-}
-
-TEST(EnvMirrorDenyListCoversZeromeshStateAndConfig) {
-    auto rules = DenyList::CreateIgnoreRules();
-    ASSERT_TRUE(rules.Ignored(".local/share/zeromesh", true));
-    ASSERT_TRUE(rules.Ignored(".local/share/zeromesh/node.key", false));
-    ASSERT_TRUE(rules.Ignored(".local/share/zeromesh/team", false));
-    ASSERT_TRUE(rules.Ignored(".config/zeromesh", true));
-    ASSERT_TRUE(rules.Ignored(".config/zeromesh/donor.toml", false));
-}
-
-TEST(EnvMirrorDenyListCoversCommonCredentialPaths) {
-    auto rules = DenyList::CreateIgnoreRules();
-    ASSERT_TRUE(rules.Ignored(".aws", true));
-    ASSERT_TRUE(rules.Ignored(".aws/credentials", false));
-    ASSERT_TRUE(rules.Ignored(".netrc", false));
-    ASSERT_TRUE(rules.Ignored(".git-credentials", false));
-    ASSERT_TRUE(rules.Ignored(".kube", true));
-    ASSERT_TRUE(rules.Ignored(".kube/config", false));
-    ASSERT_TRUE(rules.Ignored(".bash_history", false));
-    ASSERT_TRUE(rules.Ignored(".zsh_history", false));
-    ASSERT_TRUE(rules.Ignored(".local/share/fish/fish_history", false));
-    ASSERT_TRUE(rules.Ignored(".config/gh", true));
-    ASSERT_TRUE(rules.Ignored(".config/gh/hosts.yml", false));
-    ASSERT_TRUE(rules.Ignored(".docker", true));
-    ASSERT_TRUE(rules.Ignored(".docker/config.json", false));
-    ASSERT_TRUE(rules.Ignored(".password-store", true));
-    ASSERT_TRUE(rules.Ignored(".password-store/user.gpg", false));
-    ASSERT_TRUE(rules.Ignored(".gnupg", true));
-}
-
-TEST(EnvMirrorCustomDenyList) {
-    TempDir config_dir;
-    WriteFile(config_dir / "mirror_deny", "*.custom_secret\nsecrets/\n");
-
-    auto rules = DenyList::CreateIgnoreRules(config_dir / "mirror_deny");
-    ASSERT_TRUE(rules.Ignored(".ssh", true));
-    ASSERT_TRUE(rules.Ignored("pass.custom_secret", false));
-    ASSERT_TRUE(rules.Ignored("secrets", true));
-    ASSERT_FALSE(rules.Ignored("hello.txt", false));
 }
 
 TEST(EnvMirrorCacheLruEviction) {

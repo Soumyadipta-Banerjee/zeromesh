@@ -376,7 +376,10 @@ grpc::Status ClientService::UploadTree(grpc::ServerContext*, const v1::UploadTre
     }
     try {
         uint64_t total = 0;
-        store::Digest d = merkle_->BuildTree(root, rules, &total);
+        store::TreeOptions topts;
+        topts.ignore = &rules;
+        topts.total_bytes = &total;
+        store::Digest d = merkle_->BuildTree(root, topts);
         *reply->mutable_root() = ToProto(d);
         reply->set_total_bytes(static_cast<int64_t>(total));
     } catch (const std::exception& e) {
