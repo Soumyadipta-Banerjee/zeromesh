@@ -562,6 +562,7 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     int64_t last_cpu = -1;
     auto last_tick = start;
     int64_t peak_mem = 0;
+    int64_t cpu_seen = 0;
     bool exited = false;
     auto exited_at = start;
     bool timed_out = false, hung = false, terminating = false, killed = false;
@@ -608,13 +609,14 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         }
         return CpuMsOf(Descendants(pid));
     };
-    // The items' memory, sampled every tick: wait4 on bwrap reports only bwrap's own, never the
-    // sandboxed processes'. The cgroup's own figure when its memory controller is on (memory.peak
+    // The items' memory, sampled every tick (an item shorter than a tick reports 0): wait4 on bwrap
+    // reports only bwrap's own, never the sandboxed processes'. The cgroup's own figure when its memory controller is on (memory.peak
     // replaces the samples at the end), else the resident memory of the processes together.
     auto sample_memory = [&] {
         std::optional<uint64_t> c = cg.empty() ? std::nullopt : cgroup::MemoryCurrent(cg);
         const int64_t now_bytes = c ? static_cast<int64_t>(*c) : RssOf(task_pids());
         peak_mem = std::max(peak_mem, now_bytes);
+        cpu_seen = std::max(cpu_seen, cpu_ms_now());
         if (spec.memory_now) spec.memory_now->store(now_bytes);
     };
     auto begin_termination = [&] {
@@ -876,8 +878,7 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         if (fds[i].fd >= 0) close(fds[i].fd);
     }
     int status = 0;
-    struct rusage ru{};
-    wait4(pid, &status, 0, &ru);
+    waitpid(pid, &status, 0);
     if (!cg.empty()) {
         if (auto p = cgroup::MemoryPeak(cg)) peak_mem = std::max(peak_mem, static_cast<int64_t>(*p));
     }
@@ -904,8 +905,12 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     const store::Digest out_digest = store_->PutBlobFile(g.dir / "stdout");
     const store::Digest err_digest = store_->PutBlobFile(g.dir / "stderr");
     const int64_t wall = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    const int64_t cpu =
-        (ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000 + (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000;
+    // Like memory, CPU time is not in wait4's rusage of bwrap: the cgroup's counter outlives the
+    // processes; without one, the last sample of the process tree.
+    int64_t cpu = cpu_seen;
+    if (!cg.empty()) {
+        if (auto u = cgroup::CpuUsageUsec(cg)) cpu = std::max(cpu, static_cast<int64_t>(*u / 1000));
+    }
 
     // Items whose outputs were all closed before the process ended are done, however it ended (a crash,
     // an OOM kill, a timeout at a later item): it loses only the items still in flight.
@@ -943,7 +948,9 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         r.stderr_tail = err_tail;
         r.wall_ms = wall;
         r.cpu_ms = g.combined ? std::max<int64_t>(0, cpu - cpu_at_last_commit) : cpu;
-        r.peak_rss = std::max(peak_mem, static_cast<int64_t>(ru.ru_maxrss) * 1024);
+        // Never ru_maxrss of bwrap: it is bwrap's own, or, as a high-water mark taken just after
+        // fork() and before exec(), the size of the whole daemon the child was copied from.
+        r.peak_rss = peak_mem;
         if (r.failure != ItemFailure::None && r.message.empty()) r.message = FailureWord(r.failure);
         if (cb.on_item) cb.on_item(std::move(r));
     }

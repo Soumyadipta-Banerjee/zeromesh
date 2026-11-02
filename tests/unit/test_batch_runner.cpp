@@ -392,4 +392,16 @@ TEST(BatchMeasuresTheItemsMemoryNotTheSandboxes) {
     ASSERT_TRUE(f.results["big"].failure == ItemFailure::None);
     // wait4 on bwrap saw about 2 MiB; the items' processes held over 200 MiB.
     ASSERT_TRUE(f.results["big"].peak_rss >= (190ll << 20));
+
+    // Its CPU is counted too (wait4 on bwrap reports none of it).
+    spec.items = {Fixture::Sh("busy", "python3 -c 'sum(range(60_000_000))'")};
+    f.Run(spec);
+    if (f.results["busy"].cpu_ms < 150)
+        throw std::runtime_error("busy item measured at " + std::to_string(f.results["busy"].cpu_ms) + " ms CPU");
+
+    // A small item is small: nothing outside its own processes is counted.
+    spec.items = {Fixture::Sh("small", "sleep 1")};
+    f.Run(spec);
+    if (f.results["small"].peak_rss >= (64ll << 20))
+        throw std::runtime_error("sleep measured at " + std::to_string(f.results["small"].peak_rss >> 20) + " MiB");
 }
