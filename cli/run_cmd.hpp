@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -12,17 +13,22 @@
 namespace zeromesh::cli {
 
 struct RunOptions {
-    std::vector<std::string> outputs; // -o PATH (repeatable)
+    std::vector<std::string> outputs; // -o PATH (repeatable); none: every file the command changes
     bool remote_only{false};
     bool local_only{false};
     int cores{0};
     int64_t mem_bytes{0};
-    std::string env{"host"};
-    std::vector<std::string> mirror_paths; // --mirror (repeatable); required for --env mirror
+    int gpus{0};
+    std::string env{"host"};             // host | capture | sha256:<tree digest>
+    std::vector<std::string> capture;    // --capture PATH: added to a captured environment
+    std::string needs_version;           // --needs-version CONSTRAINT for the command's program
     bool force_large{false};
-    // When set, one task per filesystem match of this glob (relative to cwd).
-    std::optional<std::string> each_glob;
-    std::vector<std::string> argv; // after "--"
+    bool keep_going{false};
+    bool no_cache{false};
+    std::string report;                  // --report PATH
+    std::optional<std::string> each_glob; // one item per match of this glob (relative to cwd)
+    std::optional<std::string> from;     // --from run.json: a whole run, as JSON
+    std::vector<std::string> argv;       // after "--"
 };
 
 // Parses the arguments after "run". nullopt with *error set on a usage error.
@@ -39,9 +45,19 @@ bool ExpandEachGlob(const std::string& pattern, const std::filesystem::path& cwd
 // Replaces every "{}" in `s` with `replacement`.
 std::string ReplaceBraces(std::string_view s, std::string_view replacement);
 
-// zm run: upload the current directory, run one task (or one per --each match), stream
-// logs, write outputs back and return an exit code (non-zero if any task failed).
+// zm run: snapshot the current directory, run one item (or one per --each match), stream its
+// output, write its outputs back, and return the command's exit code (non-zero if any item failed).
 int RunCommand(Client& client, const RunOptions& opts);
+
+// Follows a run until it ends. With `stream_logs`, item output is copied to stdout/stderr as it
+// arrives; otherwise one line per finished item. Ctrl-C cancels the run. Returns the final results
+// by item id (empty with *error when the stream broke) and the final status.
+struct Watched {
+    std::map<std::string, v1::ItemResult> results;
+    v1::RunStatus status;
+    bool finished{false};
+};
+Watched WatchRun(Client& client, const std::string& run_id, bool stream_logs, bool item_lines, std::string* error);
 
 extern const char* const kRunUsage;
 

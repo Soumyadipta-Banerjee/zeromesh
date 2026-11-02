@@ -33,7 +33,7 @@ std::vector<std::string> Ids(const std::vector<Candidate>& cs) {
 } // namespace
 
 TEST(RankPrefersFewerMissingBytes) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     // Same free slots → missing_bytes breaks the tie (-1 ranks as worst-case input size).
     constexpr int64_t kInput = 10000;
     auto ranked = Rank(spec, {Node("unknown", -1), Node("big", 5000), Node("small", 10), Node("zero", 0)}, kInput);
@@ -48,7 +48,7 @@ TEST(RankPrefersFewerMissingBytes) {
 }
 
 TEST(RankPrefersMoreFreeSlots) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     Candidate local = Node("local", 0, true);
     local.cores_total = 12;
     local.cores_free = 12;
@@ -65,7 +65,7 @@ TEST(RankPrefersMoreFreeSlots) {
 }
 
 TEST(RankIdleRemoteBeatsBusyLocalOnSmallInput) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     Candidate local = Node("local", 0, true);
     local.cores_total = 8;
     local.in_flight = 7; // one slot left
@@ -76,7 +76,7 @@ TEST(RankIdleRemoteBeatsBusyLocalOnSmallInput) {
 }
 
 TEST(RankHugeInputPrefersNodeWithInputs) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     constexpr int64_t kHuge = 50'000'000'000LL;
     Candidate local = Node("local", 0, true);
     Candidate cold = Node("cold", -1);
@@ -87,8 +87,8 @@ TEST(RankHugeInputPrefersNodeWithInputs) {
 
 TEST(RankIgnoresLiveCoresFreeWhenBusy) {
     // A machine at 100% CPU reports cores_free≈0; capacity must still use cores_total.
-    zeromesh::v1::TaskSpec spec;
-    spec.mutable_resources()->set_cores(8);
+    zeromesh::sched::Need spec;
+    spec.cores = 8;
     Candidate busy = Node("busy", 0);
     busy.cores_total = 20;
     busy.cores_free = 0;
@@ -100,7 +100,7 @@ TEST(RankIgnoresLiveCoresFreeWhenBusy) {
 }
 
 TEST(RankFiltersArchAndRemoteOnly) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     Candidate arm = Node("arm", 0);
     arm.arch = "aarch64";
     Candidate full = Node("full", 0);
@@ -111,25 +111,25 @@ TEST(RankFiltersArchAndRemoteOnly) {
 
     // Empty arch = the local node's arch.
     ASSERT_EQ(Ids(Rank(spec, all)), (std::vector<std::string>{"local", "small-mem", "peer"}));
-    spec.mutable_resources()->set_mem_bytes(1000);
+    spec.mem_bytes = 1000;
     ASSERT_EQ(Ids(Rank(spec, all)), (std::vector<std::string>{"local", "peer"}));
-    spec.mutable_policy()->set_may_run_local(false);
+    spec.may_local = false;
     ASSERT_EQ(Ids(Rank(spec, all)), (std::vector<std::string>{"peer"}));
-    spec.mutable_policy()->set_may_run_local(true);
-    spec.mutable_policy()->set_may_run_remote(false);
+    spec.may_local = true;
+    spec.may_remote = false;
     ASSERT_EQ(Ids(Rank(spec, all)), (std::vector<std::string>{"local"}));
-    spec.mutable_policy()->set_may_run_remote(true);
-    spec.mutable_resources()->set_arch("aarch64");
+    spec.may_remote = true;
+    spec.arch = "aarch64";
     ASSERT_EQ(Ids(Rank(spec, all)), (std::vector<std::string>{"arm"}));
-    spec.mutable_resources()->set_arch("");
-    spec.mutable_resources()->set_cores(5);
+    spec.arch = "";
+    spec.cores = 5;
     ASSERT_TRUE(Rank(spec, all).empty());
 }
 
 TEST(RankInFlightCapUsesCoresTotal) {
     // At most cores_total / task.cores tasks in flight per node.
-    zeromesh::v1::TaskSpec spec;
-    spec.mutable_resources()->set_cores(2);
+    zeromesh::sched::Need spec;
+    spec.cores = 2;
     Candidate n;
     n.node_id = "n";
     n.cores_total = 4;
@@ -147,7 +147,7 @@ TEST(RankCapacityIgnoresLoadDerivedCoresFree) {
     // Root cause of flaky local multi-task jobs: cores_free = round(cores_total*(1-load))
     // can be 0 under brief 100% load. That must not make a node ineligible — idle is a
     // ranking signal (cpu_load_pct), capacity is cores_total.
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     Candidate hot;
     hot.node_id = "hot";
     hot.cores_total = 8;
@@ -184,7 +184,7 @@ Candidate WithLife(Candidate c, double expected_min_s) {
 } // namespace
 
 TEST(RankFlakyDonorLosesToStableDonorWithEqualCapacity) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     // Same cores, and the flaky one even holds all the inputs already; it still loses because
     // little of what it is given will ever finish.
     Candidate flaky = WithLife(Node("flaky", 0), 60.0);
@@ -194,7 +194,7 @@ TEST(RankFlakyDonorLosesToStableDonorWithEqualCapacity) {
 }
 
 TEST(RankLiveputWeighsSlotsTimesExpectedLife) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     Candidate big_flaky = WithLife(Node("big-flaky", 0), 100.0); // 16 slots x 100 = 1600
     big_flaky.cores_total = 16;
     Candidate small_stable = WithLife(Node("small-stable", 0), 600.0); // 4 x 600 = 2400
@@ -205,7 +205,7 @@ TEST(RankLiveputWeighsSlotsTimesExpectedLife) {
 }
 
 TEST(RankNoHistoryKeepsTheExistingOrder) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     Candidate local = Node("local", 0, true);
     local.cores_total = 12;
     Candidate peer = Node("peer", -1);
@@ -225,7 +225,7 @@ TEST(RankNoHistoryKeepsTheExistingOrder) {
 }
 
 TEST(RankUnknownLifeCountsAsTheAverageOfTheKnown) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     // One known candidate and one unknown: the unknown one is neutral, so the old
     // missing-bytes order decides.
     Candidate known = WithLife(Node("known", 900), 300.0);
@@ -234,7 +234,7 @@ TEST(RankUnknownLifeCountsAsTheAverageOfTheKnown) {
 }
 
 TEST(RankNearlyEqualLiveputFallsBackToMissingBytes) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     // 150 s versus 151 s of expected life is noise; the cheaper transfer wins.
     Candidate warm = WithLife(Node("warm", 0), 150.0);
     Candidate cold = WithLife(Node("cold", 500), 151.0);
@@ -242,7 +242,7 @@ TEST(RankNearlyEqualLiveputFallsBackToMissingBytes) {
 }
 
 TEST(RankMissingInputOutweighsExtraSlots) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     // Five more slots do not make up for 5 GB that must cross a 10 MB/s link before a 60 s task starts.
     Candidate cold = Node("cold", 5'000'000'000LL);
     cold.cores_total = 12;
@@ -254,7 +254,7 @@ TEST(RankMissingInputOutweighsExtraSlots) {
 }
 
 TEST(RankUsesMeasuredBandwidthForTransferCost) {
-    zeromesh::v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     Candidate slow = Node("slow", 200'000'000);
     slow.cores_total = 8;
     slow.bandwidth_bytes_per_s = 1'000'000.0; // 200 s
@@ -265,8 +265,8 @@ TEST(RankUsesMeasuredBandwidthForTransferCost) {
 }
 
 TEST(RankDonatedCoreLimitCapsSlots) {
-    zeromesh::v1::TaskSpec spec;
-    spec.mutable_resources()->set_cores(4);
+    zeromesh::sched::Need spec;
+    spec.cores = 4;
     Candidate c = Node("donor", 0);
     c.cores_total = 16;
     c.core_limit = 2; // the donor's policy donates 2 cores: not even one 4-core task fits
@@ -281,8 +281,8 @@ TEST(RankDonatedCoreLimitCapsSlots) {
 }
 
 TEST(RankHoldsCommittedMemoryAgainstTheDonorTotal) {
-    zeromesh::v1::TaskSpec spec;
-    spec.mutable_resources()->set_mem_bytes(4ll << 30);
+    zeromesh::sched::Need spec;
+    spec.mem_bytes = 4ll << 30;
     Candidate c = Node("donor", 0);
     c.cores_total = 16;
     c.mem_total = 16ull << 30;

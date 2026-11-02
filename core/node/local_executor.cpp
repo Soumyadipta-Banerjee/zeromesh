@@ -1,164 +1,21 @@
-#include <fstream>
 #include "node/local_executor.hpp"
 
 #include "node/convert.hpp"
-#include "node/mirror_manifest.hpp"
+#include "node/env_check.hpp"
 #include "node/requester_blob_source.hpp"
 
 #include <algorithm>
 #include <exception>
-#include <filesystem>
+#include <fstream>
 
 namespace zeromesh::node {
 
 namespace {
 
-v1::TaskResult Failed(const std::string& node_id, std::string error) {
-    v1::TaskResult r;
-    r.set_exit_code(-1);
-    r.set_executed_by(node_id);
-    r.set_error(std::move(error));
-    return r;
-}
-
-v1::TaskResult Cancelled(const std::string& node_id) {
-    v1::TaskResult r = Failed(node_id, "cancelled");
-    r.set_cancelled(true);
-    return r;
-}
-
-v1::TaskResult ToProto(const exec::RunResult& rr, const std::string& node_id) {
-    v1::TaskResult r;
-    r.set_exit_code(rr.exit_code);
-    r.set_timed_out(rr.timed_out);
-    r.set_cancelled(rr.cancelled);
-    *r.mutable_stdout() = node::ToProto(rr.stdout_digest);
-    *r.mutable_stderr() = node::ToProto(rr.stderr_digest);
-    r.set_stdout_head(rr.stdout_head);
-    r.set_stderr_head(rr.stderr_head);
-    for (const auto& o : rr.outputs) {
-        auto* e = r.add_outputs();
-        e->set_path(o.path);
-        *e->mutable_digest() = node::ToProto(o.digest);
-        e->set_is_dir(o.is_dir);
-        e->set_is_executable(o.is_executable);
-        e->set_is_symlink(o.is_symlink);
-        e->set_symlink_target(o.symlink_target);
-    }
-    r.set_executed_by(node_id);
-    r.set_duration_ms(rr.duration.count());
-    r.set_error(rr.error);
-    return r;
-}
-
-v1::TaskState StateFromResult(const v1::TaskResult& r) {
-    if (r.cancelled()) return v1::CANCELLED;
-    if (r.timed_out() || r.exit_code() != 0 || !r.error().empty()) return v1::FAILED;
-    return v1::SUCCEEDED;
-}
-
-} // namespace
-
-LocalExecutor::LocalExecutor(std::shared_ptr<exec::SandboxRunner> runner, std::shared_ptr<plugin::Registry> registry,
-                             std::string node_id, int slots, std::filesystem::path scratch_root,
-                             std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory)
-    : runner_(std::move(runner)), registry_(std::move(registry)), node_id_(std::move(node_id)),
-      scratch_root_(std::move(scratch_root)), cas_(std::move(cas)), client_factory_(std::move(client_factory)) {
-    core_capacity_ = std::max(1, slots);
-    int n = core_capacity_;
-    workers_.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        workers_.emplace_back([this](std::stop_token st) { Worker(st); });
-    }
-}
-
-LocalExecutor::~LocalExecutor() {
-    {
-        std::lock_guard lock(mu_);
-        for (auto& [id, item] : items_) item->stop.request_stop();
-    }
-    for (auto& w : workers_) w.request_stop();
-    cv_.notify_all();
-    workers_.clear(); // joins
-
-    // Tasks that never started still get their single on_done.
-    std::deque<std::shared_ptr<Item>> left;
-    {
-        std::lock_guard lock(mu_);
-        left.swap(queue_);
-        items_.clear();
-    }
-    for (auto& item : left) {
-        if (item->cb.on_done) item->cb.on_done(Cancelled(node_id_));
-    }
-}
-
-void LocalExecutor::Execute(const std::string& task_id, const v1::TaskSpec& spec, TaskCallbacks cb) {
-    auto item = std::make_shared<Item>();
-    item->task_id = task_id;
-    item->spec = spec;
-    item->cb = std::move(cb);
-    {
-        std::lock_guard lock(mu_);
-        items_[task_id] = item;
-        queue_.push_back(item);
-    }
-    cv_.notify_one();
-}
-
-void LocalExecutor::Cancel(const std::string& task_id) {
-    std::shared_ptr<Item> dequeued;
-    {
-        std::lock_guard lock(mu_);
-        auto it = items_.find(task_id);
-        if (it == items_.end()) return;
-        auto item = it->second;
-        if (item->started) {
-            item->stop.request_stop();
-            return;
-        }
-        std::erase(queue_, item);
-        items_.erase(it);
-        dequeued = std::move(item);
-    }
-    RememberFinished(dequeued->task_id, dequeued->spec, v1::CANCELLED);
-    if (dequeued->cb.on_done) dequeued->cb.on_done(Cancelled(node_id_));
-}
-
-void LocalExecutor::RememberFinished(std::string task_id, v1::TaskSpec spec, v1::TaskState state) {
-    std::lock_guard lock(mu_);
-    recent_.push_front(ActiveItem{std::move(task_id), std::move(spec), true, state});
-    while (recent_.size() > kRecentLimit) recent_.pop_back();
-}
-
-std::vector<LocalExecutor::ActiveItem> LocalExecutor::ListActive() const {
-    std::lock_guard lock(mu_);
-    std::vector<ActiveItem> out;
-    out.reserve(items_.size() + recent_.size());
-    for (const auto& [id, item] : items_) {
-        out.push_back(ActiveItem{item->task_id, item->spec, item->started, item->started ? v1::RUNNING : v1::QUEUED});
-    }
-    for (const auto& done : recent_) out.push_back(done);
-    return out;
-}
-
-void LocalExecutor::ClearFinished() {
-    std::lock_guard lock(mu_);
-    recent_.clear();
-}
-
-int LocalExecutor::CoresInUse() const {
-    std::lock_guard lock(mu_);
-    return cores_in_use_;
-}
-
-namespace {
-
 constexpr std::chrono::milliseconds kMemoryPoll{100};
-// Free memory left after a task starts. A compiler's footprint grows over its first seconds, so a
+// Free memory left after a batch starts. A process's footprint grows over its first seconds, so a
 // burst of starts that each fit the free memory *now* can still add up to more than the node has.
-// Headroom tracks a share of RAM (earlyoom-style ~10–15%). A fixed 768MiB *floor* serialized
-// donors on ≤2GiB nodes; keep a modest floor and cap so large machines still reserve enough.
+// The headroom is a share of RAM (earlyoom-style), within a floor and a ceiling.
 constexpr uint64_t kMemoryHeadroomFloor = 128ull << 20;
 constexpr uint64_t kMemoryHeadroomCeil = 768ull << 20;
 constexpr double kMemoryHeadroomShare = 0.15;
@@ -181,26 +38,111 @@ MemInfo ReadMemInfo() {
     return m; // unreadable fields stay at UINT64_MAX: do not hold work back
 }
 
+BatchDone Done(const std::string& node, v1::FailureKind kind, std::string message, bool cancelled = false) {
+    BatchDone d;
+    d.node = node;
+    d.failure = kind;
+    d.message = std::move(message);
+    d.cancelled = cancelled;
+    return d;
+}
+
 } // namespace
 
-// A task that declares memory starts only when that much is free (plus headroom), and no sooner
-// than kStartSpacing after the previous start so the node's free-memory figure can catch up.
-// The first task always runs, so an undersized node still makes progress.
-bool LocalExecutor::MemoryAllowsLocked(const Item& item) const {
-    const int64_t need = item.spec.resources().mem_bytes();
-    if (need <= 0 || mem_in_use_ == 0) return true;
-    if (std::chrono::steady_clock::now() - last_start_ < kStartSpacing) return false;
-    const MemInfo m = ReadMemInfo();
-    if (m.available == UINT64_MAX) return true;
-    uint64_t headroom = static_cast<uint64_t>(m.total * kMemoryHeadroomShare);
-    if (headroom < kMemoryHeadroomFloor) headroom = kMemoryHeadroomFloor;
-    if (headroom > kMemoryHeadroomCeil) headroom = kMemoryHeadroomCeil;
-    return m.available >= static_cast<uint64_t>(need) + headroom;
+LocalExecutor::LocalExecutor(std::shared_ptr<exec::BatchRunner> runner, std::shared_ptr<plugin::Registry> registry,
+                             std::string node_id, int core_capacity, std::filesystem::path state_dir,
+                             std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory)
+    : runner_(std::move(runner)), registry_(std::move(registry)), node_id_(std::move(node_id)),
+      core_capacity_(std::max(1, core_capacity)), state_dir_(std::move(state_dir)), cas_(std::move(cas)),
+      client_factory_(std::move(client_factory)) {
+    workers_.reserve(static_cast<size_t>(core_capacity_));
+    for (int i = 0; i < core_capacity_; ++i) {
+        workers_.emplace_back([this](std::stop_token st) { Worker(st); });
+    }
+}
+
+LocalExecutor::~LocalExecutor() {
+    {
+        std::lock_guard lock(mu_);
+        for (auto& [id, item] : items_) item->stop.request_stop();
+    }
+    for (auto& w : workers_) w.request_stop();
+    cv_.notify_all();
+    workers_.clear(); // joins
+
+    std::deque<std::shared_ptr<Item>> left;
+    {
+        std::lock_guard lock(mu_);
+        left.swap(queue_);
+        items_.clear();
+    }
+    for (auto& item : left) {
+        if (item->cb.on_done) item->cb.on_done(Done(node_id_, v1::FAILURE_CANCELLED, "node shutting down", true));
+    }
+}
+
+void LocalExecutor::Execute(const std::string& batch_id, const v1::BatchSpec& spec, std::set<std::string>,
+                            BatchCallbacks cb) {
+    auto item = std::make_shared<Item>();
+    item->batch_id = batch_id;
+    item->spec = spec;
+    item->cb = std::move(cb);
+    item->cores = std::clamp(spec.resources().cores(), 1, core_capacity_);
+    item->mem = std::max<int64_t>(spec.resources().mem_bytes(), 0);
+    {
+        std::lock_guard lock(mu_);
+        items_[batch_id] = item;
+        queue_.push_back(item);
+    }
+    cv_.notify_all();
+}
+
+void LocalExecutor::Cancel(const std::string& batch_id) {
+    std::shared_ptr<Item> dequeued;
+    {
+        std::lock_guard lock(mu_);
+        auto it = items_.find(batch_id);
+        if (it == items_.end()) return;
+        auto item = it->second;
+        if (item->started) {
+            item->stop.request_stop();
+            return;
+        }
+        std::erase(queue_, item);
+        items_.erase(it);
+        dequeued = std::move(item);
+    }
+    if (dequeued->cb.on_done) dequeued->cb.on_done(Done(node_id_, v1::FAILURE_CANCELLED, "cancelled", true));
+}
+
+int LocalExecutor::CoresInUse() const {
+    std::lock_guard lock(mu_);
+    return cores_in_use_;
 }
 
 int64_t LocalExecutor::MemInUse() const {
     std::lock_guard lock(mu_);
     return mem_in_use_;
+}
+
+std::vector<LocalExecutor::Active> LocalExecutor::ListActive() const {
+    std::lock_guard lock(mu_);
+    std::vector<Active> out;
+    for (const auto& [id, item] : items_) out.push_back({item->batch_id, item->spec, item->started, item->done, item->current});
+    return out;
+}
+
+// A batch that declares memory starts only when that much is free (plus headroom), and no sooner
+// than kStartSpacing after the previous start so free memory can catch up. The first batch always
+// runs, so an undersized node still makes progress.
+bool LocalExecutor::MemoryAllowsLocked(const Item& item) const {
+    if (item.mem <= 0 || mem_in_use_ == 0) return true;
+    if (std::chrono::steady_clock::now() - last_start_ < kStartSpacing) return false;
+    const MemInfo m = ReadMemInfo();
+    if (m.available == UINT64_MAX) return true;
+    const uint64_t headroom = std::clamp(static_cast<uint64_t>(static_cast<double>(m.total) * kMemoryHeadroomShare),
+                                         kMemoryHeadroomFloor, kMemoryHeadroomCeil);
+    return m.available >= static_cast<uint64_t>(item.mem) + headroom;
 }
 
 void LocalExecutor::Worker(std::stop_token st) {
@@ -210,76 +152,66 @@ void LocalExecutor::Worker(std::stop_token st) {
             std::unique_lock lock(mu_);
             // Polled, not only notified: free memory changes without anyone calling notify.
             while (!cv_.wait_for(lock, st, kMemoryPoll, [this] {
-                if (queue_.empty()) return false;
-                int need = std::max(queue_.front()->spec.resources().cores(), 1);
-                if (need > core_capacity_) need = core_capacity_;
-                return cores_in_use_ + need <= core_capacity_ && MemoryAllowsLocked(*queue_.front());
+                return !queue_.empty() && cores_in_use_ + queue_.front()->cores <= core_capacity_ &&
+                       MemoryAllowsLocked(*queue_.front());
             })) {
                 if (st.stop_requested()) return;
             }
             item = queue_.front();
             queue_.pop_front();
-            int need = std::max(item->spec.resources().cores(), 1);
-            if (need > core_capacity_) need = core_capacity_;
-            item->cores_held = need;
-            cores_in_use_ += need;
-            item->mem_held = std::max<int64_t>(item->spec.resources().mem_bytes(), 0);
-            mem_in_use_ += item->mem_held;
+            cores_in_use_ += item->cores;
+            mem_in_use_ += item->mem;
             last_start_ = std::chrono::steady_clock::now();
             item->started = true;
         }
-        v1::TaskResult result = Run(*item);
-        const v1::TaskState state = StateFromResult(result);
+        BatchDone done = Run(*item);
         {
             std::lock_guard lock(mu_);
-            cores_in_use_ -= item->cores_held;
-            mem_in_use_ -= item->mem_held;
-            auto it = items_.find(item->task_id);
+            cores_in_use_ -= item->cores;
+            mem_in_use_ -= item->mem;
+            auto it = items_.find(item->batch_id);
             if (it != items_.end() && it->second == item) items_.erase(it);
         }
         cv_.notify_all();
-        RememberFinished(item->task_id, item->spec, state);
-        if (item->cb.on_done) item->cb.on_done(std::move(result));
+        if (item->cb.on_done) item->cb.on_done(std::move(done));
     }
 }
 
-v1::TaskResult LocalExecutor::Run(Item& item) {
-    const v1::TaskSpec& spec = item.spec;
-    if (item.stop.stop_requested()) return Cancelled(node_id_);
-    if (item.cb.on_state) item.cb.on_state(v1::RUNNING, "");
+BatchDone LocalExecutor::Run(Item& item) {
+    const v1::BatchSpec& spec = item.spec;
+    if (item.stop.stop_requested()) return Done(node_id_, v1::FAILURE_CANCELLED, "cancelled", true);
+    if (item.cb.on_placed) item.cb.on_placed(node_id_);
 
-    const std::string& env_name = spec.env_spec().name();
-    plugin::IEnvProvider* env = registry_ ? registry_->Env(env_name) : nullptr;
-    if (env == nullptr) return Failed(node_id_, "no env provider '" + env_name + "'");
-
-    plugin::TaskContext ctx;
-    ctx.task_id = item.task_id;
-    ctx.env.params.insert(spec.env_spec().params().begin(), spec.env_spec().params().end());
-    ctx.env.argv.assign(spec.argv().begin(), spec.argv().end());
-
-    std::string requester;
-    if (auto it = ctx.env.params.find(kMirrorRequesterParam); it != ctx.env.params.end()) {
-        requester = it->second;
+    const bool tree = spec.env().has_tree();
+    plugin::IEnvProvider* env = registry_ ? registry_->Env(tree ? "tree" : "host") : nullptr;
+    if (env == nullptr) {
+        return Done(node_id_, v1::FAILURE_ENV_UNAVAILABLE, std::string("no ") + (tree ? "tree" : "host") +
+                                                               " environment provider on this node");
     }
-    ctx.requester_node_id = requester.empty() ? node_id_ : requester;
 
+    plugin::BatchContext ctx;
+    ctx.batch_id = item.batch_id;
+    if (tree) {
+        ctx.env.params[plugin::kTreeParam] = spec.env().tree().hash();
+        ctx.env.params[plugin::kRequesterParam] = spec.requester();
+    }
+    ctx.requester_node_id = spec.requester().empty() ? node_id_ : spec.requester();
     std::error_code ec;
-    const auto scratch = scratch_root_ / store::CasStore::ComputeDigest(item.task_id).hash;
+    const auto scratch = state_dir_ / "scratch" / ("env-" + store::CasStore::ComputeDigest(item.batch_id).hash);
     std::filesystem::create_directories(scratch, ec);
     ctx.scratch_dir = scratch;
+    ctx.cache_dir = state_dir_ / "envs";
+    if (cas_) ctx.profile_dir = cas_->GetBasePath() / "profiles";
 
     std::unique_ptr<plugin::IBlobSource> blob_source;
-    if (env_name == "mirror") {
-        if (cas_) ctx.profile_dir = cas_->GetBasePath() / "profiles";
-        if (requester.empty() || ctx.requester_node_id == node_id_) {
+    if (tree) {
+        if (ctx.requester_node_id == node_id_) {
             blob_source = std::make_unique<LocalCasBlobSource>(cas_);
         } else {
-            if (!client_factory_) {
-                return Failed(node_id_, "mirror env: no peer client factory configured");
-            }
-            auto client = client_factory_(ctx.requester_node_id);
+            auto client = client_factory_ ? client_factory_(ctx.requester_node_id) : nullptr;
             if (!client) {
-                return Failed(node_id_, "mirror env: requester " + ctx.requester_node_id + " is not reachable");
+                return Done(node_id_, v1::FAILURE_ENV_UNAVAILABLE,
+                            "requester " + ctx.requester_node_id + " is not reachable to fetch the environment");
             }
             blob_source = std::make_unique<RequesterBlobSource>(cas_, std::move(client));
         }
@@ -287,57 +219,91 @@ v1::TaskResult LocalExecutor::Run(Item& item) {
     }
 
     try {
-        plugin::Availability avail = env->Check(ctx.env);
-        if (!avail.ok) {
-            return Failed(node_id_,
-                          avail.reason.empty() ? "env provider '" + env_name + "' cannot run this task" : avail.reason);
-        }
-        plugin::Result<plugin::SandboxEnv> prepared = env->Prepare(ctx);
+        if (auto avail = env->Check(ctx.env); !avail.ok) return Done(node_id_, v1::FAILURE_ENV_UNAVAILABLE, avail.reason);
+        auto prepared = env->Prepare(ctx);
         if (!prepared.value) {
-            return Failed(node_id_, prepared.error.empty() ? "env provider '" + env_name + "' failed to prepare"
-                                                           : prepared.error);
+            std::filesystem::remove_all(scratch, ec);
+            return Done(node_id_, v1::FAILURE_ENV_UNAVAILABLE,
+                        prepared.error.empty() ? "the environment could not be prepared" : prepared.error);
         }
 
-        exec::RunSpec rs;
-        rs.argv.assign(spec.argv().begin(), spec.argv().end());
-        rs.env.assign(spec.env().begin(), spec.env().end());
-        std::sort(rs.env.begin(), rs.env.end());
+        exec::BatchRunSpec rs;
         rs.input_root = FromProto(spec.input_root());
-        rs.working_dir = spec.working_dir().empty() ? "." : spec.working_dir();
-        rs.outputs.assign(spec.outputs().begin(), spec.outputs().end());
-        rs.capture_changed = spec.capture_changed();
-        int timeout_s = spec.policy().timeout_s() > 0 ? spec.policy().timeout_s() : 3600;
-        rs.timeout = std::chrono::seconds(timeout_s);
-        rs.allow_network = spec.policy().allow_network();
         rs.sandbox_env = std::move(*prepared.value);
+        std::map<std::string, std::string> vars(spec.env().vars().begin(), spec.env().vars().end());
+        rs.env.assign(vars.begin(), vars.end());
+        for (const auto& bi : spec.items()) {
+            exec::ItemSpec it;
+            it.id = bi.id();
+            it.argv.assign(bi.argv().begin(), bi.argv().end());
+            std::map<std::string, std::string> ienv(bi.env().begin(), bi.env().end());
+            it.env.assign(ienv.begin(), ienv.end());
+            it.cwd = bi.cwd().empty() ? "." : bi.cwd();
+            it.outputs.assign(bi.outputs().begin(), bi.outputs().end());
+            it.optional_outputs.assign(bi.optional_outputs().begin(), bi.optional_outputs().end());
+            it.capture_changed = bi.capture_changed();
+            it.depfile = bi.depfile();
+            it.seq = bi.seq();
+            it.checkpoint = FromProto(bi.checkpoint());
+            rs.items.push_back(std::move(it));
+        }
+        rs.combine_argv.assign(spec.combine().argv().begin(), spec.combine().argv().end());
+        rs.cores = std::max(spec.resources().cores(), 1);
+        rs.mem_bytes = static_cast<uint64_t>(std::max<int64_t>(spec.mem_limit(), 0));
+        rs.network = spec.network();
+        rs.timeout = std::chrono::seconds(spec.timeout_s() > 0 ? spec.timeout_s() : 3600);
+        rs.hung_after = std::chrono::seconds(std::max(spec.hung_after_s(), 0));
+        if (spec.warm()) {
+            rs.warm_dir = state_dir_ / "warm" /
+                          store::CasStore::ComputeDigest(spec.kind() + "\n" + EnvIdentity(spec.env())).hash.substr(0, 32);
+        }
         rs.node_id = node_id_;
-        rs.task_tag = item.task_id;
-        if (item.cb.on_unit) {
-            rs.on_unit = [&item](const std::string& unit_id, const store::Digest& digest) {
-                item.cb.on_unit(unit_id, ToProto(digest));
-            };
-        }
-        rs.cores = spec.resources().cores();
-        if (spec.resources().mem_bytes() > 0) {
-            rs.mem_bytes = static_cast<uint64_t>(spec.resources().mem_bytes());
-        }
+        rs.tag = item.batch_id;
+        rs.stream_logs = spec.stream_logs();
 
-        exec::LogSink sink;
-        if (item.cb.on_log) sink = [&item](int fd, std::string_view chunk) { item.cb.on_log(fd, chunk); };
+        exec::BatchCallbacks cb;
+        cb.on_started = [this, &item](const std::string& id) {
+            {
+                std::lock_guard lock(mu_); // ListActive reads `current`
+                item.current = id;
+            }
+            if (item.cb.on_started) item.cb.on_started(id);
+        };
+        cb.on_log = [&item](const std::string& id, int fd, std::string_view chunk) {
+            if (!item.cb.on_log) return;
+            v1::ItemLog log;
+            log.set_id(id);
+            log.set_fd(fd);
+            log.set_chunk(std::string(chunk));
+            item.cb.on_log(log);
+        };
+        cb.on_item = [this, &item](exec::ItemRunResult r) {
+            {
+                std::lock_guard lock(mu_);
+                ++item.done;
+            }
+            if (item.cb.on_item) item.cb.on_item(ToProto(r), node_id_);
+        };
+        cb.on_checkpoint = [&item](const std::string& id, const store::Digest& tree) {
+            if (item.cb.on_checkpoint) item.cb.on_checkpoint(id, ToProto(tree));
+        };
 
-        exec::RunResult rr;
+        exec::BatchRunResult rr;
         try {
-            rr = runner_->Run(rs, sink, item.stop.get_token());
+            rr = runner_->Run(rs, cb, item.stop.get_token());
         } catch (const std::exception& e) {
             env->Release(ctx);
-            return Failed(node_id_, std::string("sandbox: ") + e.what());
+            std::filesystem::remove_all(scratch, ec);
+            return Done(node_id_, v1::FAILURE_SANDBOX, std::string("sandbox: ") + e.what());
         }
         env->Release(ctx);
         std::filesystem::remove_all(scratch, ec);
-        return ToProto(rr, node_id_);
+        if (!rr.error.empty()) return Done(node_id_, v1::FAILURE_SANDBOX, rr.error);
+        if (rr.cancelled) return Done(node_id_, v1::FAILURE_CANCELLED, "cancelled", true);
+        return Done(node_id_, v1::FAILURE_NONE, "");
     } catch (const std::exception& e) {
         std::filesystem::remove_all(scratch, ec);
-        return Failed(node_id_, std::string("env provider '") + env_name + "': " + e.what());
+        return Done(node_id_, v1::FAILURE_ENV_UNAVAILABLE, std::string("environment: ") + e.what());
     }
 }
 

@@ -1,9 +1,7 @@
 #include "tests/unit/node_fixture.hpp"
 
-#include "node/action_cache.hpp"
 #include "node/convert.hpp"
 #include "node/donor_policy.hpp"
-#include "node/job_manager.hpp"
 #include "sched/placer.hpp"
 
 #include <atomic>
@@ -25,9 +23,11 @@ void HExpect(bool cond, const std::string& what) {
     if (!cond) throw std::runtime_error(what);
 }
 
+// A placer over `self`, and the batches handed to it (one remote-only item each).
 struct HedgeRequester {
+    // Declared first so they outlive the placer: its workers report into them until it is destroyed.
+    std::vector<std::unique_ptr<zeromesh::testing::AttemptLog>> logs;
     std::shared_ptr<zeromesh::sched::Placer> placer;
-    std::unique_ptr<zeromesh::node::JobManager> jm;
 
     explicit HedgeRequester(TestNodeFull& self) {
         auto factory = [&self](const zeromesh::net::Peer& p) {
@@ -36,9 +36,25 @@ struct HedgeRequester {
         };
         placer = std::make_shared<zeromesh::sched::Placer>(self.executor, self.peers, factory, self.cas, self.merkle,
                                                            self.node_id, [&self] { return self.telemetry; });
-        jm = std::make_unique<zeromesh::node::JobManager>(
-            self.cas, self.merkle, std::make_shared<zeromesh::node::ActionCache>(self.cas), placer);
     }
+    void Submit(int n, const std::string& script) {
+        for (int i = 0; i < n; ++i) {
+            logs.push_back(std::make_unique<zeromesh::testing::AttemptLog>());
+            placer->Execute("run/b" + std::to_string(i), zeromesh::testing::ShBatch({{"t" + std::to_string(i), script}}),
+                            {}, logs.back()->Callbacks());
+        }
+    }
+    bool Done(std::chrono::milliseconds limit) {
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        for (auto& l : logs) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+            if (!l->Wait(std::max(left, std::chrono::milliseconds(1)))) return false;
+        }
+        return true;
+    }
+    bool Ok(size_t i) { return logs[i]->result.failure == v1::FAILURE_NONE && !logs[i]->items.empty(); }
+    std::string Node(size_t i) { return logs[i]->items.empty() ? "" : logs[i]->items[0].second; }
+    std::string Message(size_t i) { return logs[i]->result.message; }
 };
 
 // A hedge config that reacts fast and, unless a test overrides it, hedges in a small tail.
@@ -53,20 +69,6 @@ zeromesh::sched::Placer::HedgeConfig Eager(std::function<double(const std::strin
     return c;
 }
 
-v1::JobSpec Tasks(int n, const std::string& script) {
-    v1::JobSpec job;
-    job.set_name("hedge");
-    for (int i = 0; i < n; ++i) {
-        auto* t = job.add_tasks();
-        t->set_name("t" + std::to_string(i));
-        t->add_argv("sh");
-        t->add_argv("-c");
-        t->add_argv(script);
-        t->mutable_policy()->set_may_run_local(false);
-    }
-    return job;
-}
-
 bool WaitUntil(const std::function<bool()>& pred, std::chrono::milliseconds limit) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -74,10 +76,6 @@ bool WaitUntil(const std::function<bool()>& pred, std::chrono::milliseconds limi
         std::this_thread::sleep_for(20ms);
     }
     return pred();
-}
-
-bool JobDone(zeromesh::node::JobManager& jm, const std::string& id, std::chrono::milliseconds limit) {
-    return WaitUntil([&] { return jm.Get(id)->done(); }, limit);
 }
 
 } // namespace
@@ -94,17 +92,16 @@ TEST(HedgeFinishesOnSurvivorWhenPrimaryDonorDies) {
     HedgeRequester req(a);
     req.placer->SetHedging(Eager([](const std::string& node, double) { return node == "node-d1" ? 0.1 : 0.99; }));
 
-    const std::string id = req.jm->Submit(Tasks(1, "sleep 2; echo ok"));
+    req.Submit(1, "sleep 2; echo ok");
     ASSERT_TRUE(WaitUntil([&] { return req.placer->InFlightOn("node-d1") == 1; }, 10s));
     a.peers->Upsert(d2.AsPeer());
     ASSERT_TRUE(WaitUntil([&] { return req.placer->Hedging().launched == 1; }, 10s));
 
     d1.Stop(); // the primary's donor disappears while the hedge is running
 
-    ASSERT_TRUE(JobDone(*req.jm, id, 30s));
-    auto st = req.jm->Get(id);
-    HExpect(st->tasks().at("t0") == v1::SUCCEEDED, st->results().at("t0").error());
-    ASSERT_EQ(st->results().at("t0").executed_by(), std::string("node-d2"));
+    ASSERT_TRUE(req.Done(30s));
+    HExpect(req.Ok(0), req.Message(0));
+    ASSERT_EQ(req.Node(0), std::string("node-d2"));
     ASSERT_EQ(req.placer->Hedging().won, static_cast<uint64_t>(1));
 }
 
@@ -121,10 +118,10 @@ TEST(HedgeDisabledWithoutASurvivalFunction) {
     HedgeRequester req(a);
     req.placer->SetHedging(Eager(nullptr)); // no hazard model: never hedge
 
-    const std::string id = req.jm->Submit(Tasks(1, "sleep 1"));
+    req.Submit(1, "sleep 1");
     std::this_thread::sleep_for(600ms);
     ASSERT_EQ(req.placer->Hedging().launched, static_cast<uint64_t>(0));
-    ASSERT_TRUE(JobDone(*req.jm, id, 30s));
+    ASSERT_TRUE(req.Done(30s));
 }
 
 TEST(HedgeNotLaunchedOutsideTheTail) {
@@ -142,11 +139,11 @@ TEST(HedgeNotLaunchedOutsideTheTail) {
     cfg.tail_max_running = 2;
     req.placer->SetHedging(cfg);
 
-    const std::string id = req.jm->Submit(Tasks(6, "sleep 2"));
+    req.Submit(6, "sleep 2");
     // Six tasks are running: far from the tail, so no hedge although every survival is 0.
     std::this_thread::sleep_for(700ms);
     ASSERT_EQ(req.placer->Hedging().launched, static_cast<uint64_t>(0));
-    ASSERT_TRUE(JobDone(*req.jm, id, 60s));
+    ASSERT_TRUE(req.Done(60s));
 }
 
 TEST(HedgeNeverExceedsMaxCopies) {
@@ -169,13 +166,13 @@ TEST(HedgeNeverExceedsMaxCopies) {
         return req.placer->InFlightOn("node-d1") + req.placer->InFlightOn("node-d2") +
                req.placer->InFlightOn("node-d3");
     };
-    const std::string id = req.jm->Submit(Tasks(1, "sleep 4"));
+    req.Submit(1, "sleep 4");
     ASSERT_TRUE(WaitUntil([&] { return req.placer->Hedging().launched == 1; }, 10s));
     // Several more scan intervals pass; the cap of 2 copies holds.
     std::this_thread::sleep_for(1s);
     ASSERT_EQ(req.placer->Hedging().launched, static_cast<uint64_t>(1));
     ASSERT_EQ(copies(), 2);
-    ASSERT_TRUE(JobDone(*req.jm, id, 30s));
+    ASSERT_TRUE(req.Done(30s));
 }
 
 TEST(HedgeMaxCopiesThreeAllowsTwoHedges) {
@@ -196,11 +193,11 @@ TEST(HedgeMaxCopiesThreeAllowsTwoHedges) {
     cfg.max_copies = 3;
     req.placer->SetHedging(cfg);
 
-    const std::string id = req.jm->Submit(Tasks(1, "sleep 4"));
+    req.Submit(1, "sleep 4");
     ASSERT_TRUE(WaitUntil([&] { return req.placer->Hedging().launched == 2; }, 10s));
     std::this_thread::sleep_for(1s);
     ASSERT_EQ(req.placer->Hedging().launched, static_cast<uint64_t>(2));
-    ASSERT_TRUE(JobDone(*req.jm, id, 30s));
+    ASSERT_TRUE(req.Done(30s));
 }
 
 TEST(HedgeLoserIsCancelledAndItsCpuIsCounted) {
@@ -218,14 +215,13 @@ TEST(HedgeLoserIsCancelledAndItsCpuIsCounted) {
 
     // 2 s on `fast`, so the hedge is certain to be running before the original finishes.
     const std::string script = "if [ \"$ZM_NODE_ID\" = node-fast ]; then sleep 2; else sleep 30; fi";
-    const std::string id = req.jm->Submit(Tasks(1, script));
+    req.Submit(1, script);
     ASSERT_TRUE(WaitUntil([&] { return req.placer->InFlightOn("node-fast") == 1; }, 10s));
     a.peers->Upsert(slow.AsPeer());
 
-    ASSERT_TRUE(JobDone(*req.jm, id, 20s));
-    auto st = req.jm->Get(id);
-    HExpect(st->tasks().at("t0") == v1::SUCCEEDED, st->results().at("t0").error());
-    ASSERT_EQ(st->results().at("t0").executed_by(), std::string("node-fast"));
+    ASSERT_TRUE(req.Done(20s));
+    HExpect(req.Ok(0), req.Message(0));
+    ASSERT_EQ(req.Node(0), std::string("node-fast"));
 
     // The hedge copy on `slow` is told to stop; its slot frees up instead of running 30 s.
     ASSERT_TRUE(WaitUntil([&] { return req.placer->InFlightOn("node-slow") == 0; }, 10s));
@@ -252,14 +248,13 @@ TEST(HedgeWinnerCpuIsCountedButNotWasted) {
     req.placer->SetHedging(Eager([](const std::string& node, double) { return node == "node-slow" ? 0.1 : 0.99; }));
 
     const std::string script = "if [ \"$ZM_NODE_ID\" = node-fast ]; then sleep 1; else sleep 30; fi";
-    const std::string id = req.jm->Submit(Tasks(1, script));
+    req.Submit(1, script);
     ASSERT_TRUE(WaitUntil([&] { return req.placer->InFlightOn("node-slow") == 1; }, 10s));
     a.peers->Upsert(fast.AsPeer());
 
-    ASSERT_TRUE(JobDone(*req.jm, id, 20s));
-    auto st = req.jm->Get(id);
-    HExpect(st->tasks().at("t0") == v1::SUCCEEDED, st->results().at("t0").error());
-    ASSERT_EQ(st->results().at("t0").executed_by(), std::string("node-fast"));
+    ASSERT_TRUE(req.Done(20s));
+    HExpect(req.Ok(0), req.Message(0));
+    ASSERT_EQ(req.Node(0), std::string("node-fast"));
     // The original (slow) copy was cancelled once the hedge won.
     ASSERT_TRUE(WaitUntil([&] { return req.placer->InFlightOn("node-slow") == 0; }, 10s));
     const auto h = req.placer->Hedging();

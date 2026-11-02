@@ -1,13 +1,13 @@
 #pragma once
 
-// An in-process node for NodeApi tests: its own state dir, identity, pins, CAS,
-// env-host registry, LocalExecutor (ZM_NODE_ID = node id) and a NodeService on
-// 127.0.0.1 with mTLS. Telemetry is fixed (on AC, 8 cores, arch "testarch").
+// An in-process node for NodeApi tests: its own state dir, identity, pins, CAS, env-host
+// registry, BatchRunner, LocalExecutor (ZM_NODE_ID = node id) and a NodeService on 127.0.0.1 with
+// mTLS. Telemetry is fixed (on AC, 8 cores, arch "testarch").
 
 #include "tests/unit/test_framework.hpp"
 #include "tests/unit/test_util.hpp"
 
-#include "exec/sandbox_runner.hpp"
+#include "exec/batch_runner.hpp"
 #include "net/identity.hpp"
 #include "net/peer_table.hpp"
 #include "net/pin_store.hpp"
@@ -20,15 +20,22 @@
 #include "node/node_service.hpp"
 #include "plugin/loader.hpp"
 #include "plugins/env-host/env_host.hpp"
+#include "sched/placer.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 namespace zeromesh::testing {
 
@@ -56,7 +63,7 @@ struct TestNodeFull {
     std::shared_ptr<store::CasStore> cas;
     std::shared_ptr<store::MerkleBuilder> merkle;
     std::shared_ptr<plugin::Registry> registry;
-    std::shared_ptr<exec::SandboxRunner> runner;
+    std::shared_ptr<exec::BatchRunner> runner;
     std::shared_ptr<node::LocalExecutor> executor;
     std::shared_ptr<net::PeerTable> peers = std::make_shared<net::PeerTable>();
     net::Telemetry telemetry = TestTelemetry();
@@ -71,8 +78,8 @@ struct TestNodeFull {
           cas(std::make_shared<store::CasStore>(dir / "cas")), merkle(std::make_shared<store::MerkleBuilder>(cas)),
           registry(std::make_shared<plugin::Registry>()) {
         registry->RegisterEnv(envhost::Make());
-        runner = std::make_shared<exec::SandboxRunner>(cas, merkle, dir / "scratch");
-        executor = std::make_shared<node::LocalExecutor>(runner, registry, node_id, 2, dir / "scratch", cas,
+        runner = std::make_shared<exec::BatchRunner>(cas, merkle, dir / "scratch");
+        executor = std::make_shared<node::LocalExecutor>(runner, registry, node_id, 2, dir / "state", cas,
                                                          node::NodeClientFactory{});
     }
 
@@ -134,7 +141,106 @@ struct TestNodeFull {
         p.cpu_load_pct = telemetry.cpu_load_pct;
         p.battery_pct = telemetry.battery_pct;
         p.is_charging = telemetry.on_ac;
+        p.gpus = telemetry.gpus;
         return p;
+    }
+};
+
+// A batch of shell items: {id, script}.
+inline v1::BatchSpec ShBatch(const std::vector<std::pair<std::string, std::string>>& items, v1::Digest root = {},
+                             v1::Where where = v1::REMOTE_ONLY) {
+    v1::BatchSpec b;
+    b.set_name("test/batch");
+    *b.mutable_input_root() = std::move(root);
+    b.mutable_resources()->set_cores(1);
+    b.set_timeout_s(3600);
+    b.set_preemptible(true);
+    b.set_where(where);
+    for (const auto& [id, script] : items) {
+        auto* it = b.add_items();
+        it->set_id(id);
+        it->add_argv("sh");
+        it->add_argv("-c");
+        it->add_argv(script);
+    }
+    return b;
+}
+
+// Everything one Execute reported, and a way to wait for its end.
+struct AttemptLog {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done{false};
+    node::BatchDone result;
+    std::vector<std::pair<v1::ItemOutcome, std::string>> items; // outcome, node
+    std::vector<std::string> placed;
+    std::vector<std::string> started;
+    std::string logs;
+    std::vector<std::tuple<std::string, v1::RejectKind, std::string>> rejects;
+
+    node::BatchCallbacks Callbacks() {
+        node::BatchCallbacks cb;
+        cb.on_placed = [this](const std::string& n) { Add([&] { placed.push_back(n); }); };
+        cb.on_started = [this](const std::string& id) { Add([&] { started.push_back(id); }); };
+        cb.on_log = [this](const v1::ItemLog& l) { Add([&] { logs += l.chunk(); }); };
+        cb.on_item = [this](const v1::ItemOutcome& o, const std::string& n) { Add([&] { items.emplace_back(o, n); }); };
+        cb.on_reject = [this](const std::string& n, v1::RejectKind k, const std::string& why) {
+            Add([&] { rejects.emplace_back(n, k, why); });
+        };
+        cb.on_done = [this](node::BatchDone d) {
+            Add([&] {
+                result = std::move(d);
+                done = true;
+            });
+        };
+        return cb;
+    }
+    // True once the attempt ended within `limit`.
+    bool Wait(std::chrono::milliseconds limit = std::chrono::seconds(30)) {
+        std::unique_lock lock(mu);
+        return cv.wait_for(lock, limit, [&] { return done; });
+    }
+    bool WaitStarted(std::chrono::milliseconds limit = std::chrono::seconds(10)) {
+        std::unique_lock lock(mu);
+        return cv.wait_for(lock, limit, [&] { return !started.empty() || done; }) && !started.empty();
+    }
+
+private:
+    template <class F>
+    void Add(F f) {
+        {
+            std::lock_guard lock(mu);
+            f();
+        }
+        cv.notify_all();
+    }
+};
+
+// A placer over `self` (its peer table, executor and store), and the attempts handed to it.
+struct PlacerRequester {
+    // Declared first so they outlive the placer: its workers report into them until it is destroyed.
+    std::vector<std::unique_ptr<AttemptLog>> logs;
+    std::shared_ptr<sched::Placer> placer;
+
+    explicit PlacerRequester(TestNodeFull& self) {
+        auto factory = [&self](const net::Peer& p) {
+            return std::make_shared<node::NodeClient>(p.ip_address + ":" + std::to_string(p.node_port), self.id,
+                                                      self.pins, p.id);
+        };
+        placer = std::make_shared<sched::Placer>(self.executor, self.peers, factory, self.cas, self.merkle,
+                                                 self.node_id, [&self] { return self.telemetry; });
+    }
+    AttemptLog& Execute(const v1::BatchSpec& spec, std::set<std::string> exclude = {}) {
+        logs.push_back(std::make_unique<AttemptLog>());
+        placer->Execute("run/b" + std::to_string(logs.size()), spec, std::move(exclude), logs.back()->Callbacks());
+        return *logs.back();
+    }
+    // Waits for every attempt; throws if one did not end or failed as a whole.
+    void WaitAll(std::chrono::milliseconds limit = std::chrono::seconds(60)) {
+        for (auto& l : logs) {
+            if (!l->Wait(limit)) throw std::runtime_error("a batch did not finish");
+            if (l->result.failure != v1::FAILURE_NONE) throw std::runtime_error("a batch failed: " + l->result.message);
+        }
     }
 };
 

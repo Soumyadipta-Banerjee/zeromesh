@@ -5,12 +5,13 @@
 // (node/admission.hpp); every other RPC first requires the caller's certificate
 // fingerprint to be pinned.
 //
-// Remote execution: OfferTask checks the env provider, the donor policy and the
-// inputs this node lacks; an accepted offer reserves the task for 30 s, keyed by
-// (caller node id, task id). The caller pushes the missing blobs (PushBlobs, each
-// digest verified) and calls RunTask, which runs the reserved spec through the
-// LocalExecutor (so ZM_NODE_ID is this node's id) and streams JobEvents; the last
-// event carries the TaskResult. Outputs stay in this node's CAS for PullBlobs.
+// Remote execution: OfferBatch checks the batch's environment (programs, versions, exact builds,
+// tree provider), the donor policy, fair share between requesters, and the inputs this node lacks;
+// an accepted offer reserves the batch for 30 s, keyed by (caller node id, batch id). The caller
+// pushes the missing blobs (PushBlobs, each digest verified) and calls RunBatch, which runs the
+// reserved spec through the LocalExecutor and streams BatchEvents, one ItemOutcome per item as it
+// finishes. Outputs stay in this node's CAS for PullBlobs. LookupCache answers from this node's
+// item cache, which makes the cache team-wide.
 
 #include "net/peer_table.hpp"
 #include "net/pin_store.hpp"
@@ -19,8 +20,10 @@
 #include "node/admission.hpp"
 #include "node/departure.hpp"
 #include "node/donor_policy.hpp"
+#include "node/env_check.hpp"
 #include "node/local_executor.hpp"
 #include "plugin/loader.hpp"
+#include "run/item_cache.hpp"
 #include "store/store.hpp"
 
 #include "zeromesh/v1/node.grpc.pb.h"
@@ -58,18 +61,25 @@ public:
 
     // Pin-gated. Without the matching dependency (cas/registry/executor/telemetry for
     // offers, blobs and runs; peers for Drain) they return UNIMPLEMENTED.
-    grpc::Status OfferTask(grpc::ServerContext* ctx, const v1::Offer* req, v1::OfferReply* resp) override;
+    grpc::Status OfferBatch(grpc::ServerContext* ctx, const v1::Offer* req, v1::OfferReply* resp) override;
     grpc::Status PushBlobs(grpc::ServerContext* ctx, grpc::ServerReader<v1::Chunk>* reader, v1::Empty* resp) override;
     grpc::Status PullBlobs(grpc::ServerContext* ctx, const v1::Digests* req,
                            grpc::ServerWriter<v1::Chunk>* writer) override;
     grpc::Status SeedBlobs(grpc::ServerContext* ctx, const v1::SeedRequest* req, v1::SeedReply* resp) override;
-    grpc::Status RunTask(grpc::ServerContext* ctx, const v1::RunRequest* req,
-                         grpc::ServerWriter<v1::JobEvent>* writer) override;
-    grpc::Status CancelTask(grpc::ServerContext* ctx, const v1::TaskRef* req, v1::Empty* resp) override;
+    grpc::Status RunBatch(grpc::ServerContext* ctx, const v1::RunRequest* req,
+                          grpc::ServerWriter<v1::BatchEvent>* writer) override;
+    grpc::Status CancelBatch(grpc::ServerContext* ctx, const v1::BatchRef* req, v1::Empty* resp) override;
     grpc::Status Drain(grpc::ServerContext* ctx, const v1::DrainNotice* req, v1::Empty* resp) override;
+    grpc::Status LookupCache(grpc::ServerContext* ctx, const v1::CacheLookup* req, v1::CacheLookupReply* resp) override;
+    grpc::Status ForgetCache(grpc::ServerContext* ctx, const v1::CacheForget* req, v1::Empty* resp) override;
+
+    // The item cache LookupCache and ForgetCache serve. Without one they return UNIMPLEMENTED.
+    void SetItemCache(std::shared_ptr<run::ItemCache> cache);
+    // Runs a program's version probe (in a sandbox) for offers with version constraints.
+    void SetVersionProbe(VersionProbe probe);
 
     // Sticky donor drain: refuse new offers while draining. Entering drain cancels
-    // preemptible running tasks; non-preemptible ones keep running.
+    // preemptible running batches; non-preemptible ones keep running.
     void SetDraining(bool draining, std::string reason = {});
 
     // The donor's current comfort-ladder step (0..4), reported in every OfferReply. From step
@@ -79,6 +89,9 @@ public:
     static constexpr int kRetryDrainingMs = 5000;
     static constexpr int kRetryOwnerBusyMs = 5000;
     static constexpr int kRetryDuplicateMs = 100;
+    static constexpr int kRetryFairShareMs = 500;
+    // A requester turned down for capacity this recently is waiting: fair share then applies.
+    static constexpr std::chrono::seconds kWaitingWindow{3};
     void SetComfortLevelProvider(std::function<int()> provider);
 
     // The donor's own departure hazard (departures per hour), reported in every OfferReply as
@@ -90,23 +103,23 @@ public:
     // one, every seed request is answered "no route" and the requester pushes the blobs itself.
     void SetPeerClientFactory(NodeClientFactory factory);
 
-    // Node ids of requesters that currently have a reserved or running task here.
+    // Node ids of requesters that currently have a reserved or running batch here.
     [[nodiscard]] std::vector<std::string> RequestersWithWork() const;
 
     // Digests of reserved and running remote inputs. GC must not delete these.
     [[nodiscard]] std::unordered_set<std::string> ProtectedBlobHashes() const;
 
-    // Cancels every running remote task whose Policy.preemptible is true (default).
+    // Cancels every running remote batch that is preemptible (the default).
     // Returns how many were cancelled.
     int CancelPreemptible();
 
     // ---- freeze-first departure (see node/departure.hpp) ----
-    // Pauses or resumes one running task by its execution id ("<caller>/<task id>"); false when
-    // it cannot (no cgroup freezer). The daemon wires this to the task's cgroup.
+    // Pauses or resumes one running batch by its execution id ("<caller>/<batch id>"); false when
+    // it cannot (no cgroup freezer). The daemon wires this to the batch's cgroup.
     using TaskFreezer = std::function<bool(const std::string& exec_id, bool freeze)>;
     void SetTaskFreezer(TaskFreezer freezer);
-    // Past run times, used to tell which tasks will finish inside the grace window. Finished
-    // tasks are recorded here. Without it every task counts as "unknown" and is frozen.
+    // Past item times per kind, used to tell which batches will finish inside the grace window.
+    // Finished items are recorded here. Without it every batch counts as "unknown" and is frozen.
     void SetRuntimeHistory(std::shared_ptr<RuntimeHistory> history);
 
     struct DepartureReport {
@@ -140,30 +153,32 @@ private:
     PendingAdmissions pending_;
 
     // Remote execution.
-    using TaskKey = std::pair<std::string, std::string>; // (caller node id, task id)
+    using BatchKey = std::pair<std::string, std::string>; // (caller node id, batch id)
     struct Reservation {
-        v1::TaskSpec spec;
+        v1::BatchSpec spec;
         std::vector<store::Digest> needed;
         std::chrono::steady_clock::time_point expires;
     };
     struct Running {
         std::string exec_id;
-        int cores{1};
         bool preemptible{true};
-        v1::TaskSpec spec;
+        v1::BatchSpec spec;
         std::vector<store::Digest> needed;
         std::chrono::steady_clock::time_point started{};
+        int done{0}; // items finished
     };
     struct Departure {
         bool active{false};
         std::chrono::milliseconds ttl{0};
         std::chrono::steady_clock::time_point grace_ends{};
-        std::set<std::string> kept; // preemptible tasks running through the grace window
+        std::set<std::string> kept; // preemptible batches running through the grace window
         std::map<std::string, std::chrono::steady_clock::time_point> frozen; // exec id -> kill deadline
     };
     void PurgeExpiredLocked();
     int CoresInUseLocked() const;
     int64_t MemPromisedLocked() const;
+    int GpusInUseLocked() const;
+    int CoresOfLocked(const std::string& requester) const;
     bool RemoteExecConfigured() const;
 
     std::shared_ptr<store::CasStore> cas_;
@@ -179,8 +194,11 @@ private:
     std::function<int()> comfort_level_;
     std::function<double()> hazard_per_hour_;
     mutable std::mutex mu_;
-    std::map<TaskKey, Reservation> reserved_;
-    std::map<TaskKey, Running> running_;
+    std::map<BatchKey, Reservation> reserved_;
+    std::map<BatchKey, Running> running_;
+    std::map<std::string, std::chrono::steady_clock::time_point> waiting_; // requester -> last capacity refusal
+    std::shared_ptr<run::ItemCache> item_cache_;
+    VersionProbe version_probe_;
     bool draining_{false};
     std::string drain_reason_;
     Departure departure_;

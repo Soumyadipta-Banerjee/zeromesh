@@ -1,5 +1,6 @@
 """M1/M2 acceptance: a real zmd with ClientApi on a unix socket, the zm CLI, local execution."""
 
+import json
 import os
 import re
 import shutil
@@ -65,32 +66,79 @@ class SharedDaemon(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(cwd, "a.txt")))
         self.assertFalse(os.path.exists(os.path.join(cwd, "b.txt")))
 
-    def test_python_three_task_job(self):
-        import grpc
-        from zeromesh.v1 import client_pb2, client_pb2_grpc, common_pb2
+    def test_rerun_is_a_cache_hit_that_replays_output(self):
+        cwd = tempdir(self)
+        with open(os.path.join(cwd, "in.txt"), "w") as f:
+            f.write("data\n")
+        first = self.run_ok("run", "--", "sh", "-c", "cat in.txt; echo made > out.txt", cwd=cwd)
+        os.remove(os.path.join(cwd, "out.txt"))
+        second = self.run_ok("run", "--", "sh", "-c", "cat in.txt; echo made > out.txt", cwd=cwd)
+        self.assertEqual(first.stdout, "data\n")
+        self.assertEqual(second.stdout, "data\n")  # replayed from the store
+        with open(os.path.join(cwd, "out.txt")) as f:
+            self.assertEqual(f.read(), "made\n")  # placed again from the cache
+        third = self.run_ok("run", "--no-cache", "--", "sh", "-c", "cat in.txt; echo made > out.txt", cwd=cwd)
+        self.assertEqual(third.stdout, "data\n")
 
-        host = common_pb2.EnvSpec(name="host")
-        a = common_pb2.TaskSpec(name="a", argv=["sh", "-c", "echo alpha > a.txt"], outputs=["a.txt"], env_spec=host)
-        b = common_pb2.TaskSpec(name="b", argv=["sh", "-c", "echo beta > b.txt"], outputs=["b.txt"], env_spec=host)
-        c = common_pb2.TaskSpec(
-            name="c", argv=["cat", "from_a/a.txt", "from_b/b.txt"], env_spec=host,
-            inputs_from=[common_pb2.InputFrom(task="a", path="from_a"),
-                         common_pb2.InputFrom(task="b", path="from_b")])
-        with grpc.insecure_channel("unix:" + self.zmd.socket) as channel:
-            stub = client_pb2_grpc.ClientApiStub(channel)
-            job_id = stub.SubmitJob(common_pb2.JobSpec(name="three", tasks=[a, b, c]), timeout=10).job_id
-            events = list(stub.WatchJob(client_pb2.JobRef(job_id=job_id), timeout=60))
-            status = stub.GetJob(client_pb2.JobRef(job_id=job_id), timeout=10)
+    def test_secrets_never_leave(self):
+        cwd = tempdir(self)
+        with open(os.path.join(cwd, ".env"), "w") as f:
+            f.write("TOKEN=secret\n")
+        os.makedirs(os.path.join(cwd, ".ssh"))
+        with open(os.path.join(cwd, ".ssh", "id_ed25519"), "w") as f:
+            f.write("key\n")
+        r = self.run_ok("run", "--", "sh", "-c", "ls -A", cwd=cwd)
+        self.assertNotIn(".env", r.stdout)
+        self.assertNotIn(".ssh", r.stdout)
 
-        self.assertTrue(status.done)
-        for name in "abc":
-            self.assertEqual(status.tasks[name], common_pb2.SUCCEEDED, status)
-        logs = b"".join(e.log_chunk for e in events if e.task_name == "c" and e.log_fd == 1)
-        self.assertEqual(logs, b"alpha\nbeta\n")
-        final = [e for e in events if e.task_name == "c" and e.state == common_pb2.SUCCEEDED]
-        self.assertEqual(len(final), 1)
-        self.assertEqual(final[0].result.stdout_head, b"alpha\nbeta\n")
-        self.assertEqual(final[0].result.exit_code, 0)
+    def test_runs_report_and_resume(self):
+        cwd = tempdir(self)
+        report = os.path.join(cwd, "..", os.path.basename(cwd) + "-report.json")
+        self.addCleanup(lambda: [os.remove(p) for p in (report, report.replace(".json", ".trace.json"))
+                                 if os.path.exists(p)])
+        self.run_ok("run", "--report", report, "--each", "*.txt", "--", "sh", "-c", "wc -c < {}",
+                    cwd=self.files(cwd, {"a.txt": "aa", "b.txt": "bbb"}))
+        with open(report) as f:
+            data = json.load(f)
+        self.assertEqual(data["run"]["succeeded"], 2)
+        self.assertEqual(len(data["items"]), 2)
+        run_id = data["run"]["run_id"]
+        listing = self.run_ok("runs").stdout
+        self.assertIn(run_id, listing)
+        shown = self.run_ok("report", run_id).stdout
+        self.assertIn("2 succeeded", shown)
+        resumed = self.zmd.zm("resume", run_id)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn("2 succeeded (2 cached)", resumed.stderr)
+        explain = self.run_ok("cache", "explain", run_id, "each-0").stdout
+        self.assertIn("miss", explain)
+
+    def test_run_from_json_with_dependencies(self):
+        cwd = tempdir(self)
+        out = tempdir(self)
+        spec = {
+            "name": "three",
+            "workspace_path": ".",
+            "stages": [{"name": ""}],
+            "items": [
+                {"id": "c", "argv": ["sh", "-c", "cat a.txt b.txt > c.txt"], "after": ["a", "b"],
+                 "outputs": [{"path": "c.txt", "dest": os.path.join(out, "c.txt")}]},
+                {"id": "a", "argv": ["sh", "-c", "echo alpha > a.txt"], "outputs": [{"path": "a.txt"}]},
+                {"id": "b", "argv": ["sh", "-c", "echo beta > b.txt"], "outputs": [{"path": "b.txt"}]},
+            ],
+        }
+        with open(os.path.join(cwd, "run.json"), "w") as f:
+            json.dump(spec, f)
+        r = self.run_ok("run", "--from", "run.json", cwd=cwd)
+        self.assertIn("3 succeeded", r.stderr)
+        with open(os.path.join(out, "c.txt")) as f:
+            self.assertEqual(f.read(), "alpha\nbeta\n")
+
+    def files(self, cwd, contents):
+        for name, text in contents.items():
+            with open(os.path.join(cwd, name), "w") as f:
+                f.write(text)
+        return cwd
 
 
 class OwnDaemon(unittest.TestCase):

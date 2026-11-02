@@ -1,20 +1,23 @@
 #pragma once
 
-// env-host: runs tasks against the executing node's own installed software
-// (spec §7.1). The donor's /usr, its usr-merge layout and a few /etc files are
-// mounted read-only; Check() only accepts commands that resolve on this node.
+// env-host: runs batches against the executing node's own installed software. The donor's /usr,
+// /opt, its usr-merge layout and /etc are mounted read-only.
 
 #include "plugin/plugin.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace zeromesh::envhost {
 
-// PATH exposed inside the host sandbox (same string Check() resolves against by default).
+// PATH inside a host sandbox.
 std::string DefaultPathEnv();
 
-// `path_env` is the ':'-separated search path Check() resolves argv[0] against.
-std::unique_ptr<plugin::IEnvProvider> Make(std::string path_env = DefaultPathEnv());
+// Where `program` (a bare name on DefaultPathEnv(), or an absolute path under a mounted
+// directory) is on this node; nullopt when a host sandbox could not run it.
+std::optional<std::string> Resolve(const std::string& program);
+
+std::unique_ptr<plugin::IEnvProvider> Make();
 
 } // namespace zeromesh::envhost

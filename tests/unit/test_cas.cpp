@@ -1,5 +1,5 @@
 #include "tests/unit/test_framework.hpp"
-#include "node/action_cache.hpp"
+#include "tests/unit/test_util.hpp"
 #include "store/store.hpp"
 #include "zeromesh/v1/common.pb.h"
 
@@ -101,26 +101,6 @@ TEST(CasRejectsNonDigestHash) {
     ASSERT_FALSE(std::filesystem::exists(d / "x"));
 }
 
-namespace {
-
-std::string TaskKey() {
-    return "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
-}
-
-zeromesh::v1::TaskResult CachedResult(const zeromesh::store::Digest& out_blob) {
-    zeromesh::v1::TaskResult r;
-    r.set_exit_code(0);
-    r.mutable_stdout()->set_hash("");
-    r.mutable_stderr()->set_hash("");
-    auto* o = r.add_outputs();
-    o->set_path("out.bin");
-    o->mutable_digest()->set_hash(out_blob.hash);
-    o->mutable_digest()->set_size_bytes(out_blob.size_bytes);
-    return r;
-}
-
-} // namespace
-
 TEST(CasCollectGarbage_EvictsLruUnprotected) {
     zeromesh::testing::TempDir d;
     zeromesh::store::CasLimits limits;
@@ -164,21 +144,6 @@ TEST(CasCollectGarbage_ProtectedSurvive) {
 
     ASSERT_TRUE(store.HasBlob(keep.hash));
     ASSERT_FALSE(store.HasBlob(drop.hash));
-}
-
-TEST(CasActionCache_MissWhenOutputBlobGone) {
-    zeromesh::testing::TempDir d;
-    auto cas_ptr = std::make_shared<zeromesh::store::CasStore>(d / "cas");
-    zeromesh::node::ActionCache cache(cas_ptr);
-    const auto blob = cas_ptr->PutBlob("cached-output");
-    cache.Put(TaskKey(), CachedResult(blob));
-
-    ASSERT_TRUE(cache.Get(TaskKey()).has_value());
-
-    cas_ptr->CollectGarbage(0, {});
-    ASSERT_FALSE(cache.Get(TaskKey()).has_value());
-    cache.PruneStale();
-    ASSERT_FALSE(cas_ptr->GetActionResult(TaskKey()).has_value());
 }
 
 TEST(CasQuota_ReserveIncomingRejectsWhenFull) {

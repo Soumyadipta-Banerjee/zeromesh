@@ -55,16 +55,15 @@ double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes) {
     return static_cast<double>(MissingForRank(c, unknown_missing_bytes)) / bandwidth;
 }
 
-std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> candidates,
-                            int64_t unknown_missing_bytes, double task_s) {
+std::vector<Candidate> Rank(const Need& need, std::vector<Candidate> candidates, int64_t unknown_missing_bytes,
+                            double task_s) {
     if (!(task_s > 0.0) || !std::isfinite(task_s)) task_s = kDefaultTaskSeconds;
-    const auto& policy = spec.policy();
-    const bool may_local = !policy.has_may_run_local() || policy.may_run_local();
-    const bool may_remote = !policy.has_may_run_remote() || policy.may_run_remote();
-    const int cores = std::max(spec.resources().cores(), 1);
-    const int64_t mem = spec.resources().mem_bytes();
+    const bool may_local = need.may_local;
+    const bool may_remote = need.may_remote;
+    const int cores = std::max(need.cores, 1);
+    const int64_t mem = need.mem_bytes;
 
-    std::string arch = spec.resources().arch();
+    std::string arch = need.arch;
     if (arch.empty()) {
         for (const auto& c : candidates) {
             if (c.is_local) arch = c.arch;
@@ -76,6 +75,7 @@ std::vector<Candidate> Rank(const v1::TaskSpec& spec, std::vector<Candidate> can
         if (!arch.empty() && c.arch != arch) return true;
         if (FreeSlots(c, cores) < 1) return true;
         if (!FitsMemory(c, mem)) return true;
+        if (need.gpus > 0 && c.gpus - c.gpus_in_flight < need.gpus) return true;
         return false;
     });
 

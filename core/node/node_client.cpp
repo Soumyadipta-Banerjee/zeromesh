@@ -1,5 +1,8 @@
 #include "node/node_client.hpp"
 
+#include "node/convert.hpp"
+#include "store/merkle.hpp"
+
 #include "net/tls.hpp"
 #include "node/admission.hpp"
 #include "node/blob_transfer.hpp"
@@ -9,6 +12,7 @@
 #include <grpcpp/create_channel.h>
 
 #include <algorithm>
+#include <set>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -79,10 +83,10 @@ std::shared_ptr<grpc::Channel> MakeNodeApiChannel(const std::string& address,
 
 } // namespace
 
-size_t EncodedOfferByteSize(const std::string& task_id, const v1::TaskSpec& spec,
+size_t EncodedOfferByteSize(const std::string& batch_id, const v1::BatchSpec& spec,
                             const std::vector<v1::Digest>& needed) {
     v1::Offer req;
-    req.set_task_id(task_id);
+    req.set_batch_id(batch_id);
     *req.mutable_spec() = spec;
     for (const auto& d : needed) *req.add_needed() = d;
     return req.ByteSizeLong();
@@ -191,19 +195,20 @@ std::optional<std::chrono::milliseconds> NodeClient::PingRtt(std::string* error)
     return std::chrono::duration_cast<std::chrono::milliseconds>(dt);
 }
 
-std::optional<v1::OfferReply> NodeClient::Offer(const std::string& task_id, const v1::TaskSpec& spec,
+std::optional<v1::OfferReply> NodeClient::Offer(const std::string& batch_id, const v1::BatchSpec& spec,
                                                 const std::vector<v1::Digest>& needed, std::string* error) {
     auto stub = PinnedStub(error);
     if (!stub) return std::nullopt;
     v1::Offer req;
-    req.set_task_id(task_id);
+    req.set_batch_id(batch_id);
     *req.mutable_spec() = spec;
     for (const auto& d : needed) *req.add_needed() = d;
     grpc::ClientContext ctx;
-    SetDeadline(ctx);
+    // A version probe may run a program once on the donor: give the offer more than a ping.
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
     v1::OfferReply reply;
-    grpc::Status st = stub->OfferTask(&ctx, req, &reply);
-    if (!st.ok()) return SetError(error, Describe("OfferTask", st)), std::nullopt;
+    grpc::Status st = stub->OfferBatch(&ctx, req, &reply);
+    if (!st.ok()) return SetError(error, Describe("OfferBatch", st)), std::nullopt;
     return reply;
 }
 
@@ -303,65 +308,88 @@ bool NodeClient::SeedBlobs(const std::string& source_node_id, const std::vector<
     return true;
 }
 
-std::optional<v1::TaskResult> NodeClient::Run(const std::string& task_id,
-                                              const std::function<void(const v1::JobEvent&)>& on_event,
-                                              std::string* error) {
+std::optional<v1::BatchFinished> NodeClient::Run(const std::string& batch_id,
+                                                 const std::function<void(const v1::BatchEvent&)>& on_event,
+                                                 std::string* error) {
     auto stub = PinnedStub(error);
     if (!stub) return std::nullopt;
     grpc::ClientContext ctx; // no deadline: keepalive detects a vanished peer
     {
         std::lock_guard lock(mu_);
-        if (runs_.contains(task_id)) return SetError(error, "task " + task_id + " is already running"), std::nullopt;
-        runs_[task_id] = &ctx;
-        cancelled_.erase(task_id);
+        if (runs_.contains(batch_id)) return SetError(error, "batch " + batch_id + " is already running"), std::nullopt;
+        runs_[batch_id] = &ctx;
+        cancelled_.erase(batch_id);
     }
     v1::RunRequest req;
-    req.set_task_id(task_id);
-    std::optional<v1::TaskResult> result;
-    auto reader = stub->RunTask(&ctx, req);
-    v1::JobEvent ev;
+    req.set_batch_id(batch_id);
+    std::optional<v1::BatchFinished> finished;
+    auto reader = stub->RunBatch(&ctx, req);
+    v1::BatchEvent ev;
     while (reader->Read(&ev)) {
-        if (ev.has_result()) result = ev.result();
+        if (ev.has_finished()) {
+            finished = ev.finished();
+            break; // the final event
+        }
         if (on_event) on_event(ev);
-        if (result) break; // the final event
     }
     grpc::Status st = reader->Finish();
     bool cancelled = false;
     {
         std::lock_guard lock(mu_);
-        runs_.erase(task_id);
-        cancelled = cancelled_.erase(task_id) > 0;
+        runs_.erase(batch_id);
+        cancelled = cancelled_.erase(batch_id) > 0;
     }
-    if (result) return result;
+    if (finished) return finished;
     if (cancelled) {
-        v1::TaskResult r;
-        r.set_exit_code(-1);
-        r.set_cancelled(true);
-        r.set_error("cancelled");
-        return r;
+        v1::BatchFinished f;
+        f.set_cancelled(true);
+        return f;
     }
-    return SetError(error, Describe("RunTask", st)), std::nullopt;
+    return SetError(error, Describe("RunBatch", st)), std::nullopt;
 }
 
-void NodeClient::Cancel(const std::string& task_id) {
+void NodeClient::Cancel(const std::string& batch_id) {
     {
         std::lock_guard lock(mu_);
-        if (!runs_.contains(task_id)) return;
-        cancelled_.insert(task_id);
+        if (!runs_.contains(batch_id)) return;
+        cancelled_.insert(batch_id);
     }
     bool told = false;
     if (auto stub = PinnedStub(nullptr)) {
-        v1::TaskRef ref;
-        ref.set_task_id(task_id);
+        v1::BatchRef ref;
+        ref.set_batch_id(batch_id);
         grpc::ClientContext ctx;
         SetDeadline(ctx);
         v1::Empty empty;
-        told = stub->CancelTask(&ctx, ref, &empty).ok();
+        told = stub->CancelBatch(&ctx, ref, &empty).ok();
     }
     if (!told) {
         std::lock_guard lock(mu_);
-        if (auto it = runs_.find(task_id); it != runs_.end()) it->second->TryCancel();
+        if (auto it = runs_.find(batch_id); it != runs_.end()) it->second->TryCancel();
     }
+}
+
+std::optional<v1::CacheLookupReply> NodeClient::LookupCache(const v1::CacheLookup& req, std::chrono::milliseconds timeout,
+                                                            std::string* error) {
+    auto stub = PinnedStub(error);
+    if (!stub) return std::nullopt;
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + timeout);
+    v1::CacheLookupReply reply;
+    grpc::Status st = stub->LookupCache(&ctx, req, &reply);
+    if (!st.ok()) return SetError(error, Describe("LookupCache", st)), std::nullopt;
+    return reply;
+}
+
+bool NodeClient::ForgetCache(const v1::CacheForget& req, std::string* error) {
+    auto stub = PinnedStub(error);
+    if (!stub) return false;
+    grpc::ClientContext ctx;
+    SetDeadline(ctx);
+    v1::Empty empty;
+    grpc::Status st = stub->ForgetCache(&ctx, req, &empty);
+    if (!st.ok()) return SetError(error, Describe("ForgetCache", st)), false;
+    return true;
 }
 
 bool NodeClient::Drain(const std::string& reason, std::string* error, v1::DepartureReason code, uint32_t ttl_ms,
@@ -379,6 +407,36 @@ bool NodeClient::Drain(const std::string& reason, std::string* error, v1::Depart
     v1::Empty empty;
     grpc::Status st = stub->Drain(&ctx, req, &empty);
     if (!st.ok()) return SetError(error, Describe("Drain", st)), false;
+    return true;
+}
+
+bool PullTrees(NodeClient& client, store::CasStore& cas, std::vector<v1::Digest> blobs, std::vector<v1::Digest> trees,
+               std::string* error, uint64_t* bytes) {
+    auto pull_missing = [&](const std::vector<v1::Digest>& ds) {
+        std::vector<v1::Digest> missing;
+        std::set<std::string> asked;
+        for (const auto& d : ds) {
+            if (!d.hash().empty() && !cas.HasBlob(d.hash()) && asked.insert(d.hash()).second) missing.push_back(d);
+        }
+        return missing.empty() || client.Pull(cas, missing, error, bytes);
+    };
+    if (!pull_missing(blobs)) return false;
+    while (!trees.empty()) {
+        if (!pull_missing(trees)) return false;
+        std::vector<v1::Digest> files, next;
+        for (const auto& t : trees) {
+            auto data = cas.GetBlob(t.hash());
+            auto m = data ? store::DirectoryManifest::Deserialize(*data) : std::nullopt;
+            if (!m) {
+                if (error) *error = "tree " + t.hash() + " is corrupt";
+                return false;
+            }
+            for (const auto& f : m->files) files.push_back(ToProto(f.digest));
+            for (const auto& d : m->directories) next.push_back(ToProto(d.digest));
+        }
+        if (!pull_missing(files)) return false;
+        trees = std::move(next);
+    }
     return true;
 }
 

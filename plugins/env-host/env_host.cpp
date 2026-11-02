@@ -25,45 +25,14 @@ bool IsExecutableFile(const fs::path& p) {
     return fs::is_regular_file(p, ec) && ::access(p.c_str(), X_OK) == 0;
 }
 
-bool OnPath(const std::string& cmd, std::string_view path_env) {
-    size_t start = 0;
-    while (start <= path_env.size()) {
-        size_t end = path_env.find(':', start);
-        if (end == std::string_view::npos) end = path_env.size();
-        std::string_view dir = path_env.substr(start, end - start);
-        // POSIX: an empty PATH entry means the current directory, which on the
-        // donor is not the task's input tree, so it is never a match.
-        if (!dir.empty() && IsExecutableFile(fs::path(dir) / cmd)) return true;
-        start = end + 1;
-    }
-    return false;
-}
-
 class HostEnv final : public plugin::IEnvProvider {
 public:
-    explicit HostEnv(std::string path_env) : path_env_(std::move(path_env)) {}
-
     std::string_view Name() const override { return "host"; }
 
-    plugin::Availability Check(const plugin::EnvParams& params) override {
-        if (params.argv.empty() || params.argv[0].empty()) {
-            return {.ok = false, .reason = "empty argv"};
-        }
-        const std::string& cmd = params.argv[0];
-        if (cmd.find('/') != std::string::npos) {
-            // A relative path lives in the input tree and is checked when it runs.
-            if (cmd.front() != '/') return {.ok = true, .reason = {}};
-            // An absolute path is fine when it is an executable inside a directory we mount.
-            for (const char* root : {"/usr/", "/opt/", "/bin/", "/sbin/", "/lib/", "/lib32/", "/lib64/"}) {
-                if (cmd.rfind(root, 0) == 0 && IsExecutableFile(cmd)) return {.ok = true, .reason = {}};
-            }
-        } else if (OnPath(cmd, path_env_)) {
-            return {.ok = true, .reason = {}};
-        }
-        return {.ok = false, .reason = "command '" + cmd + "' not found on this node"};
-    }
+    // Programs are checked by the core against the batch's Env before an offer is accepted.
+    plugin::Availability Check(const plugin::EnvParams&) override { return {.ok = true, .reason = {}}; }
 
-    plugin::Result<plugin::SandboxEnv> Prepare(const plugin::TaskContext&) override {
+    plugin::Result<plugin::SandboxEnv> Prepare(const plugin::BatchContext&) override {
         plugin::SandboxEnv env;
         env.binds.push_back({"/usr", "/usr", true});
         std::error_code ec;
@@ -85,10 +54,8 @@ public:
         return {.value = std::move(env), .error = {}};
     }
 
-    void Release(const plugin::TaskContext&) override {}
+    void Release(const plugin::BatchContext&) override {}
 
-private:
-    std::string path_env_;
 };
 
 } // namespace
@@ -97,8 +64,30 @@ std::string DefaultPathEnv() {
     return std::string(kSandboxPath);
 }
 
-std::unique_ptr<plugin::IEnvProvider> Make(std::string path_env) {
-    return std::make_unique<HostEnv>(std::move(path_env));
+std::optional<std::string> Resolve(const std::string& program) {
+    if (program.empty()) return std::nullopt;
+    if (program.front() == '/') {
+        // Only executables inside a directory the sandbox mounts can run there.
+        for (const char* root : {"/usr/", "/opt/", "/bin/", "/sbin/", "/lib/", "/lib32/", "/lib64/"}) {
+            if (program.rfind(root, 0) == 0 && IsExecutableFile(program)) return program;
+        }
+        return std::nullopt;
+    }
+    if (program.find('/') != std::string::npos) return std::nullopt; // relative: lives in /work
+    std::string_view path_env = SandboxPathEnv();
+    size_t start = 0;
+    while (start <= path_env.size()) {
+        size_t end = path_env.find(':', start);
+        if (end == std::string_view::npos) end = path_env.size();
+        const std::string_view dir = path_env.substr(start, end - start);
+        if (!dir.empty() && IsExecutableFile(fs::path(dir) / program)) return (fs::path(dir) / program).string();
+        start = end + 1;
+    }
+    return std::nullopt;
+}
+
+std::unique_ptr<plugin::IEnvProvider> Make() {
+    return std::make_unique<HostEnv>();
 }
 
 } // namespace zeromesh::envhost

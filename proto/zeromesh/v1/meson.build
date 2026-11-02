@@ -6,7 +6,7 @@ proto_root_out = meson.project_build_root() / 'proto'
 
 zm_proto_cpp = []
 zm_proto_py = []
-foreach name : ['common', 'client', 'node']
+foreach name : ['common', 'run', 'client', 'node']
   zm_proto_cpp += custom_target('proto_cpp_' + name,
     input: name + '.proto',
     output: [name + '.pb.cc', name + '.pb.h', name + '.grpc.pb.cc', name + '.grpc.pb.h'],

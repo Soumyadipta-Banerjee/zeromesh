@@ -21,10 +21,10 @@ public:
     zeromesh::plugin::Availability Check(const zeromesh::plugin::EnvParams&) override {
         return {.ok = true, .reason = {}};
     }
-    zeromesh::plugin::Result<zeromesh::plugin::SandboxEnv> Prepare(const zeromesh::plugin::TaskContext&) override {
+    zeromesh::plugin::Result<zeromesh::plugin::SandboxEnv> Prepare(const zeromesh::plugin::BatchContext&) override {
         return {.value = zeromesh::plugin::SandboxEnv{}, .error = {}};
     }
-    void Release(const zeromesh::plugin::TaskContext&) override {}
+    void Release(const zeromesh::plugin::BatchContext&) override {}
 };
 
 } // namespace

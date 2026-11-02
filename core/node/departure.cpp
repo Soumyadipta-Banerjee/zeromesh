@@ -153,23 +153,8 @@ RuntimeHistory::RuntimeHistory(std::filesystem::path file) : file_(std::move(fil
     }
 }
 
-std::string RuntimeHistory::Key(const v1::TaskSpec& spec) {
-    std::string s;
-    for (const auto& a : spec.argv()) {
-        s += a;
-        s += '\x1f';
-    }
-    s += '\x1e';
-    std::map<std::string, std::string> env(spec.env().begin(), spec.env().end());
-    for (const auto& [k, v] : env) {
-        s += k;
-        s += '=';
-        s += v;
-        s += '\x1f';
-    }
-    s += '\x1e';
-    s += spec.env_spec().name().empty() ? "host" : spec.env_spec().name();
-    return store::CasStore::ComputeDigest(s).hash;
+std::string RuntimeHistory::Key(const std::string& kind) {
+    return store::CasStore::ComputeDigest("kind\n" + kind).hash;
 }
 
 void RuntimeHistory::RecordLocked(const std::string& key, int64_t duration_ms) {
@@ -182,9 +167,9 @@ void RuntimeHistory::RecordLocked(const std::string& key, int64_t duration_ms) {
     }
 }
 
-void RuntimeHistory::Record(const v1::TaskSpec& spec, int64_t duration_ms) {
+void RuntimeHistory::Record(const std::string& kind, int64_t duration_ms) {
     if (duration_ms < 0) return;
-    const std::string key = Key(spec);
+    const std::string key = Key(kind);
     std::lock_guard lock(mu_);
     RecordLocked(key, duration_ms);
     if (!file_.empty()) {
@@ -193,8 +178,8 @@ void RuntimeHistory::Record(const v1::TaskSpec& spec, int64_t duration_ms) {
     }
 }
 
-std::optional<int64_t> RuntimeHistory::Expected(const v1::TaskSpec& spec) const {
-    const std::string key = Key(spec);
+std::optional<int64_t> RuntimeHistory::Expected(const std::string& kind) const {
+    const std::string key = Key(kind);
     std::lock_guard lock(mu_);
     auto it = expected_ms_.find(key);
     if (it == expected_ms_.end()) return std::nullopt;

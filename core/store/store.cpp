@@ -599,10 +599,10 @@ std::filesystem::path CasStore::GetBlobPath(const std::string& hash) const {
     return blobs_dir_ / hash;
 }
 
-bool CasStore::PutActionResult(const std::string& action_hash, std::string_view serialized_result) {
+bool CasStore::PutActionResult(const std::string& action_hash, std::string_view serialized_result, bool replace) {
     if (!IsValidHash(action_hash)) return false;
     auto target = ac_dir_ / action_hash;
-    if (std::filesystem::exists(target)) return true;
+    if (!replace && std::filesystem::exists(target)) return true;
     std::filesystem::path tmp;
     try {
         tmp = MakeUniqueTempIn(ac_dir_, "ac-");
@@ -640,6 +640,16 @@ std::optional<std::string> CasStore::GetActionResult(const std::string& action_h
     std::ostringstream ss;
     ss << in.rdbuf();
     return ss.str();
+}
+
+std::vector<std::string> CasStore::ListActionResults() const {
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(ac_dir_, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (IsValidHash(name)) out.push_back(name);
+    }
+    return out;
 }
 
 bool CasStore::RemoveActionResult(const std::string& action_hash) {

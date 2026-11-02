@@ -1,7 +1,8 @@
 #include "node/client_service.hpp"
 
 #include "node/convert.hpp"
-#include "node/mirror_manifest.hpp"
+#include "store/deny_list.hpp"
+#include "store/stat_cache.hpp"
 
 #include <fcntl.h>
 #include <sodium.h>
@@ -80,129 +81,6 @@ bool SizeWithinLimit(const fs::path& dir, const std::string& rel, const store::I
     return true;
 }
 
-// Splits an output path into its segments. nullopt when the path is empty, absolute,
-// contains "..", a NUL, or names the work root itself.
-std::optional<std::vector<std::string>> SafeSegments(const std::string& path) {
-    if (path.empty() || path.front() == '/' || path.find('\0') != std::string::npos) return std::nullopt;
-    std::vector<std::string> segs;
-    size_t start = 0;
-    while (start <= path.size()) {
-        size_t slash = path.find('/', start);
-        if (slash == std::string::npos) slash = path.size();
-        std::string seg = path.substr(start, slash - start);
-        if (seg == "..") return std::nullopt;
-        if (!seg.empty() && seg != ".") segs.push_back(std::move(seg));
-        start = slash + 1;
-    }
-    if (segs.empty()) return std::nullopt;
-    return segs;
-}
-
-std::string Errno(const std::string& what, const fs::path& p) {
-    return what + " " + p.string() + ": " + std::strerror(errno);
-}
-
-// Creates the directories between `root` and the entry, refusing to pass through a symlink
-// or a non-directory. Returns the parent directory of the entry, or an error.
-std::optional<fs::path> EnsureParents(const fs::path& root, const std::vector<std::string>& segs, std::string* error) {
-    fs::path cur = root;
-    for (size_t i = 0; i + 1 < segs.size(); ++i) {
-        cur /= segs[i];
-        struct stat st{};
-        if (lstat(cur.c_str(), &st) != 0) {
-            if (errno != ENOENT || mkdir(cur.c_str(), 0755) != 0) {
-                *error = Errno("cannot create directory", cur);
-                return std::nullopt;
-            }
-            continue;
-        }
-        if (S_ISLNK(st.st_mode)) {
-            *error = "refusing to write through symlink " + cur.string();
-            return std::nullopt;
-        }
-        if (!S_ISDIR(st.st_mode)) {
-            *error = cur.string() + " exists and is not a directory";
-            return std::nullopt;
-        }
-    }
-    return cur;
-}
-
-bool CopyBlobTo(const fs::path& src, const fs::path& dst, bool executable, std::string* error) {
-    int in = open(src.c_str(), O_RDONLY | O_CLOEXEC);
-    if (in < 0) {
-        *error = Errno("cannot open blob", src);
-        return false;
-    }
-    int out = open(dst.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (out < 0) {
-        *error = Errno("cannot create", dst);
-        close(in);
-        return false;
-    }
-    std::vector<char> buf(kObjectChunkBytes);
-    bool ok = true;
-    for (;;) {
-        ssize_t n = read(in, buf.data(), buf.size());
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0) {
-            *error = Errno("cannot read blob", src);
-            ok = false;
-            break;
-        }
-        if (n == 0) break;
-        for (ssize_t off = 0; off < n;) {
-            ssize_t w = write(out, buf.data() + off, static_cast<size_t>(n - off));
-            if (w < 0 && errno == EINTR) continue;
-            if (w < 0) {
-                *error = Errno("cannot write", dst);
-                ok = false;
-                break;
-            }
-            off += w;
-        }
-        if (!ok) break;
-    }
-    if (ok && fchmod(out, executable ? 0755 : 0644) != 0) {
-        *error = Errno("cannot chmod", dst);
-        ok = false;
-    }
-    close(in);
-    if (close(out) != 0 && ok) {
-        *error = Errno("cannot write", dst);
-        ok = false;
-    }
-    return ok;
-}
-
-// Moves `tmp` onto `target`. rename(2) replaces a file or symlink at `target` itself (it never
-// follows it); an existing directory there is removed first.
-bool ReplaceEntry(const fs::path& tmp, const fs::path& target, std::string* error) {
-    struct stat st{};
-    if (lstat(target.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-        std::error_code ec;
-        fs::remove_all(target, ec);
-        if (ec) {
-            *error = "cannot replace " + target.string() + ": " + ec.message();
-            return false;
-        }
-    }
-    if (rename(tmp.c_str(), target.c_str()) != 0) {
-        *error = Errno("cannot write", target);
-        return false;
-    }
-    return true;
-}
-
-// True when `target` already is a regular file with exactly this content and mode.
-bool AlreadyCurrent(const fs::path& target, const v1::OutputEntry& out) {
-    struct stat st{};
-    if (lstat(target.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
-    if (static_cast<int64_t>(st.st_size) != out.digest().size_bytes()) return false;
-    if (((st.st_mode & S_IXUSR) != 0) != out.is_executable()) return false;
-    return store::CasStore::ComputeFileDigest(target).hash == out.digest().hash();
-}
-
 v1::PeerInfo FromPeer(const net::Peer& p) {
     v1::PeerInfo info;
     info.set_node_id(p.id);
@@ -216,6 +94,8 @@ v1::PeerInfo FromPeer(const net::Peer& p) {
     info.set_cpu_load_pct(p.cpu_load_pct);
     info.set_battery_pct(p.battery_pct);
     info.set_on_ac(p.is_charging);
+    info.set_mem_total(static_cast<int64_t>(p.memory_bytes));
+    info.set_gpus(p.gpus);
     switch (p.state) {
     case net::PeerState::Active:
         info.set_state("active");
@@ -263,11 +143,10 @@ void TeamState::Apply(std::optional<net::TeamKey> next) {
 }
 
 ClientService::ClientService(std::shared_ptr<store::CasStore> cas, std::shared_ptr<store::MerkleBuilder> merkle,
-                             std::shared_ptr<JobManager> jobs, std::shared_ptr<net::PeerTable> peers,
-                             ClientServiceOptions options, std::shared_ptr<TeamState> team,
-                             std::shared_ptr<LocalExecutor> local_executor)
-    : cas_(std::move(cas)), merkle_(std::move(merkle)), jobs_(std::move(jobs)), peers_(std::move(peers)),
-      options_(std::move(options)), team_(std::move(team)), local_executor_(std::move(local_executor)) {
+                             std::shared_ptr<net::PeerTable> peers, ClientServiceOptions options, ClientServiceParts parts,
+                             std::shared_ptr<TeamState> team)
+    : cas_(std::move(cas)), merkle_(std::move(merkle)), peers_(std::move(peers)), options_(std::move(options)),
+      parts_(std::move(parts)), team_(std::move(team)) {
     if (sodium_init() < 0) throw std::runtime_error("libsodium initialisation failed");
     telemetry_.Sample(); // prime the CPU-load delta
 }
@@ -357,64 +236,96 @@ grpc::Status ClientService::FindMissing(grpc::ServerContext*, const v1::Digests*
     return grpc::Status::OK;
 }
 
-grpc::Status ClientService::UploadTree(grpc::ServerContext*, const v1::UploadTreeRequest* req,
-                                       v1::UploadTreeReply* reply) {
+grpc::Status ClientService::Snapshot(grpc::ServerContext*, const v1::SnapshotRequest* req, v1::SnapshotReply* reply) {
     const fs::path root = req->path();
-    if (!root.is_absolute()) return Invalid("upload path must be absolute: '" + req->path() + "'");
+    if (!root.is_absolute()) return Invalid("snapshot path must be absolute: '" + req->path() + "'");
     std::error_code ec;
-    if (!fs::is_directory(root, ec)) return Invalid("upload path is not a directory: " + root.string());
+    if (!fs::is_directory(root, ec)) return Invalid("snapshot path is not a directory: " + root.string());
 
-    store::IgnoreRules rules = store::IgnoreRules::ForRoot(root);
+    const store::IgnoreRules ignore = store::IgnoreRules::ForRoot(root);
+    const store::IgnoreRules deny = store::DenyRules();
     if (!req->force_large()) {
         uint64_t total = 0;
-        if (!SizeWithinLimit(root, "", rules, options_.upload_limit_bytes, total)) {
+        if (!SizeWithinLimit(root, "", ignore, options_.upload_limit_bytes, total)) {
             return {grpc::StatusCode::RESOURCE_EXHAUSTED,
-                    "refusing to upload " + root.string() + ": more than " + HumanBytes(options_.upload_limit_bytes) +
-                        " (" + std::to_string(options_.upload_limit_bytes) +
-                        " bytes) after .zmignore; add paths to .zmignore or pass --force-large"};
+                    "refusing to snapshot " + root.string() + ": more than " + HumanBytes(options_.upload_limit_bytes) +
+                        " after .zmignore; add paths to .zmignore or pass --force-large"};
         }
     }
+    std::lock_guard lock(snapshot_mu_);
+    const fs::path cache_file =
+        options_.state_dir.empty() ? fs::path()
+                                   : options_.state_dir / "statcache" / store::CasStore::ComputeDigest(root.string()).hash;
+    store::StatCache stat_cache(cache_file);
+    std::vector<std::string> denied;
+    uint64_t total = 0, files = 0;
+    store::TreeOptions opts;
+    opts.ignore = &ignore;
+    opts.deny = &deny;
+    opts.denied = &denied;
+    opts.stat_cache = &stat_cache;
+    opts.total_bytes = &total;
+    opts.file_count = &files;
     try {
-        uint64_t total = 0;
-        store::TreeOptions topts;
-        topts.ignore = &rules;
-        topts.total_bytes = &total;
-        store::Digest d = merkle_->BuildTree(root, topts);
-        *reply->mutable_root() = ToProto(d);
-        reply->set_total_bytes(static_cast<int64_t>(total));
+        *reply->mutable_root() = ToProto(merkle_->BuildTree(root, opts));
     } catch (const std::exception& e) {
-        return Invalid(std::string("cannot upload ") + root.string() + ": " + e.what());
+        return Invalid(std::string("cannot snapshot ") + root.string() + ": " + e.what());
+    }
+    stat_cache.Save();
+    reply->set_total_bytes(static_cast<int64_t>(total));
+    reply->set_files(static_cast<int64_t>(files));
+    reply->set_rehashed(static_cast<int64_t>(stat_cache.misses()));
+    std::sort(denied.begin(), denied.end());
+    for (const auto& d : denied) reply->add_denied(d);
+    if (total > kUploadWarnBytes) {
+        reply->set_warning("the workspace is " + HumanBytes(total) + "; consider a .zmignore");
+    }
+    if (req->list()) {
+        // The biggest files, for --show-upload.
+        std::vector<std::pair<int64_t, std::string>> sizes;
+        for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+             !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            const std::string rel = fs::relative(it->path(), root, ec).string();
+            const bool dir = it->is_directory(ec) && !it->is_symlink(ec);
+            if (ignore.Ignored(rel, dir) || deny.Ignored(rel, dir)) {
+                if (dir) it.disable_recursion_pending();
+                continue;
+            }
+            if (it->is_regular_file(ec) && !it->is_symlink(ec)) {
+                sizes.emplace_back(static_cast<int64_t>(it->file_size(ec)), rel);
+            }
+        }
+        std::sort(sizes.rbegin(), sizes.rend());
+        for (size_t i = 0; i < sizes.size() && i < 20; ++i) {
+            auto* f = reply->add_largest();
+            f->set_path(sizes[i].second);
+            f->set_bytes(sizes[i].first);
+        }
     }
     return grpc::Status::OK;
 }
 
-grpc::Status ClientService::SubmitJob(grpc::ServerContext*, const v1::JobSpec* req, v1::SubmitReply* reply) {
+grpc::Status ClientService::CaptureEnv(grpc::ServerContext*, const v1::CaptureRequest* req, v1::CaptureReply* reply) {
+    if (!parts_.capture) return {grpc::StatusCode::UNIMPLEMENTED, "environment capture is not available"};
+    return parts_.capture(*req, reply);
+}
+
+namespace {
+
+grpc::Status NoEngine() {
+    return {grpc::StatusCode::UNIMPLEMENTED, "runs are not available on this daemon"};
+}
+
+grpc::Status UnknownRun(const std::string& id) {
+    return {grpc::StatusCode::NOT_FOUND, "unknown run '" + id + "'"};
+}
+
+} // namespace
+
+grpc::Status ClientService::SubmitRun(grpc::ServerContext*, const v1::RunSpec* req, v1::RunRef* reply) {
+    if (!parts_.engine) return NoEngine();
     try {
-        v1::JobSpec job = *req;
-        std::unordered_map<std::string, std::string> manifest_by_mirror_paths;
-        for (int i = 0; i < job.tasks_size(); ++i) {
-            v1::TaskSpec* t = job.mutable_tasks(i);
-            if (t->env_spec().name() != "mirror") continue;
-            auto* params = t->mutable_env_spec()->mutable_params();
-            if (params->find(kMirrorRequesterParam) == params->end()) {
-                (*params)[kMirrorRequesterParam] = options_.node_id;
-            }
-            if (params->find(kMirrorRootDigestParam) != params->end()) continue;
-            std::map<std::string, std::string> mirror_params(params->begin(), params->end());
-            std::vector<fs::path> paths = ParseMirrorPaths(mirror_params);
-            if (paths.empty()) {
-                return Invalid("mirror env requires at least one --mirror PATH");
-            }
-            const auto paths_it = params->find(kMirrorPathsParam);
-            const std::string paths_key = paths_it != params->end() ? paths_it->second : "";
-            auto cached = manifest_by_mirror_paths.find(paths_key);
-            if (cached == manifest_by_mirror_paths.end()) {
-                store::Digest root = BuildMirrorManifest(*merkle_, paths);
-                cached = manifest_by_mirror_paths.emplace(paths_key, root.hash).first;
-            }
-            (*params)[kMirrorRootDigestParam] = cached->second;
-        }
-        reply->set_job_id(jobs_->Submit(job));
+        reply->set_run_id(parts_.engine->Submit(*req));
     } catch (const std::invalid_argument& e) {
         return Invalid(e.what());
     } catch (const std::exception& e) {
@@ -423,10 +334,31 @@ grpc::Status ClientService::SubmitJob(grpc::ServerContext*, const v1::JobSpec* r
     return grpc::Status::OK;
 }
 
-grpc::Status ClientService::WatchJob(grpc::ServerContext* ctx, const v1::JobRef* req,
-                                     grpc::ServerWriter<v1::JobEvent>* writer) {
-    auto stream = jobs_->Watch(req->job_id());
-    if (!stream) return {grpc::StatusCode::NOT_FOUND, "unknown job '" + req->job_id() + "'"};
+grpc::Status ClientService::AddItems(grpc::ServerContext*, const v1::AddItemsRequest* req, v1::Empty*) {
+    if (!parts_.engine) return NoEngine();
+    try {
+        parts_.engine->AddItems(req->run_id(), {req->items().begin(), req->items().end()});
+    } catch (const std::invalid_argument& e) {
+        return Invalid(e.what());
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status ClientService::CloseRun(grpc::ServerContext*, const v1::RunRef* req, v1::Empty*) {
+    if (!parts_.engine) return NoEngine();
+    try {
+        parts_.engine->Close(req->run_id());
+    } catch (const std::invalid_argument& e) {
+        return UnknownRun(req->run_id());
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status ClientService::WatchRun(grpc::ServerContext* ctx, const v1::WatchRequest* req,
+                                     grpc::ServerWriter<v1::RunEvent>* writer) {
+    if (!parts_.engine) return NoEngine();
+    auto stream = parts_.engine->Watch(req->run_id(), req->from_start());
+    if (!stream) return UnknownRun(req->run_id());
     for (;;) {
         if (ctx->IsCancelled()) {
             stream->Close();
@@ -439,98 +371,72 @@ grpc::Status ClientService::WatchJob(grpc::ServerContext* ctx, const v1::JobRef*
             }
             continue;
         }
-        // nullopt is a timeout or the end. The final event is queued before the job is marked
-        // done, so once done every remaining event is already in the stream.
-        auto st = jobs_->Get(req->job_id());
-        if (!st || st->done()) {
-            while (auto ev = stream->Next(std::chrono::milliseconds(0))) {
-                if (!writer->Write(*ev)) break;
-            }
+        if (stream->ended()) {
             stream->Close();
             return grpc::Status::OK;
         }
     }
 }
 
-grpc::Status ClientService::GetJob(grpc::ServerContext*, const v1::JobRef* req, v1::JobStatus* reply) {
-    auto st = jobs_->Get(req->job_id());
-    if (!st) return {grpc::StatusCode::NOT_FOUND, "unknown job '" + req->job_id() + "'"};
+grpc::Status ClientService::GetRun(grpc::ServerContext*, const v1::RunRef* req, v1::RunStatus* reply) {
+    if (!parts_.engine) return NoEngine();
+    auto st = parts_.engine->Status(req->run_id());
+    if (!st) return UnknownRun(req->run_id());
     *reply = std::move(*st);
     return grpc::Status::OK;
 }
 
-grpc::Status ClientService::CancelJob(grpc::ServerContext*, const v1::JobRef* req, v1::Empty*) {
-    if (!jobs_->Get(req->job_id())) return {grpc::StatusCode::NOT_FOUND, "unknown job '" + req->job_id() + "'"};
-    jobs_->Cancel(req->job_id());
+grpc::Status ClientService::GetReport(grpc::ServerContext*, const v1::RunRef* req, v1::Report* reply) {
+    if (!parts_.engine) return NoEngine();
+    auto rep = parts_.engine->Report(req->run_id());
+    if (!rep) return UnknownRun(req->run_id());
+    *reply = std::move(*rep);
     return grpc::Status::OK;
 }
 
-grpc::Status ClientService::FetchOutputs(grpc::ServerContext*, const v1::FetchRequest* req, v1::FetchReply* reply) {
-    const fs::path dest = req->dest_path();
-    if (!dest.is_absolute()) return Invalid("dest_path must be absolute: '" + req->dest_path() + "'");
-    struct stat dst{};
-    if (stat(dest.c_str(), &dst) != 0 || !S_ISDIR(dst.st_mode)) {
-        return Invalid("dest_path is not a directory: " + dest.string());
-    }
-    auto st = jobs_->Get(req->job_id());
-    if (!st) return {grpc::StatusCode::NOT_FOUND, "unknown job '" + req->job_id() + "'"};
-    auto it = st->results().find(req->task_name());
-    if (it == st->results().end()) {
-        if (!st->tasks().contains(req->task_name())) {
-            return {grpc::StatusCode::NOT_FOUND, "job has no task '" + req->task_name() + "'"};
-        }
-        return {grpc::StatusCode::FAILED_PRECONDITION, "task '" + req->task_name() + "' has not finished"};
-    }
-    const v1::TaskResult& result = it->second;
+grpc::Status ClientService::CancelRun(grpc::ServerContext*, const v1::RunRef* req, v1::Empty*) {
+    if (!parts_.engine) return NoEngine();
+    if (!parts_.engine->Status(req->run_id())) return UnknownRun(req->run_id());
+    parts_.engine->Cancel(req->run_id());
+    return grpc::Status::OK;
+}
 
-    // Validate every path before touching the disk.
-    std::vector<std::vector<std::string>> segments;
-    for (const auto& out : result.outputs()) {
-        auto segs = SafeSegments(out.path());
-        if (!segs) return Invalid("refusing unsafe output path '" + out.path() + "'");
-        if (!out.is_symlink() && !out.is_dir() && !store::CasStore::IsValidHash(out.digest().hash())) {
-            return {grpc::StatusCode::DATA_LOSS, "output " + out.path() + " has no valid digest"};
-        }
-        segments.push_back(std::move(*segs));
+grpc::Status ClientService::ResumeRun(grpc::ServerContext*, const v1::RunRef* req, v1::RunRef* reply) {
+    if (!parts_.engine) return NoEngine();
+    try {
+        reply->set_run_id(parts_.engine->Resume(req->run_id()));
+    } catch (const std::invalid_argument& e) {
+        return Invalid(e.what());
     }
+    return grpc::Status::OK;
+}
 
-    for (int i = 0; i < result.outputs_size(); ++i) {
-        const v1::OutputEntry& out = result.outputs(i);
-        const auto& segs = segments[static_cast<size_t>(i)];
-        std::string error;
-        auto parent = EnsureParents(dest, segs, &error);
-        if (!parent) return {grpc::StatusCode::FAILED_PRECONDITION, error};
-        const fs::path target = *parent / segs.back();
-        if (req->only_changed() && !out.is_dir() && !out.is_symlink() && AlreadyCurrent(target, out)) continue;
+grpc::Status ClientService::ListRuns(grpc::ServerContext*, const v1::Empty*, v1::RunList* reply) {
+    if (!parts_.engine) return NoEngine();
+    for (auto& st : parts_.engine->List()) *reply->add_runs() = std::move(st);
+    return grpc::Status::OK;
+}
 
-        const fs::path tmp = *parent / (".zm-fetch-" + RandomHex(8));
-        bool ok = false;
-        if (out.is_symlink()) {
-            ok = symlink(out.symlink_target().c_str(), tmp.c_str()) == 0;
-            if (!ok) error = Errno("cannot create symlink", tmp);
-        } else if (out.is_dir()) {
-            ok = merkle_->MaterializeTree(FromProto(out.digest()), tmp);
-            if (!ok) error = "cannot materialize directory " + out.path() + " from the CAS";
-        } else {
-            if (!cas_->HasBlob(out.digest().hash())) {
-                return {grpc::StatusCode::DATA_LOSS, "output " + out.path() + " is missing from the CAS"};
-            }
-            // Make sure an in-memory-only blob is on disk before copying it.
-            fs::path src = cas_->GetBlobPath(out.digest().hash());
-            if (!fs::exists(src)) {
-                auto blob = cas_->GetBlob(out.digest().hash());
-                if (blob) cas_->PutBlob(*blob);
-            }
-            ok = CopyBlobTo(src, tmp, out.is_executable(), &error);
+grpc::Status ClientService::ForgetCache(grpc::ServerContext*, const v1::ForgetRequest* req, v1::ForgetReply* reply) {
+    if (!parts_.cache) return {grpc::StatusCode::UNIMPLEMENTED, "no item cache"};
+    v1::CacheForget forget;
+    int64_t n = 0;
+    if (req->all()) {
+        n = static_cast<int64_t>(parts_.cache->ForgetAll());
+        forget.set_all(true);
+    } else {
+        if (!parts_.engine) return NoEngine();
+        auto rep = parts_.engine->Report(req->run_id());
+        if (!rep) return UnknownRun(req->run_id());
+        for (const auto& it : rep->items()) {
+            const std::string& key = it.cache().key();
+            if (key.empty()) continue;
+            n += parts_.cache->Forget(key) ? 1 : 0;
+            forget.add_keys(key);
         }
-        if (ok) ok = ReplaceEntry(tmp, target, &error);
-        if (!ok) {
-            std::error_code ec;
-            fs::remove_all(tmp, ec);
-            return {grpc::StatusCode::INTERNAL, "cannot write output " + out.path() + ": " + error};
-        }
-        reply->add_written(out.path());
     }
+    if (req->team() && parts_.team_cache) parts_.team_cache->Forget(forget);
+    reply->set_forgotten(n);
     return grpc::Status::OK;
 }
 
@@ -555,6 +461,8 @@ v1::PeerInfo ClientService::SelfInfo() {
     self.set_cpu_load_pct(t.cpu_load_pct);
     self.set_battery_pct(t.battery_pct);
     self.set_on_ac(t.on_ac);
+    self.set_mem_total(static_cast<int64_t>(t.mem_total));
+    self.set_gpus(t.gpus);
     self.set_state("active");
     self.set_is_self(true);
     return self;
@@ -578,31 +486,32 @@ grpc::Status ClientService::ListPeers(grpc::ServerContext*, const v1::Empty*, v1
 }
 
 grpc::Status ClientService::ListActivity(grpc::ServerContext*, const v1::Empty*, v1::ActivitySnapshot* reply) {
-    if (jobs_) {
-        for (auto& a : jobs_->ListActive()) *reply->add_tasks() = std::move(a);
+    if (parts_.engine) {
+        size_t finished = 0;
+        for (auto& st : parts_.engine->List()) {
+            if (st.done() && ++finished > 20) break;
+            *reply->add_runs() = std::move(st);
+        }
     }
-    if (local_executor_) {
-        for (const auto& item : local_executor_->ListActive()) {
-            v1::ActiveTask a;
-            a.set_task_name(item.spec.name().empty() ? item.task_id : item.spec.name());
-            a.set_state(item.state);
-            a.set_role("executing");
-            for (const auto& arg : item.spec.argv()) a.add_argv(arg);
-            a.set_cores(item.spec.resources().cores() > 0 ? item.spec.resources().cores() : 1);
-            if (item.state == v1::SUCCEEDED || item.state == v1::FAILED || item.state == v1::CANCELLED) {
-                a.set_detail("finished");
-            } else {
-                a.set_detail(item.started ? "sandbox" : "queued");
-            }
-            *reply->add_tasks() = std::move(a);
+    if (parts_.local_executor) {
+        for (const auto& b : parts_.local_executor->ListActive()) {
+            auto* a = reply->add_batches();
+            a->set_batch(b.spec.name().empty() ? b.batch_id : b.spec.name());
+            a->set_requester(b.spec.requester());
+            a->set_kind(b.spec.kind());
+            a->set_items(b.spec.items_size());
+            a->set_done(b.done);
+            a->set_current(b.current);
+            a->set_cores(std::max(b.spec.resources().cores(), 1));
+            a->set_running(b.running);
         }
     }
     return grpc::Status::OK;
 }
 
-grpc::Status ClientService::ClearActivity(grpc::ServerContext*, const v1::Empty*, v1::Empty*) {
-    if (jobs_) jobs_->ClearFinished();
-    if (local_executor_) local_executor_->ClearFinished();
+grpc::Status ClientService::Doctor(grpc::ServerContext*, const v1::Empty*, v1::DoctorReply* reply) {
+    if (!parts_.doctor) return {grpc::StatusCode::UNIMPLEMENTED, "no diagnostics"};
+    for (auto& f : parts_.doctor()) *reply->add_findings() = std::move(f);
     return grpc::Status::OK;
 }
 

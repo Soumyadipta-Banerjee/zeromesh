@@ -1,29 +1,48 @@
 #pragma once
 
-#include "zeromesh/v1/common.pb.h"
+#include "zeromesh/v1/node.pb.h"
+#include "zeromesh/v1/run.pb.h"
 
 #include <functional>
+#include <set>
 #include <string>
 #include <string_view>
 
 namespace zeromesh::node {
 
-struct TaskCallbacks {
-    std::function<void(v1::TaskState, std::string detail)> on_state; // non-terminal states only
-    std::function<void(int fd, std::string_view chunk)> on_log;      // fd 1 = stdout, 2 = stderr
-    // The task committed a unit of its work (exec/units.hpp); its blob is in the CAS of the node
-    // that reports it. Optional. May be called from any thread, before on_done.
-    std::function<void(const std::string& unit_id, const v1::Digest& digest)> on_unit;
-    std::function<void(v1::TaskResult)> on_done;                     // exactly once per Execute
+// How one attempt at a batch ended, as a whole. Items that reached an outcome were reported
+// through on_item already; the rest are what `failure` is about.
+struct BatchDone {
+    std::string node;                          // where it ran (or was last tried)
+    v1::FailureKind failure{v1::FAILURE_NONE}; // NONE: every item was reported
+    std::string message;
+    bool cancelled{false};                     // stopped on request
+    uint64_t bytes_pushed{0};
+    uint64_t bytes_pulled{0};
+    uint64_t bytes_seeded{0};
 };
 
-// Runs tasks somewhere. Execute is asynchronous (an implementation may also finish synchronously)
-// and calls cb.on_done exactly once. Cancel of an unknown or finished task is a no-op.
+struct BatchCallbacks {
+    std::function<void(const std::string& node)> on_placed;            // a node accepted it
+    std::function<void(const std::string& item)> on_started;
+    std::function<void(const v1::ItemLog&)> on_log;                     // stream_logs only
+    // An item's outcome; its output and log blobs are already in this node's CAS.
+    std::function<void(const v1::ItemOutcome&, const std::string& node)> on_item;
+    std::function<void(const std::string& item, const v1::Digest& tree)> on_checkpoint;
+    // A donor turned the batch down; the attempt goes on elsewhere.
+    std::function<void(const std::string& node, v1::RejectKind kind, const std::string& reason)> on_reject;
+    std::function<void(BatchDone)> on_done; // exactly once per Execute
+};
+
+// Runs batches somewhere. Execute is asynchronous and makes one attempt: it may try several nodes
+// before one accepts, but once the batch ran (or could be run nowhere) it calls on_done exactly
+// once. Retrying is the caller's decision. Cancel of an unknown or finished batch is a no-op.
 class Executor {
 public:
     virtual ~Executor() = default;
-    virtual void Execute(const std::string& task_id, const v1::TaskSpec& spec, TaskCallbacks cb) = 0;
-    virtual void Cancel(const std::string& task_id) = 0;
+    virtual void Execute(const std::string& batch_id, const v1::BatchSpec& spec, std::set<std::string> exclude,
+                         BatchCallbacks cb) = 0;
+    virtual void Cancel(const std::string& batch_id) = 0;
 };
 
 } // namespace zeromesh::node

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace zeromesh::net {
 
@@ -17,7 +18,11 @@ struct Telemetry {
     bool on_ac{true};
     bool user_active{false}; // recent keyboard/mouse IRQ activity (M4 drain)
     std::string arch{};
+    int gpus{0}; // NVIDIA devices, or else DRI render nodes, under <sysroot>/dev
 };
+
+// Host device nodes a batch that asks for GPUs gets (NVIDIA control and UVM nodes included).
+std::vector<std::string> GpuDevices(const std::filesystem::path& sysroot = "/");
 
 // Reads telemetry from procfs/sysfs under `sysroot` (tests point it at a fake tree).
 // CPU load is the delta between consecutive /proc/stat samples, so the first Sample()

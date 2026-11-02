@@ -50,4 +50,12 @@ void AllowKeepalivePings(grpc::ServerBuilder& builder);
 // Fingerprint of the caller's TLS client certificate, or "" if there is none.
 std::string PeerFingerprint(const grpc::ServerContext& ctx);
 
+// Call once at process start, before any NodeApi channel exists. The first contended
+// absl::Mutex in a process runs absl's one-time CPU frequency probe, which opens
+// /sys/devices/system/cpu/cpu0/tsc_freq_khz and leaves errno = ENOENT where that file is
+// absent. gRPC 1.51 can take that mutex between a non-blocking connect() (EINPROGRESS)
+// and its errno check, and then fails the connection as "connect: No such file or
+// directory". Running the probe here keeps it out of every connect.
+void PrepareGrpcRuntime();
+
 } // namespace zeromesh::net

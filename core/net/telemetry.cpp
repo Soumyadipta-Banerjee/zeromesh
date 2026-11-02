@@ -138,8 +138,49 @@ std::optional<bool> ReadUserActiveOverride(const fs::path& path) {
 
 TelemetrySampler::TelemetrySampler(std::filesystem::path sysroot) : sysroot_(std::move(sysroot)) {}
 
+std::vector<std::string> GpuDevices(const std::filesystem::path& sysroot) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> nvidia, render, extra;
+    std::error_code ec;
+    for (fs::directory_iterator it(sysroot / "dev", ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        const std::string dev = "/dev/" + name;
+        if (name.rfind("nvidia", 0) == 0) {
+            const std::string rest = name.substr(6);
+            if (!rest.empty() && std::all_of(rest.begin(), rest.end(), ::isdigit))
+                nvidia.push_back(dev);
+            else
+                extra.push_back(dev); // nvidiactl, nvidia-uvm, nvidia-modeset
+        }
+    }
+    for (fs::directory_iterator it(sysroot / "dev/dri", ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.rfind("renderD", 0) == 0) render.push_back("/dev/dri/" + name);
+    }
+    std::sort(nvidia.begin(), nvidia.end());
+    std::sort(render.begin(), render.end());
+    std::vector<std::string> out = nvidia.empty() ? render : nvidia;
+    if (!nvidia.empty()) out.insert(out.end(), extra.begin(), extra.end());
+    return out;
+}
+
+namespace {
+
+int GpuCount(const std::filesystem::path& sysroot) {
+    int n = 0;
+    for (const auto& d : GpuDevices(sysroot)) {
+        const std::string name = std::filesystem::path(d).filename().string();
+        if (name.rfind("renderD", 0) == 0 || (name.rfind("nvidia", 0) == 0 && name.size() > 6 && std::isdigit(name[6])))
+            ++n;
+    }
+    return n;
+}
+
+} // namespace
+
 Telemetry TelemetrySampler::Sample() {
     Telemetry t;
+    t.gpus = GpuCount(sysroot_);
 
     const CpuTimes cpu = ReadProcStat(sysroot_ / "proc/stat");
     t.cores_total = cpu.cores > 0 ? cpu.cores : static_cast<int>(std::thread::hardware_concurrency());

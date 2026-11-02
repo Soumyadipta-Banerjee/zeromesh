@@ -8,8 +8,6 @@
 
 #include "net/telemetry.hpp"
 
-#include "zeromesh/v1/common.pb.h"
-
 #include <chrono>
 #include <filesystem>
 #include <optional>
@@ -31,10 +29,20 @@ struct Refusal {
     int retry_after_ms{0}; // Busy only
 };
 
+// What a batch asks of a donor while it runs.
+struct Demand {
+    int cores{1};
+    int64_t mem_bytes{0};
+    int gpus{0};
+    bool network{false};
+    std::string arch;
+};
+
 struct DonorPolicy {
     int allow_on_battery_above{50}; // percent; on battery, accept only above this
     int max_cores{-1};              // -1 = cores_total - 1
-    bool allow_network{false};      // tasks may ask for network only if this is true
+    bool allow_network{false};      // batches may ask for network only if this is true
+    bool allow_gpu{true};           // batches may use this node's GPUs
     int drain_below_battery{20};    // percent; on battery below this, refuse and drain
     // Off by default: keyboard IRQs made demo nodes announce "draining" and
     // vanish from peer lists. Re-enable via ~/.config/zeromesh/donor.toml when wanted.
@@ -75,15 +83,10 @@ struct DonorPolicy {
     // callers that only care about the battery threshold).
     [[nodiscard]] bool ShouldDrain(const net::Telemetry& t) const;
 
-    // nullopt when a task with `spec` is acceptable right now given the node's telemetry and
-    // the cores already promised to other tasks; otherwise a human-readable reason.
-    // `mem_promised` is the memory already promised to reserved and running tasks; a burst of offers
-    // that each fit the node's free memory must not add up to more than it has.
-    [[nodiscard]] std::optional<std::string> Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                     int cores_in_use, int64_t mem_promised = 0) const;
-    // Refuses with the kind of refusal attached.
-    [[nodiscard]] std::optional<Refusal> Evaluate(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                  int cores_in_use, int64_t mem_promised = 0) const;
+    // nullopt when a batch with `demand` is acceptable right now given the node's telemetry, the
+    // cores, memory and GPUs already promised to other batches; otherwise why not, and for how long.
+    [[nodiscard]] std::optional<Refusal> Evaluate(const net::Telemetry& t, const Demand& demand, int cores_in_use,
+                                                  int64_t mem_promised = 0, int gpus_in_use = 0) const;
 };
 
 // Sticky drain state machine. Call Update with each telemetry sample; it reports whether

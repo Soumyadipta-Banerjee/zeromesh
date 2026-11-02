@@ -41,6 +41,7 @@ struct Peer {
     int cores_free{0};
     uint64_t memory_bytes{0};
     uint64_t mem_available{0};
+    int gpus{0};
     double cpu_load_pct{0.0}; // 0.0 to 100.0%
     int battery_pct{-1};      // -1 for AC/Desktop, 0-100 for battery
     bool is_charging{true};

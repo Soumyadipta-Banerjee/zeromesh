@@ -1,8 +1,6 @@
 #include "tests/unit/node_fixture.hpp"
 
-#include "node/action_cache.hpp"
 #include "node/convert.hpp"
-#include "node/job_manager.hpp"
 #include "sched/bandwidth.hpp"
 #include "sched/placer.hpp"
 #include "sched/rank.hpp"
@@ -111,20 +109,20 @@ TEST(TransferCostIsMissingBytesOverBandwidth) {
 }
 
 TEST(RankPrefersFastDonorEvenWithMoreMissingBytes) {
-    v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     // 100 MB at 100 MB/s = 1 s; 20 MB at 1 MB/s = 20 s. Fewer bytes is not cheaper here.
     auto ranked = Rank(spec, {Peer("slow-few", 20'000'000, 1e6), Peer("fast-many", 100'000'000, 100e6)});
     ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"fast-many", "slow-few"}));
 }
 
 TEST(RankPrefersFewerBytesWhenBandwidthIsEqual) {
-    v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     auto ranked = Rank(spec, {Peer("many", 90'000'000, 50e6), Peer("few", 10'000'000, 50e6)});
     ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"few", "many"}));
 }
 
 TEST(RankUsesTheDefaultBandwidthForNodesNeverMeasured) {
-    v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     // Unmeasured nodes tie on speed, so bytes decide, as before bandwidth existed.
     auto ranked = Rank(spec, {Peer("big", 9'000'000), Peer("small", 1'000'000)});
     ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"small", "big"}));
@@ -135,7 +133,7 @@ TEST(RankUsesTheDefaultBandwidthForNodesNeverMeasured) {
 }
 
 TEST(RankWeighsTransferTimeAgainstTheTasksOwnLength) {
-    v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     Candidate roomy = Peer("roomy", 500'000'000, 1e6); // 500 s of transfer, but more free slots
     roomy.cores_total = 16;
     Candidate snug = Peer("snug", 0, 100e6);
@@ -147,7 +145,7 @@ TEST(RankWeighsTransferTimeAgainstTheTasksOwnLength) {
 }
 
 TEST(RankTreatsAnAlreadyHeldInputAsFreeWhateverTheLink) {
-    v1::TaskSpec spec;
+    zeromesh::sched::Need spec;
     auto ranked = Rank(spec, {Peer("needs-bytes", 1'000, 100e6), Peer("has-it", 0, 1e3)});
     ASSERT_EQ(Ids(ranked), (std::vector<std::string>{"has-it", "needs-bytes"}));
 }
@@ -162,32 +160,15 @@ TEST(PlacerMeasuresDonorBandwidthFromRealPushes) {
     a.Admit(b);
     a.peers->Upsert(b.AsPeer());
 
-    auto factory = [&a](const zeromesh::net::Peer& p) {
-        return std::make_shared<zeromesh::node::NodeClient>(p.ip_address + ":" + std::to_string(p.node_port), a.id,
-                                                            a.pins, p.id);
-    };
-    auto placer = std::make_shared<zeromesh::sched::Placer>(a.executor, a.peers, factory, a.cas, a.merkle, a.node_id,
-                                                            [&a] { return a.telemetry; });
-    zeromesh::node::JobManager jm(a.cas, a.merkle, std::make_shared<zeromesh::node::ActionCache>(a.cas), placer);
+    zeromesh::testing::PlacerRequester req(a);
+    auto& placer = req.placer;
 
     TempDir src;
     zeromesh::testing::WriteFile(src / "big.bin", std::string(400'000, 'z')); // well above kMinSampleBytes
-    v1::JobSpec job;
-    job.set_name("bw");
-    auto* t = job.add_tasks();
-    t->set_name("t");
-    t->add_argv("sh");
-    t->add_argv("-c");
-    t->add_argv("wc -c < big.bin");
-    *t->mutable_input_root() = zeromesh::node::ToProto(a.merkle->BuildTree(src.path()));
-    t->mutable_policy()->set_may_run_local(false);
-
     ASSERT_TRUE(!placer->Bandwidth().Measured("node-b").has_value());
-    const std::string id = jm.Submit(job);
-    const auto deadline = std::chrono::steady_clock::now() + 60s;
-    while (!jm.Get(id)->done() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(20ms);
-    auto st = jm.Get(id);
-    ASSERT_TRUE(st->done());
+    req.Execute(zeromesh::testing::ShBatch({{"t", "wc -c < big.bin"}},
+                                           zeromesh::node::ToProto(a.merkle->BuildTree(src.path()))));
+    req.WaitAll();
     ASSERT_TRUE(placer->Traffic().at("node-b").bytes_pushed >= 400'000);
 
     auto measured = placer->Bandwidth().Measured("node-b");

@@ -145,7 +145,19 @@ class ThreeNodeMesh(unittest.TestCase):
             cwd=cwd, timeout=60,
         )
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("no node can run this task", r.stderr)
+        # The exact build is defined by the requester, so it must have the program itself.
+        self.assertIn("is not installed on this node", r.stderr)
+
+    def test_missing_versioned_program_remote(self):
+        # With a version constraint the requester need not have it; no donor does either.
+        cwd = tempdir(self)
+        r = self.a.zm(
+            "run", "--remote-only", "--needs-version", ">=1", "--", "definitely-not-a-binary-xyz",
+            cwd=cwd, timeout=60,
+        )
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("software unavailable", r.stderr)
+        self.assertIn("is not installed", r.stderr)
 
     def test_bad_phrase(self):
         r = self.a.zm("team", "join", "ZM-0000")

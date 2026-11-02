@@ -375,105 +375,106 @@ grpc::Status ExecutionServiceImpl::Execute(grpc::ServerContext*, const reapi::Ex
         if (d) {
             std::filesystem::path base(d);
             MaterializeDir(action.input_root_digest(), base);
-            // UploadTree via ClientApi.
+            // Snapshot via ClientApi.
             grpc::ClientContext uctx;
-            zm::UploadTreeRequest ureq;
+            zm::SnapshotRequest ureq;
             ureq.set_path(base.string());
             ureq.set_force_large(true);
-            zm::UploadTreeReply ureply;
-            auto ust = api_.stub().UploadTree(&uctx, ureq, &ureply);
+            zm::SnapshotReply ureply;
+            auto ust = api_.stub().Snapshot(&uctx, ureq, &ureply);
             if (ust.ok()) inputRoot = ureply.root();
             std::filesystem::remove_all(base);
         }
     }
 
-    // Build TaskSpec.
-    zm::TaskSpec spec;
-    spec.set_name(req->action_digest().hash());
-    std::vector<std::string> argv;
-    for (const auto& a : command.arguments()) {
-        spec.add_argv(a);
-        argv.push_back(a);
+    // One run with one item. Its outputs stay in the store; the ActionResult names their digests.
+    std::vector<std::string> argv(command.arguments().begin(), command.arguments().end());
+    if (argv.empty()) {
+        op.set_done(true);
+        writer->Write(op);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "empty command");
     }
-    for (const auto& e : command.environment_variables()) {
-        (*spec.mutable_env())[e.name()] = e.value();
+    const bool critical = IsCriticalPath(argv);
+    zm::RunSpec run;
+    run.set_name("reapi");
+    if (hasInput && !inputRoot.hash().empty()) *run.mutable_workspace() = inputRoot;
+    auto* policy = run.mutable_policy();
+    policy->set_infra_retries(1);
+    policy->set_timeout_s(3600);
+    policy->set_keep_going(true);
+    zm::Stage* stage = run.add_stages();
+    stage->set_kind("reapi:" + std::filesystem::path(argv.front()).filename().string());
+    stage->mutable_resources()->set_cores(1);
+    // Links stay on the requester: they need every object and the result is used here.
+    stage->set_where(critical ? zm::LOCAL_ONLY : zm::REMOTE_ONLY);
+    stage->mutable_env()->add_programs()->set_name(argv.front());
+    zm::Item* item = run.add_items();
+    item->set_id("action");
+    for (const auto& a : argv) item->add_argv(a);
+    for (const auto& e : command.environment_variables()) (*item->mutable_env())[e.name()] = e.value();
+    item->set_cwd(command.working_directory());
+    std::set<std::string> outs;
+    for (const auto& o : command.output_files()) outs.insert(o);
+    for (const auto& o : command.output_directories()) outs.insert(o);
+    for (const auto& o : command.output_paths()) outs.insert(o);
+    for (const auto& o : outs) {
+        auto* out = item->add_outputs();
+        out->set_path(o);
+        out->set_optional(true); // REAPI: an output the command did not write is simply absent
     }
-    if (hasInput && !inputRoot.hash().empty()) {
-        *spec.mutable_input_root() = inputRoot;
-    }
-    std::cerr << "[frontend-reapi] command.working_directory: '" << command.working_directory() << "'\n";
-    spec.set_working_dir(command.working_directory().empty() ? "." : command.working_directory());
-    for (const auto& o : command.output_files()) spec.add_outputs(o);
-    for (const auto& o : command.output_directories()) spec.add_outputs(o);
-    for (const auto& o : command.output_paths()) spec.add_outputs(o);
-
-    zm::EnvSpec* es = spec.mutable_env_spec();
-    es->set_name("host");
-    zm::Resources* rs = spec.mutable_resources();
-    rs->set_cores(1);
-    rs->set_mem_bytes(0);
-    rs->set_arch("");
-
-    bool critical = IsCriticalPath(argv);
-    zm::Policy* pol = spec.mutable_policy();
-    pol->set_may_run_local(critical);
-    pol->set_may_run_remote(!critical);
-    pol->set_max_retries(1);
-    pol->set_timeout_s(3600);
-    pol->set_allow_network(false);
-    pol->set_preemptible(true);
-
-    zm::JobSpec job;
-    *job.add_tasks() = spec;
 
     grpc::ClientContext sctx;
-    zm::SubmitReply sreply;
-    auto sst = api_.stub().SubmitJob(&sctx, job, &sreply);
+    zm::RunRef ref;
+    auto sst = api_.stub().SubmitRun(&sctx, run, &ref);
     if (!sst.ok()) {
         op.set_done(true);
         writer->Write(op);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "SubmitJob failed: " + sst.error_message());
+        return grpc::Status(grpc::StatusCode::INTERNAL, "SubmitRun failed: " + sst.error_message());
     }
-    std::string jobId = sreply.job_id();
 
-    // Watch job until completion.
-    zm::JobRef jref;
-    jref.set_job_id(jobId);
+    zm::WatchRequest wreq;
+    wreq.set_run_id(ref.run_id());
     grpc::ClientContext wctx;
-    auto reader = api_.stub().WatchJob(&wctx, jref);
-    zm::JobEvent ev;
-    zm::TaskResult result;
+    auto reader = api_.stub().WatchRun(&wctx, wreq);
+    zm::RunEvent ev;
+    std::optional<zm::ItemResult> result;
     while (reader->Read(&ev)) {
         if (ev.has_result()) result = ev.result();
-        if (ev.state() == zm::SUCCEEDED || ev.state() == zm::FAILED || ev.state() == zm::CANCELLED) {
-            if (ev.has_result()) result = ev.result();
-            break;
-        }
+        if (ev.has_finished()) break;
     }
     reader->Finish();
+    if (!result) {
+        op.set_done(true);
+        writer->Write(op);
+        return grpc::Status(grpc::StatusCode::INTERNAL, "the run ended without a result");
+    }
+    std::cerr << "[frontend-reapi] action " << argv.front() << " critical=" << critical << " executed_by="
+              << (result->attempts_size() > 0 ? result->attempts(result->attempts_size() - 1).node() : "cache")
+              << " state=" << result->state() << " failure=" << result->failure().kind() << " "
+              << result->failure().message() << "\n";
+    if (result->state() != zm::ITEM_SUCCEEDED) std::cerr << "[frontend-reapi] stderr: " << result->failure().stderr_tail() << "\n";
+    if (result->state() != zm::ITEM_SUCCEEDED && result->failure().kind() != zm::FAILURE_EXIT) {
+        // Not the command's own failure: let the client build it locally.
+        op.set_done(true);
+        writer->Write(op);
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, result->failure().message());
+    }
 
-    std::cerr << "[frontend-reapi] task " << (argv.empty() ? "" : argv[0]) << " critical=" << critical
-              << " executed_by=" << result.executed_by() << " exit=" << result.exit_code()
-              << " error=" << result.error() << " stderr=" << result.stderr_head() << "\n";
-
-    // Build ActionResult.
     reapi::ActionResult ar;
-    ar.set_exit_code(result.exit_code());
-    if (!result.stdout().hash().empty()) *ar.mutable_stdout_digest() = ToReapi(result.stdout());
-    if (!result.stderr().hash().empty()) *ar.mutable_stderr_digest() = ToReapi(result.stderr());
-    for (const auto& o : result.outputs()) {
-        std::cerr << "[frontend-reapi] OUT: " << o.path() << " digest=" << o.digest().hash()
-                  << " size=" << o.digest().size_bytes() << "\n";
+    ar.set_exit_code(result->state() == zm::ITEM_SUCCEEDED ? 0 : result->failure().exit_code());
+    if (!result->stdout().hash().empty()) *ar.mutable_stdout_digest() = ToReapi(result->stdout());
+    if (!result->stderr().hash().empty()) *ar.mutable_stderr_digest() = ToReapi(result->stderr());
+    for (const auto& o : result->outputs()) {
         if (o.is_dir()) {
             auto* od = ar.add_output_directories();
             od->set_path(o.path());
             *od->mutable_tree_digest() = ToReapi(o.digest());
             *od->mutable_root_directory_digest() = ToReapi(o.digest());
-        } else {
+        } else if (!o.symlink()) {
             auto* of = ar.add_output_files();
             of->set_path(o.path());
             *of->mutable_digest() = ToReapi(o.digest());
-            of->set_is_executable(o.is_executable());
+            of->set_is_executable(o.executable());
         }
     }
 

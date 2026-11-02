@@ -1,5 +1,7 @@
 #include "tests/unit/node_fixture.hpp"
 
+#include "run/item_cache.hpp"
+
 #include "node/convert.hpp"
 #include "node/node_client.hpp"
 #include "store/merkle.hpp"
@@ -28,13 +30,8 @@ std::vector<v1::Digest> ToProto(const std::vector<zeromesh::store::Digest>& in) 
     return out;
 }
 
-v1::TaskSpec Shell(const std::string& script) {
-    v1::TaskSpec s;
-    s.set_name("t");
-    s.add_argv("sh");
-    s.add_argv("-c");
-    s.add_argv(script);
-    return s;
+v1::BatchSpec Shell(const std::string& script) {
+    return zeromesh::testing::ShBatch({{"t", script}});
 }
 
 // A raw stub to `peer` that accepts any server certificate, so only the server's gate decides.
@@ -81,8 +78,9 @@ TEST(NodeApiRemoteRun) {
     auto needed = ToProto(a.merkle->CollectTree(root));
     ASSERT_EQ(needed.size(), static_cast<size_t>(2)); // the manifest and in.txt
 
-    v1::TaskSpec spec = Shell("cat in.txt; printf %s \"$ZM_NODE_ID\" > who");
-    spec.add_outputs("who");
+    v1::BatchSpec spec = Shell("cat in.txt; printf %s \"$ZM_NODE_ID\" > who");
+    spec.mutable_items(0)->add_outputs("who");
+    spec.set_stream_logs(true);
     *spec.mutable_input_root() = zeromesh::node::ToProto(root);
 
     auto client = a.ClientTo(b);
@@ -101,26 +99,26 @@ TEST(NodeApiRemoteRun) {
     Expect(client->Push(*a.cas, missing, &err), err);
     ASSERT_TRUE(b.cas->HasBlob(root.hash));
 
-    std::vector<v1::JobEvent> events;
-    auto result = client->Run("t1", [&](const v1::JobEvent& ev) { events.push_back(ev); }, &err);
-    Expect(result.has_value(), err);
-    Expect(result->exit_code() == 0, "exit " + std::to_string(result->exit_code()) + ": " + result->error());
-    ASSERT_EQ(result->stdout_head(), std::string("hello from A\n"));
-    ASSERT_EQ(result->executed_by(), std::string("node-b"));
-    ASSERT_TRUE(!events.empty() && events.back().has_result() && events.back().state() == v1::SUCCEEDED);
-    bool saw_running = false, saw_log = false;
+    std::vector<v1::BatchEvent> events;
+    auto finished = client->Run("t1", [&](const v1::BatchEvent& ev) { events.push_back(ev); }, &err);
+    Expect(finished.has_value(), err);
+    Expect(finished->error().empty() && !finished->cancelled(), finished->error());
+    std::optional<v1::ItemOutcome> outcome;
+    bool saw_start = false, saw_log = false;
     for (const auto& ev : events) {
-        saw_running = saw_running || ev.state() == v1::RUNNING;
-        saw_log = saw_log || (ev.log_fd() == 1 && ev.log_chunk() == "hello from A\n");
+        saw_start = saw_start || ev.started() == "t";
+        saw_log = saw_log || (ev.has_log() && ev.log().fd() == 1 && ev.log().chunk() == "hello from A\n");
+        if (ev.has_done()) outcome = ev.done();
     }
-    ASSERT_TRUE(saw_running && saw_log);
-
-    ASSERT_EQ(result->outputs_size(), 1);
-    const v1::Digest who = result->outputs(0).digest();
+    ASSERT_TRUE(saw_start && saw_log && outcome.has_value());
+    Expect(outcome->failure() == v1::FAILURE_NONE, outcome->message());
+    ASSERT_EQ(outcome->stdout_tail(), std::string("hello from A\n"));
+    ASSERT_EQ(outcome->outputs_size(), 1);
+    const v1::Digest who = outcome->outputs(0).digest();
     ASSERT_FALSE(a.cas->HasBlob(who.hash()));
-    Expect(client->Pull(*a.cas, {who, result->stdout()}, &err), err);
+    Expect(client->Pull(*a.cas, {who, outcome->stdout()}, &err), err);
     ASSERT_EQ(a.cas->GetBlob(who.hash()), std::optional<std::string>("node-b"));
-    ASSERT_EQ(a.cas->GetBlob(result->stdout().hash()), std::optional<std::string>("hello from A\n"));
+    ASSERT_EQ(a.cas->GetBlob(outcome->stdout().hash()), std::optional<std::string>("hello from A\n"));
 
     // The reservation was used up.
     Expect(!client->Run("t1", nullptr, &err).has_value(), "second run of t1 succeeded");
@@ -133,7 +131,7 @@ TEST(NodeApiLargeOfferAccepts) {
     b.Start();
     a.Admit(b);
 
-    v1::TaskSpec spec = Shell("true");
+    v1::BatchSpec spec = Shell("true");
     std::vector<v1::Digest> needed;
     needed.reserve(70000);
     for (int i = 0; i < 70000; ++i) {
@@ -153,19 +151,128 @@ TEST(NodeApiLargeOfferAccepts) {
     ASSERT_TRUE(reply->accepted());
 }
 
-TEST(NodeApiOfferRejectsMissingCommand) {
+TEST(NodeApiOfferChecksTheEnvironment) {
     auto key = zeromesh::net::GenerateTeamKey();
     TestNodeFull a("node-a", key), b("node-b", key);
     a.Start();
     b.Start();
     a.Admit(b);
-    v1::TaskSpec spec;
-    spec.add_argv("definitely-not-a-binary-xyz");
+    auto client = a.ClientTo(b);
     std::string err;
-    auto reply = a.ClientTo(b)->Offer("t1", spec, {}, &err);
+
+    v1::BatchSpec missing = Shell("true");
+    missing.mutable_env()->add_programs()->set_name("definitely-not-a-binary-xyz");
+    auto reply = client->Offer("t1", missing, {}, &err);
     Expect(reply.has_value(), err);
     ASSERT_FALSE(reply->accepted());
-    Expect(reply->reason().find("not found on this node") != std::string::npos, reply->reason());
+    ASSERT_TRUE(reply->reject_kind() == v1::REJECT_ENV);
+    Expect(reply->reason().find("is not installed") != std::string::npos, reply->reason());
+
+    v1::BatchSpec other_build = Shell("true");
+    auto* sh = other_build.mutable_env()->add_programs();
+    sh->set_name("sh");
+    sh->set_digest(std::string(64, 'e'));
+    reply = client->Offer("t2", other_build, {}, &err);
+    ASSERT_TRUE(reply && !reply->accepted() && reply->reject_kind() == v1::REJECT_TOOLCHAIN);
+
+    // A version constraint is checked with the donor's probe.
+    b.service->SetVersionProbe([](const v1::Program&, const std::string&) { return std::optional<std::string>("tool 3.9.1"); });
+    v1::BatchSpec old = Shell("true");
+    auto* p = old.mutable_env()->add_programs();
+    p->set_name("sh");
+    p->set_version(">=4.0");
+    reply = client->Offer("t3", old, {}, &err);
+    ASSERT_TRUE(reply && !reply->accepted() && reply->reject_kind() == v1::REJECT_ENV);
+    Expect(reply->reason().find("3.9.1 does not satisfy >=4.0") != std::string::npos, reply->reason());
+    p->set_version(">=3.9,<4");
+    reply = client->Offer("t4", old, {}, &err);
+    Expect(reply && reply->accepted(), reply ? reply->reason() : err);
+
+    // A shared path the donor does not have.
+    v1::BatchSpec shared = Shell("true");
+    shared.mutable_env()->add_shared_paths("/definitely/not/mounted/here");
+    reply = client->Offer("t5", shared, {}, &err);
+    ASSERT_TRUE(reply && !reply->accepted() && reply->reject_kind() == v1::REJECT_ENV);
+}
+
+TEST(NodeApiFairShareMakesRoomForAWaitingRequester) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull donor("node-d", key), r1("node-r1", key), r2("node-r2", key);
+    donor.telemetry.cores_total = 5; // donates 4
+    donor.Start();
+    r1.Start();
+    r2.Start();
+    r1.Admit(donor);
+    r2.Admit(donor);
+    auto c1 = r1.ClientTo(donor);
+    auto c2 = r2.ClientTo(donor);
+    std::string err;
+    // r1 alone may take everything.
+    for (int i = 0; i < 4; ++i) {
+        auto reply = c1->Offer("a" + std::to_string(i), Shell("true"), {}, &err);
+        Expect(reply && reply->accepted(), reply ? reply->reason() : err);
+    }
+    // r2 finds the donor full and waits.
+    auto full = c2->Offer("b0", Shell("true"), {}, &err);
+    ASSERT_TRUE(full && !full->accepted() && full->reject_kind() == v1::REJECT_BUSY);
+    // r1 releases its reservations; from now on it may hold only its share (2 of 4).
+    for (int i = 0; i < 4; ++i) {
+        v1::BatchRef ref;
+        ref.set_batch_id("a" + std::to_string(i));
+        // CancelBatch on an offered batch drops its reservation.
+        grpc::ClientContext ctx;
+        v1::Empty empty;
+        (void)RawStub(r1, donor)->CancelBatch(&ctx, ref, &empty);
+    }
+    for (int i = 0; i < 2; ++i) {
+        auto reply = c1->Offer("c" + std::to_string(i), Shell("true"), {}, &err);
+        Expect(reply && reply->accepted(), reply ? reply->reason() : err);
+    }
+    auto over = c1->Offer("c2", Shell("true"), {}, &err);
+    ASSERT_TRUE(over && !over->accepted() && over->reject_kind() == v1::REJECT_BUSY);
+    Expect(over->reason().find("fair share") != std::string::npos, over->reason());
+    auto mine = c2->Offer("b1", Shell("true"), {}, &err);
+    Expect(mine && mine->accepted(), mine ? mine->reason() : err);
+}
+
+TEST(NodeApiAnswersTeamCacheLookups) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    auto cache = std::make_shared<zeromesh::run::ItemCache>(b.cas, b.merkle);
+    b.service->SetItemCache(cache);
+    const auto out = b.cas->PutBlob("object");
+    v1::CachedItem item;
+    auto* f = item.add_outputs();
+    f->set_path("a.o");
+    *f->mutable_digest() = zeromesh::node::ToProto(out);
+    item.set_node("node-b");
+    const std::string k(64, '1'), weak(64, '2');
+    cache->Put(k, item);
+    v1::Footprint fp;
+    auto* ff = fp.add_files();
+    ff->set_path("src/a.c");
+    ff->set_hash("f:abc");
+    cache->AddFootprint(weak, fp);
+
+    v1::CacheLookup req;
+    req.add_keys(k);
+    req.add_keys(std::string(64, '3')); // unknown
+    req.add_weaks(weak);
+    std::string err;
+    auto reply = a.ClientTo(b)->LookupCache(req, std::chrono::seconds(5), &err);
+    Expect(reply.has_value(), err);
+    ASSERT_EQ(reply->hits_size(), 1);
+    ASSERT_EQ(reply->hits(0).key(), k);
+    ASSERT_EQ(reply->footprints_size(), 1);
+    ASSERT_EQ(reply->footprints(0).footprints(0).files(0).path(), std::string("src/a.c"));
+
+    v1::CacheForget forget;
+    forget.add_keys(k);
+    Expect(a.ClientTo(b)->ForgetCache(forget, &err), err);
+    ASSERT_FALSE(cache->Get(k).has_value());
 }
 
 TEST(NodeApiBlobDigestVerified) {
@@ -207,10 +314,10 @@ TEST(NodeApiBlobDigestVerified) {
     {
         grpc::ClientContext ctx;
         v1::Offer offer;
-        offer.set_task_id("x");
-        offer.mutable_spec()->add_argv("sh");
+        offer.set_batch_id("x");
+        *offer.mutable_spec() = Shell("true");
         v1::OfferReply reply;
-        ASSERT_EQ(rogue->OfferTask(&ctx, offer, &reply).error_code(), grpc::StatusCode::PERMISSION_DENIED);
+        ASSERT_EQ(rogue->OfferBatch(&ctx, offer, &reply).error_code(), grpc::StatusCode::PERMISSION_DENIED);
     }
     {
         grpc::ClientContext ctx;
@@ -235,13 +342,13 @@ TEST(NodeApiCancel) {
     Expect(reply && reply->accepted(), err + (reply ? reply->reason() : ""));
 
     std::atomic<bool> running{false};
-    std::optional<v1::TaskResult> result;
+    std::optional<v1::BatchFinished> result;
     std::string run_err;
     std::thread runner([&] {
         result = client->Run(
             "t1",
-            [&](const v1::JobEvent& ev) {
-                if (ev.state() == v1::RUNNING) running = true;
+            [&](const v1::BatchEvent& ev) {
+                if (ev.has_started()) running = true;
             },
             &run_err);
     });
@@ -255,6 +362,6 @@ TEST(NodeApiCancel) {
     runner.join();
     const auto took = std::chrono::steady_clock::now() - t0;
     Expect(result.has_value(), run_err);
-    ASSERT_TRUE(result->cancelled() || !result->error().empty());
-    ASSERT_TRUE(took < std::chrono::seconds(2));
+    ASSERT_TRUE(result->cancelled());
+    ASSERT_TRUE(took < std::chrono::seconds(8)); // SIGTERM, then SIGKILL after the grace period
 }

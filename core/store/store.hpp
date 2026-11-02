@@ -11,6 +11,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace zeromesh::store {
 
@@ -119,9 +120,11 @@ public:
     [[nodiscard]] std::filesystem::path GetBlobPath(const std::string& hash) const;
 
     /**
-     * @brief Saves serialized ActionResult into the local Action Cache (AC).
+     * @brief Saves a serialized result under `action_hash` in the action-result area. An existing
+     * entry is kept unless `replace` (the rename is atomic either way).
      */
-    bool PutActionResult(const std::string& action_hash, std::string_view serialized_result);
+    bool PutActionResult(const std::string& action_hash, std::string_view serialized_result, bool replace = false);
+    [[nodiscard]] std::vector<std::string> ListActionResults() const;
 
     /**
      * @brief Fetches serialized ActionResult from the local Action Cache (AC).

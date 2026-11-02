@@ -11,35 +11,20 @@
 namespace {
 
 namespace fs = std::filesystem;
-using zeromesh::plugin::EnvParams;
-
-EnvParams Argv(std::string cmd) {
-    EnvParams p;
-    p.argv = {std::move(cmd)};
-    return p;
-}
+using zeromesh::envhost::Resolve;
 
 } // namespace
 
-TEST(EnvHostFindsSh) {
+TEST(EnvHostResolvesProgramsOnTheSandboxPath) {
     auto env = zeromesh::envhost::Make();
     ASSERT_EQ(env->Name(), std::string_view("host"));
-    ASSERT_TRUE(env->Check(Argv("sh")).ok);
-    ASSERT_FALSE(env->Check({}).ok);
-}
-
-TEST(EnvHostMissingCommand) {
-    auto a = zeromesh::envhost::Make()->Check(Argv("definitely-not-a-binary-xyz"));
-    ASSERT_FALSE(a.ok);
-    ASSERT_TRUE(a.reason.find("not found on this node") != std::string::npos);
-    // Found on the host's PATH, but not on the search path this provider was given.
-    ASSERT_FALSE(zeromesh::envhost::Make("/nonexistent")->Check(Argv("sh")).ok);
-}
-
-TEST(EnvHostRelativeScriptOk) {
-    auto env = zeromesh::envhost::Make();
-    ASSERT_TRUE(env->Check(Argv("./sim")).ok);
-    ASSERT_TRUE(env->Check(Argv("bin/sim")).ok);
+    ASSERT_TRUE(env->Check({}).ok); // programs are the core's business, not the provider's
+    auto sh = Resolve("sh");
+    ASSERT_TRUE(sh.has_value());
+    ASSERT_TRUE(sh->rfind("/", 0) == 0);
+    ASSERT_FALSE(Resolve("definitely-not-a-binary-xyz").has_value());
+    ASSERT_FALSE(Resolve("").has_value());
+    ASSERT_FALSE(Resolve("bin/sim").has_value()); // relative: lives in the workspace
 }
 
 TEST(EnvHostMirrorsUsrMerge) {
@@ -71,34 +56,23 @@ TEST(EnvHostLoadsAsPlugin) {
     ASSERT_TRUE(reg.LoadFile(fs::path(dir) / "libzm_env_host.so", &err));
     auto* env = reg.Env("host");
     ASSERT_TRUE(env != nullptr);
-    ASSERT_TRUE(env->Check(Argv("sh")).ok);
+    ASSERT_TRUE(env->Prepare({}).value.has_value());
 }
 
-TEST(EnvHostAbsolutePathInMountedDir) {
-    auto env = zeromesh::envhost::Make();
-    ASSERT_TRUE(env->Check({.params = {}, .argv = {"/usr/bin/env"}}).ok);
-    ASSERT_FALSE(env->Check({.params = {}, .argv = {"/home/nobody/tool"}}).ok);
-}
-
-TEST(EnvHostRejectsCommandOnUnboundPath) {
-    namespace fs = std::filesystem;
+TEST(EnvHostResolvesAbsolutePathsOnlyInMountedDirectories) {
+    ASSERT_TRUE(Resolve("/usr/bin/env").has_value());
+    ASSERT_FALSE(Resolve("/home/nobody/tool").has_value());
+    // A program on the requester's PATH but outside the sandbox's is not runnable there.
     const fs::path dir = fs::temp_directory_path() / "zm_env_host_unbound_path";
     std::error_code ec;
     fs::create_directories(dir, ec);
-    ASSERT_FALSE(ec);
     const fs::path tool = dir / "zm_only_here_tool";
     {
         std::ofstream out(tool);
-        ASSERT_TRUE(out.good());
         out << "#!/bin/sh\nexit 0\n";
     }
     fs::permissions(tool, fs::perms::owner_all, ec);
-    ASSERT_FALSE(ec);
-
-    const std::string wide_path = dir.string() + ":" + zeromesh::envhost::DefaultPathEnv();
-    ASSERT_TRUE(zeromesh::envhost::Make(wide_path)->Check(Argv("zm_only_here_tool")).ok);
-    ASSERT_FALSE(zeromesh::envhost::Make()->Check(Argv("zm_only_here_tool")).ok);
-
-    fs::remove(tool, ec);
-    fs::remove(dir, ec);
+    ASSERT_FALSE(Resolve("zm_only_here_tool").has_value());
+    ASSERT_FALSE(Resolve(tool.string()).has_value());
+    fs::remove_all(dir, ec);
 }

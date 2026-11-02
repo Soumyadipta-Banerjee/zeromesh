@@ -33,7 +33,7 @@
 namespace zeromesh::node {
 
 inline constexpr std::chrono::seconds kNodeRpcTimeout{10};
-// OfferTask carries every input-tree digest; large trees need a bigger gRPC frame than the default 4 MiB.
+// OfferBatch carries every input-tree digest; large trees need a bigger gRPC frame than the default 4 MiB.
 inline constexpr int kNodeApiMaxMessageSize = 64 * 1024 * 1024;
 
 inline void ApplyNodeApiMessageLimits(grpc::ServerBuilder& builder) {
@@ -42,7 +42,7 @@ inline void ApplyNodeApiMessageLimits(grpc::ServerBuilder& builder) {
 }
 
 // Serialized size of an Offer RPC (for placer-side limits before calling the peer).
-[[nodiscard]] size_t EncodedOfferByteSize(const std::string& task_id, const v1::TaskSpec& spec,
+[[nodiscard]] size_t EncodedOfferByteSize(const std::string& batch_id, const v1::BatchSpec& spec,
                                           const std::vector<v1::Digest>& needed);
 
 class NodeClient {
@@ -61,9 +61,9 @@ public:
     // Round-trip time of a Ping RPC (wall clock), or nullopt on failure.
     std::optional<std::chrono::milliseconds> PingRtt(std::string* error = nullptr);
 
-    // Offers a task; `needed` lists every blob the run reads (the input tree's blobs).
+    // Offers a batch; `needed` lists every blob it reads (the input tree's blobs).
     // nullopt (with *error) when the call itself failed.
-    std::optional<v1::OfferReply> Offer(const std::string& task_id, const v1::TaskSpec& spec,
+    std::optional<v1::OfferReply> Offer(const std::string& batch_id, const v1::BatchSpec& spec,
                                         const std::vector<v1::Digest>& needed, std::string* error = nullptr);
 
     // Uploads `digests` from `cas` to the peer, which verifies every object. When `bytes_sent`
@@ -84,18 +84,22 @@ public:
     bool SeedBlobs(const std::string& source_node_id, const std::vector<v1::Digest>& digests,
                    std::vector<v1::Digest>* fetched, std::string* error = nullptr);
 
-    // Runs a task the peer accepted, calling on_event for every event, and blocks until the
-    // final event, whose result it returns. nullopt (with *error) when the stream broke
-    // first, e.g. the peer vanished (keepalive timeout) or refused the run. After
-    // Cancel(task_id) it returns the peer's cancelled result, or a local one if the peer
-    // could not be told.
-    std::optional<v1::TaskResult> Run(const std::string& task_id,
-                                      const std::function<void(const v1::JobEvent&)>& on_event,
-                                      std::string* error = nullptr);
+    // Runs a batch the peer accepted, calling on_event for every event before the final one, and
+    // blocks until that final event, which it returns. nullopt (with *error) when the stream broke
+    // first, e.g. the peer vanished (keepalive timeout) or refused the run. After Cancel(batch_id)
+    // it returns a cancelled outcome even if the peer could not be told.
+    std::optional<v1::BatchFinished> Run(const std::string& batch_id,
+                                         const std::function<void(const v1::BatchEvent&)>& on_event,
+                                         std::string* error = nullptr);
 
-    // Cancels the task on the peer (CancelTask); if the peer cannot be reached, aborts
-    // the local Run stream instead. A no-op for a task with no Run in progress.
-    void Cancel(const std::string& task_id);
+    // Cancels the batch on the peer (CancelBatch); if the peer cannot be reached, aborts the local
+    // Run stream instead. A no-op for a batch with no Run in progress.
+    void Cancel(const std::string& batch_id);
+
+    // Team-wide item cache.
+    std::optional<v1::CacheLookupReply> LookupCache(const v1::CacheLookup& req, std::chrono::milliseconds timeout,
+                                                    std::string* error = nullptr);
+    bool ForgetCache(const v1::CacheForget& req, std::string* error = nullptr);
 
     // Tells the peer this node is draining.
     // With a `code` and ttl_ms > 0 the notice is freeze-first: the donor holds the peer's tasks
@@ -120,8 +124,12 @@ private:
     mutable std::mutex mu_;
     std::optional<std::string> peer_node_id_;
     std::shared_ptr<v1::NodeApi::Stub> pinned_stub_;
-    std::map<std::string, grpc::ClientContext*> runs_; // task id -> its active Run call
-    std::set<std::string> cancelled_;                  // tasks Cancel()ed during their Run
+    std::map<std::string, grpc::ClientContext*> runs_; // batch id -> its active Run call
+    std::set<std::string> cancelled_;                  // batches Cancel()ed during their Run
 };
+
+// Pulls whatever of `blobs`, and of the trees `trees` with everything under them, `cas` lacks.
+bool PullTrees(NodeClient& client, store::CasStore& cas, std::vector<v1::Digest> blobs, std::vector<v1::Digest> trees,
+               std::string* error = nullptr, uint64_t* bytes_received = nullptr);
 
 } // namespace zeromesh::node

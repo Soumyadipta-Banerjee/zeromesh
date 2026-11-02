@@ -4,6 +4,7 @@
 #include "node/donor_policy.hpp"
 
 #include <chrono>
+#include <optional>
 #include <sstream>
 
 using zeromesh::node::DonorPolicy;
@@ -21,10 +22,15 @@ zeromesh::net::Telemetry Laptop(int battery, bool on_ac) {
     return t;
 }
 
-zeromesh::v1::TaskSpec Echo() {
-    zeromesh::v1::TaskSpec s;
-    s.add_argv("echo");
-    return s;
+zeromesh::node::Demand Echo() {
+    return zeromesh::node::Demand{};
+}
+
+// The reason of a refusal, or nullopt.
+std::optional<std::string> Why(const DonorPolicy& p, const zeromesh::net::Telemetry& t, const zeromesh::node::Demand& d,
+                               int cores_in_use) {
+    if (auto r = p.Evaluate(t, d, cores_in_use)) return r->reason;
+    return std::nullopt;
 }
 
 } // namespace
@@ -38,20 +44,20 @@ TEST(DonorPolicyDefaults) {
     ASSERT_FALSE(p.allow_network);
     ASSERT_EQ(p.drain_below_battery, 20);
 
-    auto why = p.Refuses(Laptop(30, false), Echo(), 0);
+    auto why = Why(p, Laptop(30, false), Echo(), 0);
     ASSERT_TRUE(why.has_value());
     ASSERT_TRUE(why->find("battery") != std::string::npos);
-    ASSERT_FALSE(p.Refuses(Laptop(30, true), Echo(), 0).has_value());
-    ASSERT_FALSE(p.Refuses(Laptop(80, false), Echo(), 0).has_value());
+    ASSERT_FALSE(Why(p, Laptop(30, true), Echo(), 0).has_value());
+    ASSERT_FALSE(Why(p, Laptop(80, false), Echo(), 0).has_value());
     ASSERT_TRUE(p.ShouldDrain(Laptop(10, false)));
     ASSERT_FALSE(p.ShouldDrain(Laptop(10, true)));
 
     // At most cores_total - 1 cores, counting what is already promised.
-    ASSERT_FALSE(p.Refuses(Laptop(-1, true), Echo(), 6).has_value());
-    ASSERT_TRUE(p.Refuses(Laptop(-1, true), Echo(), 7).has_value());
+    ASSERT_FALSE(Why(p, Laptop(-1, true), Echo(), 6).has_value());
+    ASSERT_TRUE(Why(p, Laptop(-1, true), Echo(), 7).has_value());
     auto big = Echo();
-    big.mutable_resources()->set_cores(8);
-    ASSERT_TRUE(p.Refuses(Laptop(-1, true), big, 0).has_value());
+    big.cores = 8;
+    ASSERT_TRUE(Why(p, Laptop(-1, true), big, 0).has_value());
 }
 
 TEST(DonorPolicyCountsMemoryPromisedToOtherTasks) {
@@ -59,7 +65,7 @@ TEST(DonorPolicyCountsMemoryPromisedToOtherTasks) {
     auto t = Laptop(-1, true);
     t.mem_available = 4ull << 30;
     auto spec = Echo();
-    spec.mutable_resources()->set_mem_bytes(1ll << 30);
+    spec.mem_bytes = 1ll << 30;
     // 1 GiB fits in 4 GiB when nothing else is promised, and when 2 GiB is, but not when 3.5 GiB is.
     ASSERT_FALSE(p.Evaluate(t, spec, 0, 0).has_value());
     ASSERT_FALSE(p.Evaluate(t, spec, 0, 2ll << 30).has_value());
@@ -71,13 +77,13 @@ TEST(DonorPolicyCountsMemoryPromisedToOtherTasks) {
 
 TEST(DonorPolicyNetwork) {
     auto spec = Echo();
-    spec.mutable_policy()->set_allow_network(true);
+    spec.network = true;
     DonorPolicy p;
-    auto why = p.Refuses(Laptop(-1, true), spec, 0);
+    auto why = Why(p, Laptop(-1, true), spec, 0);
     ASSERT_TRUE(why.has_value());
     ASSERT_TRUE(why->find("network") != std::string::npos);
     p.allow_network = true;
-    ASSERT_FALSE(p.Refuses(Laptop(-1, true), spec, 0).has_value());
+    ASSERT_FALSE(Why(p, Laptop(-1, true), spec, 0).has_value());
 }
 
 TEST(DonorPolicyParse) {
@@ -182,18 +188,34 @@ TEST(DonorPolicyRefusalKinds) {
     ASSERT_TRUE(busy->kind == RefusalKind::Busy);
 
     // Needing more than the donor ever donates is not "busy": waiting will not help.
-    spec.mutable_resources()->set_cores(8);
+    spec.cores = 8;
     auto too_big = p.Evaluate(Laptop(-1, true), spec, 0);
     ASSERT_TRUE(too_big.has_value());
     ASSERT_TRUE(too_big->kind == RefusalKind::Unsupported);
 
     auto net = Echo();
-    net.mutable_policy()->set_allow_network(true);
+    net.network = true;
     auto no_net = p.Evaluate(Laptop(-1, true), net, 0);
     ASSERT_TRUE(no_net.has_value());
     ASSERT_TRUE(no_net->kind == RefusalKind::Unsupported);
 
     ASSERT_FALSE(p.Evaluate(Laptop(-1, true), Echo(), 0).has_value());
-    // Refuses stays the same, minus the kind.
-    ASSERT_EQ(p.Refuses(Laptop(-1, true), spec, 0), std::optional<std::string>(too_big->reason));
+}
+
+TEST(DonorPolicyGpus) {
+    using zeromesh::node::RefusalKind;
+    DonorPolicy p;
+    auto t = Laptop(-1, true);
+    auto gpu = Echo();
+    gpu.gpus = 1;
+    auto none = p.Evaluate(t, gpu, 0);
+    ASSERT_TRUE(none.has_value() && none->kind == RefusalKind::Unsupported); // no GPU here
+    t.gpus = 1;
+    ASSERT_FALSE(p.Evaluate(t, gpu, 0).has_value());
+    auto taken = p.Evaluate(t, gpu, 0, 0, 1);
+    ASSERT_TRUE(taken.has_value() && taken->kind == RefusalKind::Busy);
+    p.allow_gpu = false;
+    ASSERT_TRUE(p.Evaluate(t, gpu, 0).has_value());
+    std::ostringstream warn;
+    ASSERT_FALSE(DonorPolicy::Parse("allow_gpu = false\n", warn).allow_gpu);
 }

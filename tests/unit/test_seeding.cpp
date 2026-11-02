@@ -1,8 +1,6 @@
 #include "tests/unit/node_fixture.hpp"
 
-#include "node/action_cache.hpp"
 #include "node/convert.hpp"
-#include "node/job_manager.hpp"
 #include "sched/placer.hpp"
 #include "sched/seed_gate.hpp"
 
@@ -25,44 +23,19 @@ void SExpect(bool cond, const std::string& what) {
     if (!cond) throw std::runtime_error(what);
 }
 
-struct SeedRequester {
-    std::shared_ptr<zeromesh::sched::Placer> placer;
-    std::unique_ptr<zeromesh::node::JobManager> jm;
+using SeedRequester = zeromesh::testing::PlacerRequester;
 
-    explicit SeedRequester(TestNodeFull& self) {
-        auto factory = [&self](const zeromesh::net::Peer& p) {
-            return std::make_shared<zeromesh::node::NodeClient>(p.ip_address + ":" + std::to_string(p.node_port),
-                                                                self.id, self.pins, p.id);
-        };
-        placer = std::make_shared<zeromesh::sched::Placer>(self.executor, self.peers, factory, self.cas, self.merkle,
-                                                           self.node_id, [&self] { return self.telemetry; });
-        jm = std::make_unique<zeromesh::node::JobManager>(
-            self.cas, self.merkle, std::make_shared<zeromesh::node::ActionCache>(self.cas), placer);
-    }
-};
-
-v1::JobSpec OneTask(const v1::Digest& root) {
-    v1::JobSpec job;
-    job.set_name("seed");
-    auto* t = job.add_tasks();
-    t->set_name("t");
-    t->add_argv("sh");
-    t->add_argv("-c");
-    t->add_argv("test -s big.bin && echo ok");
-    *t->mutable_input_root() = root;
-    t->mutable_policy()->set_may_run_local(false);
-    return job;
+v1::BatchSpec OneTask(const v1::Digest& root) {
+    return zeromesh::testing::ShBatch({{"t", "test -s big.bin && echo ok"}}, root);
 }
 
-// Waits for the job and returns who ran it; throws if it failed.
-std::string RunAndWait(SeedRequester& req, const v1::JobSpec& job) {
-    const std::string id = req.jm->Submit(job);
-    const auto deadline = std::chrono::steady_clock::now() + 60s;
-    while (!req.jm->Get(id)->done() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(20ms);
-    auto st = req.jm->Get(id);
-    SExpect(st->done(), "job did not finish");
-    SExpect(st->tasks().at("t") == v1::SUCCEEDED, st->results().at("t").error());
-    return st->results().at("t").executed_by();
+// Runs the batch and returns who ran it; throws if it failed.
+std::string RunAndWait(SeedRequester& req, const v1::BatchSpec& spec) {
+    auto& log = req.Execute(spec);
+    SExpect(log.Wait(60s), "batch did not finish");
+    SExpect(log.result.failure == v1::FAILURE_NONE, log.result.message);
+    SExpect(log.items.size() == 1 && log.items[0].first.failure() == v1::FAILURE_NONE, "the item failed");
+    return log.result.node;
 }
 
 // Lets `node` reach its peers by id, as the daemon's client_for_node does.

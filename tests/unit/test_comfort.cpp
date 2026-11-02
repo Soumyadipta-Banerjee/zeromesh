@@ -271,9 +271,10 @@ TEST(HostPsiFilesAreReadable) {
 
 // ---- wiring: OfferReply.comfort_level, placer avoidance, sandbox registration, real kernel ----
 
-#include "node/action_cache.hpp"
+#include "exec/batch_runner.hpp"
+#include "exec/cgroup.hpp"
 #include "node/convert.hpp"
-#include "node/job_manager.hpp"
+#include "plugins/env-host/env_host.hpp"
 #include "sched/placer.hpp"
 
 #include <signal.h>
@@ -285,14 +286,8 @@ namespace {
 namespace v1 = zeromesh::v1;
 using zeromesh::testing::TestNodeFull;
 
-v1::TaskSpec EchoSpec(const std::string& name) {
-    v1::TaskSpec t;
-    t.set_name(name);
-    t.add_argv("sh");
-    t.add_argv("-c");
-    t.add_argv("echo " + name);
-    t.mutable_policy()->set_may_run_local(false);
-    return t;
+v1::BatchSpec EchoSpec(const std::string& name) {
+    return zeromesh::testing::ShBatch({{name, "echo " + name}});
 }
 
 } // namespace
@@ -339,40 +334,31 @@ TEST(PlacerRoutesAroundASqueezedDonor) {
     busy.service->SetComfortLevelProvider([] { return 4; });
     calm.service->SetComfortLevelProvider([] { return 0; });
 
-    auto factory = [&a](const zeromesh::net::Peer& p) {
-        return std::make_shared<zeromesh::node::NodeClient>(p.ip_address + ":" + std::to_string(p.node_port), a.id,
-                                                            a.pins, p.id);
-    };
-    auto placer = std::make_shared<zeromesh::sched::Placer>(a.executor, a.peers, factory, a.cas, a.merkle, a.node_id,
-                                                            [&a] { return a.telemetry; });
-    zeromesh::node::JobManager jm(a.cas, a.merkle, std::make_shared<zeromesh::node::ActionCache>(a.cas), placer);
-    v1::JobSpec job;
-    job.set_name("six");
-    for (int i = 0; i < 6; ++i) *job.add_tasks() = EchoSpec("c" + std::to_string(i));
-    const std::string id = jm.Submit(job);
-    const auto deadline = std::chrono::steady_clock::now() + 60s;
-    while (!jm.Get(id)->done() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(20ms);
-    auto st = jm.Get(id);
-    ASSERT_TRUE(st->done());
-    for (const auto& [name, r] : st->results()) {
-        ASSERT_EQ(r.executed_by(), std::string("node-calm"));
-    }
+    zeromesh::testing::PlacerRequester req(a);
+    for (int i = 0; i < 6; ++i) req.Execute(EchoSpec("c" + std::to_string(i)));
+    req.WaitAll();
+    for (const auto& l : req.logs) ASSERT_EQ(l->result.node, std::string("node-calm"));
 }
 
-TEST(SandboxRunnerReportsTaskCgroupsToObserver) {
-    auto probe = zeromesh::exec::ProbeSandboxResourceEnforcement();
-    if (!probe.cgroup_cpu && !probe.cgroup_memory) return; // no delegated cgroup on this host
+TEST(BatchRunnerReportsBatchCgroupsToObserver) {
+    // A batch gets a cgroup whenever delegation exists, even when no limit can be applied there.
+    if (!zeromesh::exec::cgroup::DelegatedParent()) return; // no delegated cgroup on this host
     TempDir tmp;
     auto cas = std::make_shared<zeromesh::store::CasStore>(tmp / "cas");
     auto merkle = std::make_shared<zeromesh::store::MerkleBuilder>(cas);
-    zeromesh::exec::SandboxRunner runner(cas, merkle, tmp / "scratch");
+    zeromesh::exec::BatchRunner runner(cas, merkle, tmp / "scratch");
+    if (!runner.unavailable().empty()) return; // sandbox unavailable here
     std::vector<std::pair<std::filesystem::path, bool>> events;
     runner.SetCgroupObserver([&](const std::filesystem::path& dir, bool added) { events.emplace_back(dir, added); });
-    zeromesh::exec::RunSpec spec;
-    spec.argv = {"true"};
+    zeromesh::exec::BatchRunSpec spec;
+    spec.sandbox_env = *zeromesh::envhost::Make()->Prepare({}).value;
     spec.cores = 1;
-    auto res = runner.Run(spec, nullptr, {});
-    if (!res.error.empty()) return; // sandbox unavailable here
+    zeromesh::exec::ItemSpec it;
+    it.id = "t";
+    it.argv = {"true"};
+    spec.items.push_back(it);
+    auto res = runner.Run(spec, {}, {});
+    ASSERT_EQ(res.error, std::string());
     ASSERT_EQ(events.size(), static_cast<size_t>(2));
     ASSERT_TRUE(events[0].second);
     ASSERT_TRUE(!events[1].second);
@@ -381,7 +367,7 @@ TEST(SandboxRunnerReportsTaskCgroupsToObserver) {
 
 TEST(GovernorFreezesARealCgroupAndThawsIt) {
     // Needs a delegated cgroup v2 subtree with the cpu controller (a systemd user session has one).
-    auto self = zeromesh::exec::DelegatedCgroupParent();
+    auto self = zeromesh::exec::cgroup::DelegatedParent();
     if (!self) return;
     const auto dir = *self / ("zm-comfort-test-" + std::to_string(::getpid()));
     std::error_code ec;

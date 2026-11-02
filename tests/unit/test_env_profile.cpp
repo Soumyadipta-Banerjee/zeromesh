@@ -1,12 +1,12 @@
 #include "tests/unit/test_framework.hpp"
 #include "tests/unit/test_util.hpp"
 
-#include "plugins/env-mirror/chunk_source.hpp"
-#include "plugins/env-mirror/env_profile.hpp"
-#include "plugins/env-mirror/mirror_cache.hpp"
-#include "plugins/env-mirror/mirror_fuse.hpp"
-#include "plugins/env-mirror/mirror_prefetch.hpp"
-#include "plugins/env-mirror/mirror_reader.hpp"
+#include "plugins/env-tree/chunk_source.hpp"
+#include "plugins/env-tree/env_profile.hpp"
+#include "plugins/env-tree/mirror_cache.hpp"
+#include "plugins/env-tree/mirror_fuse.hpp"
+#include "plugins/env-tree/mirror_prefetch.hpp"
+#include "plugins/env-tree/mirror_reader.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
@@ -25,7 +25,7 @@
 #include <vector>
 
 using namespace zeromesh;
-using namespace zeromesh::mirror;
+using namespace zeromesh::tree;
 using testing::ReadFile;
 using testing::TempDir;
 using testing::WriteFile;

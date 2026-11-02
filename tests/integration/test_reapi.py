@@ -217,13 +217,13 @@ class ReapiMeshTest(unittest.TestCase):
         linked_run = subprocess.run([linked_exe], capture_output=True, text=True, timeout=10)
         self.assertEqual(linked_run.returncode, 0, f"recc-linked binary failed:\n{linked_run.stderr}")
         self.assertIn("SUCCESS", linked_run.stdout)
-
-        # Verify task placement in A's log:
+        # Verify placement in A's log:
         # At least one compile action must have executed_by=B
         log_a = self.a.log()
         self.assertIn(f"executed_by={self.id_b}", log_a,
                       f"Expected at least one compile action on donor {self.id_b}:\n{log_a}")
-        self.assertRegex(log_a, rf"task /usr/bin/c\+\+ critical=1 executed_by={self.id_a} ",
+        # The link is critical-path: it stays on the requester. recc sends argv[0] as "c++".
+        self.assertRegex(log_a, rf"action (\S*/)?c\+\+ critical=1 executed_by={self.id_a} ",
                          f"Expected REAPI link action on requester {self.id_a}:\n{log_a}")
 
 

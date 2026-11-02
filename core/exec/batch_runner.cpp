@@ -375,7 +375,6 @@ BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& 
         result.memory_enforced = group_cg->memory;
         result.cpu_enforced = group_cg->cpu;
     }
-    if (spec.mem_bytes > 0 && !result.memory_enforced) result.memory_enforced = true; // RLIMIT_DATA below
 
     std::vector<Group> groups;
     if (!spec.combine_argv.empty()) {
@@ -398,8 +397,7 @@ BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& 
             break;
         }
         groups[i].dir = scratch / ("g" + std::to_string(i));
-        RunGroup(spec, groups[i], lease->path(), group_cg ? group_cg->dir : fs::path(), group_cg && group_cg->memory,
-                 cb, stop, cancelled);
+        RunGroup(spec, groups[i], lease->path(), group_cg ? group_cg->dir : fs::path(), cb, stop, cancelled);
         ForceRemove(groups[i].dir);
     }
     result.cancelled = cancelled;
@@ -417,7 +415,7 @@ BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& 
 }
 
 void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& lower, const fs::path& cg,
-                           bool cg_memory, const BatchCallbacks& cb, std::stop_token stop, bool& cancelled) {
+                           const BatchCallbacks& cb, std::stop_token stop, bool& cancelled) {
     const ItemSpec& first = *g.items.front();
     const std::string cwd = JoinRel(first.cwd.empty() ? "." : first.cwd, ".");
     const fs::path upper = g.dir / "upper";
@@ -542,7 +540,6 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     std::vector<char*> cargv;
     for (auto& a : args) cargv.push_back(a.data());
     cargv.push_back(nullptr);
-    const bool rlimit_mem = spec.mem_bytes > 0 && !cg_memory; // the cgroup does not cap memory: cap the heap
     const uint64_t oom_before = cg.empty() ? 0 : cgroup::OomKills(cg);
     const auto start = Clock::now();
     pid_t pid = fork();
@@ -553,11 +550,6 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     }
     if (pid == 0) {
         if (!cg.empty()) cgroup::Join(cg);
-        if (rlimit_mem) {
-            rlimit rl{};
-            rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(spec.mem_bytes);
-            setrlimit(RLIMIT_DATA, &rl);
-        }
         rlimit core{};
         setrlimit(RLIMIT_CORE, &core);
         setpgid(0, 0);

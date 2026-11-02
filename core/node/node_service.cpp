@@ -4,8 +4,6 @@
 #include "net/tls.hpp"
 #include "node/blob_transfer.hpp"
 #include "node/convert.hpp"
-#include "node/mirror_manifest.hpp"
-#include "node/task_key.hpp"
 #include "store/merkle.hpp"
 
 #include <algorithm>
@@ -31,44 +29,36 @@ grpc::Status Invalid(std::string why) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::move(why));
 }
 
-constexpr size_t kMaxTaskIdBytes = 256;
-// A RunTask stream buffers at most this much log output before the task's log
-// producer waits for the network, so a chatty task cannot bloat the daemon.
+constexpr size_t kMaxBatchIdBytes = 256;
+constexpr int kMaxItemsPerBatch = 10000;
+// A RunBatch stream buffers at most this much log output before the batch's log
+// producer waits for the network, so a chatty item cannot bloat the daemon.
 constexpr size_t kMaxQueuedLogBytes = 4 * 1024 * 1024;
 
-// The terminal state for a result, as JobManager judges it.
-std::pair<v1::TaskState, std::string> FinalState(const v1::TaskResult& r) {
-    if (r.cancelled()) return {v1::CANCELLED, "cancelled"};
-    if (!r.error().empty()) return {v1::FAILED, r.error()};
-    if (r.timed_out()) return {v1::FAILED, "timed out"};
-    if (r.exit_code() != 0) return {v1::FAILED, "exit code " + std::to_string(r.exit_code())};
-    return {v1::SUCCEEDED, ""};
-}
 
-// Events of one RunTask call, from the executor's threads to the RPC thread.
+// Events of one RunBatch call, from the executor's threads to the RPC thread.
 struct RunStream {
     std::mutex mu;
     std::condition_variable cv;
-    std::deque<v1::JobEvent> events;
+    std::deque<v1::BatchEvent> events;
     size_t queued_log_bytes{0};
     bool done{false};   // the final event is queued
     bool closed{false}; // the caller is gone: drop logs, never wait
 
-    void Push(v1::JobEvent ev, bool final_event) {
+    void Push(v1::BatchEvent ev, bool final_event) {
         std::lock_guard lock(mu);
         events.push_back(std::move(ev));
         if (final_event) done = true;
         cv.notify_all();
     }
 
-    void PushLog(int fd, std::string_view chunk) {
+    void PushLog(const v1::ItemLog& log) {
         std::unique_lock lock(mu);
         cv.wait(lock, [&] { return closed || queued_log_bytes < kMaxQueuedLogBytes; });
         if (closed) return;
-        v1::JobEvent ev;
-        ev.set_log_fd(fd);
-        ev.set_log_chunk(std::string(chunk));
-        queued_log_bytes += chunk.size();
+        v1::BatchEvent ev;
+        *ev.mutable_log() = log;
+        queued_log_bytes += log.chunk().size();
         events.push_back(std::move(ev));
         cv.notify_all();
     }
@@ -121,17 +111,34 @@ void NodeService::PurgeExpiredLocked() {
 }
 
 int NodeService::CoresInUseLocked() const {
+    // Running batches hold their cores in the executor; local runs of this node's own requests do too.
     int n = 0;
     for (const auto& [key, r] : reserved_) n += std::max(r.spec.resources().cores(), 1);
-    for (const auto& [key, r] : running_) n += r.cores;
     if (executor_) n += executor_->CoresInUse();
+    return n;
+}
+
+int NodeService::CoresOfLocked(const std::string& requester) const {
+    int n = 0;
+    for (const auto& [key, r] : reserved_) {
+        if (key.first == requester) n += std::max(r.spec.resources().cores(), 1);
+    }
+    for (const auto& [key, r] : running_) {
+        if (key.first == requester) n += std::max(r.spec.resources().cores(), 1);
+    }
+    return n;
+}
+
+int NodeService::GpusInUseLocked() const {
+    int n = 0;
+    for (const auto& [key, r] : reserved_) n += std::max(r.spec.resources().gpus(), 0);
+    for (const auto& [key, r] : running_) n += std::max(r.spec.resources().gpus(), 0);
     return n;
 }
 
 int64_t NodeService::MemPromisedLocked() const {
     int64_t n = 0;
     for (const auto& [key, r] : reserved_) n += std::max<int64_t>(r.spec.resources().mem_bytes(), 0);
-    for (const auto& [key, r] : running_) n += std::max<int64_t>(r.spec.resources().mem_bytes(), 0);
     if (executor_) n += executor_->MemInUse();
     return n;
 }
@@ -141,17 +148,14 @@ std::unordered_set<std::string> NodeService::ProtectedBlobHashes() const {
     struct Snap {
         std::vector<store::Digest> needed;
         std::vector<std::string> input_roots;
-        std::vector<std::string> mirror_roots;
     } snap;
     {
         std::lock_guard lock(mu_);
-        auto collect = [&](const v1::TaskSpec& spec, const std::vector<store::Digest>& needed) {
+        auto collect = [&](const v1::BatchSpec& spec, const std::vector<store::Digest>& needed) {
             for (const auto& d : needed) snap.needed.push_back(d);
             if (!spec.input_root().hash().empty()) snap.input_roots.push_back(spec.input_root().hash());
-            const auto& params = spec.env_spec().params();
-            auto it = params.find(kMirrorRootDigestParam);
-            if (it != params.end() && store::CasStore::IsValidHash(it->second)) {
-                snap.mirror_roots.push_back(it->second);
+            for (const auto& it : spec.items()) {
+                if (!it.checkpoint().hash().empty()) snap.input_roots.push_back(it.checkpoint().hash());
             }
         };
         for (const auto& [_, r] : reserved_) collect(r.spec, r.needed);
@@ -162,7 +166,6 @@ std::unordered_set<std::string> NodeService::ProtectedBlobHashes() const {
     store::MerkleBuilder merkle(cas_);
     for (const auto& d : snap.needed) out.insert(d.hash);
     for (const auto& h : snap.input_roots) ProtectTreeHashes(out, merkle, store::Digest{h, 0});
-    for (const auto& h : snap.mirror_roots) ProtectTreeHashes(out, merkle, store::Digest{h, 0});
     return out;
 }
 
@@ -241,7 +244,11 @@ NodeService::DepartureReport NodeService::BeginDeparture(v1::DepartureReason rea
             t.elapsed_ms = std::max<int64_t>(
                 0, std::chrono::duration_cast<std::chrono::milliseconds>(now - r.started).count());
             t.preemptible = r.preemptible;
-            if (history) t.expected_ms = history->Expected(r.spec);
+            if (history) {
+                if (auto per_item = history->Expected(r.spec.kind())) {
+                    t.expected_ms = *per_item * std::max(r.spec.items_size(), 1);
+                }
+            }
             tasks.push_back(std::move(t));
         }
     }
@@ -401,15 +408,28 @@ void NodeService::SetHazardProvider(std::function<double()> provider) {
     hazard_per_hour_ = std::move(provider);
 }
 
-grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* req, v1::OfferReply* resp) {
+void NodeService::SetItemCache(std::shared_ptr<run::ItemCache> cache) {
+    std::lock_guard lock(mu_);
+    item_cache_ = std::move(cache);
+}
+
+void NodeService::SetVersionProbe(VersionProbe probe) {
+    std::lock_guard lock(mu_);
+    version_probe_ = std::move(probe);
+}
+
+grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* req, v1::OfferReply* resp) {
     std::string peer;
     if (auto st = RequirePinned(*ctx, &peer); !st.ok()) return st;
-    if (!RemoteExecConfigured()) return NotConfigured("remote tasks");
-    if (req->task_id().empty() || req->task_id().size() > kMaxTaskIdBytes) return Invalid("invalid task id");
+    if (!RemoteExecConfigured()) return NotConfigured("remote batches");
+    if (req->batch_id().empty() || req->batch_id().size() > kMaxBatchIdBytes) return Invalid("invalid batch id");
 
-    v1::TaskSpec spec = req->spec();
-    Normalize(spec);
-    if (spec.argv().empty()) return Invalid("empty argv");
+    const v1::BatchSpec& spec = req->spec();
+    if (spec.items().empty()) return Invalid("empty batch");
+    if (spec.items_size() > kMaxItemsPerBatch) return Invalid("too many items in one batch");
+    for (const auto& it : spec.items()) {
+        if (it.argv().empty() && spec.combine().argv().empty()) return Invalid("item '" + it.id() + "' has no command");
+    }
     const v1::Digest& root = spec.input_root();
     if (!root.hash().empty() && !store::CasStore::IsValidHash(root.hash())) return Invalid("invalid input_root digest");
 
@@ -435,7 +455,7 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
     resp->set_comfort_level(static_cast<uint32_t>(comfort));
     if (std::isfinite(hazard) && hazard >= 0.0) resp->set_hazard_per_hour(hazard);
 
-    auto reject = [&](std::string reason, v1::RejectKind kind = v1::REJECT_UNSUPPORTED, int retry_after_ms = 0) {
+    auto reject = [&](std::string reason, v1::RejectKind kind, int retry_after_ms = 0) {
         resp->set_accepted(false);
         resp->set_reason(std::move(reason));
         resp->set_reject_kind(kind);
@@ -443,26 +463,25 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
         return grpc::Status::OK;
     };
 
-    const std::string& env_name = spec.env_spec().name();
-    plugin::IEnvProvider* env = registry_->Env(env_name);
-    if (env == nullptr) return reject("no env provider '" + env_name + "' on this node");
-    plugin::EnvParams params;
-    params.params.insert(spec.env_spec().params().begin(), spec.env_spec().params().end());
-    params.argv.assign(spec.argv().begin(), spec.argv().end());
-    try {
-        plugin::Availability avail = env->Check(params);
-        if (!avail.ok) {
-            return reject(avail.reason.empty() ? "env provider '" + env_name + "' cannot run this task" : avail.reason);
+    // The environment: provider first, then what the batch asks of it.
+    const bool tree = spec.env().has_tree();
+    plugin::IEnvProvider* env = registry_->Env(tree ? "tree" : "host");
+    if (env == nullptr) return reject(std::string("no ") + (tree ? "tree" : "host") + " environments on this node", v1::REJECT_ENV);
+    if (tree) {
+        plugin::EnvParams params;
+        params.params[plugin::kTreeParam] = spec.env().tree().hash();
+        try {
+            if (auto avail = env->Check(params); !avail.ok) return reject(avail.reason, v1::REJECT_ENV);
+        } catch (const std::exception& e) {
+            return reject(std::string("tree environment: ") + e.what(), v1::REJECT_ENV);
         }
-    } catch (const std::exception& e) {
-        return reject("env provider '" + env_name + "': " + e.what());
     }
-
-    // A cached result is only valid for the toolchain that produced it: refuse tasks whose
-    // requester ran against a different compiler or library set than this node has.
-    if (!spec.toolchain_digest().empty() && LocalToolchainDigest(spec) != spec.toolchain_digest()) {
-        return reject("toolchain for '" + spec.argv(0) + "' differs from the requester's");
+    VersionProbe probe;
+    {
+        std::lock_guard lock(mu_);
+        probe = version_probe_;
     }
+    if (auto refusal = CheckEnv(spec.env(), probe)) return reject(refusal->reason, refusal->kind);
 
     const net::Telemetry telemetry = telemetry_();
     resp->set_core_limit(static_cast<uint32_t>(policy_.CoreLimit(telemetry.cores_total)));
@@ -473,28 +492,52 @@ grpc::Status NodeService::OfferTask(grpc::ServerContext* ctx, const v1::Offer* r
 
     std::lock_guard lock(mu_);
     PurgeExpiredLocked();
+    const auto now = std::chrono::steady_clock::now();
+    std::erase_if(waiting_, [&](const auto& kv) { return now - kv.second > kWaitingWindow; });
     if (draining_) {
         return reject(drain_reason_.empty() ? "node is draining" : "node is draining: " + drain_reason_,
                       v1::REJECT_DRAINING, kRetryDrainingMs);
     }
     if (comfort >= kSqueezedLevel) {
-        return reject("owner busy: donated work is held at comfort level " + std::to_string(comfort),
-                      v1::REJECT_BUSY, kRetryOwnerBusyMs);
+        return reject("owner busy: donated work is held at comfort level " + std::to_string(comfort), v1::REJECT_BUSY,
+                      kRetryOwnerBusyMs);
     }
-    const TaskKey key{peer, req->task_id()};
+    const BatchKey key{peer, req->batch_id()};
     if (running_.contains(key)) {
-        return reject("task " + req->task_id() + " is already running here", v1::REJECT_BUSY, kRetryDuplicateMs);
+        return reject("batch " + req->batch_id() + " is already running here", v1::REJECT_BUSY, kRetryDuplicateMs);
     }
     reserved_.erase(key); // a repeated offer replaces the old reservation
-    if (auto why = policy_.Evaluate(telemetry, spec, CoresInUseLocked(), MemPromisedLocked())) {
-        return reject(std::move(why->reason),
-                      why->kind == RefusalKind::Busy ? v1::REJECT_BUSY : v1::REJECT_UNSUPPORTED, why->retry_after_ms);
+
+    Demand demand;
+    demand.cores = std::max(spec.resources().cores(), 1);
+    demand.mem_bytes = spec.resources().mem_bytes();
+    demand.gpus = spec.resources().gpus();
+    demand.network = spec.network();
+    demand.arch = spec.resources().arch();
+    if (auto why = policy_.Evaluate(telemetry, demand, CoresInUseLocked(), MemPromisedLocked(), GpusInUseLocked())) {
+        if (why->kind == RefusalKind::Busy) waiting_[peer] = now;
+        return reject(std::move(why->reason), why->kind == RefusalKind::Busy ? v1::REJECT_BUSY : v1::REJECT_UNSUPPORTED,
+                      why->retry_after_ms);
+    }
+    // Fair share: while another requester waits for room here, no requester holds more than its
+    // share of the donated cores.
+    std::set<std::string> requesters{peer};
+    for (const auto& [k, r] : reserved_) requesters.insert(k.first);
+    for (const auto& [k, r] : running_) requesters.insert(k.first);
+    for (const auto& [id, t] : waiting_) requesters.insert(id);
+    const bool others_waiting = std::any_of(waiting_.begin(), waiting_.end(), [&](const auto& kv) { return kv.first != peer; });
+    if (others_waiting && requesters.size() > 1) {
+        const int limit = policy_.CoreLimit(telemetry.cores_total);
+        const int share = std::max(1, (limit + static_cast<int>(requesters.size()) - 1) / static_cast<int>(requesters.size()));
+        if (CoresOfLocked(peer) + demand.cores > share) {
+            return reject("fair share: " + std::to_string(requesters.size()) + " requesters share this node",
+                          v1::REJECT_BUSY, kRetryFairShareMs);
+        }
     }
 
     resp->set_accepted(true);
     for (auto& d : missing) *resp->add_missing() = std::move(d);
-    reserved_[key] =
-        Reservation{std::move(spec), std::move(needed), std::chrono::steady_clock::now() + kOfferReservation};
+    reserved_[key] = Reservation{spec, std::move(needed), now + kOfferReservation};
     return grpc::Status::OK;
 }
 
@@ -569,14 +612,14 @@ grpc::Status NodeService::PullBlobs(grpc::ServerContext* ctx, const v1::Digests*
     return grpc::Status::OK;
 }
 
-grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest* req,
-                                  grpc::ServerWriter<v1::JobEvent>* writer) {
+grpc::Status NodeService::RunBatch(grpc::ServerContext* ctx, const v1::RunRequest* req,
+                                   grpc::ServerWriter<v1::BatchEvent>* writer) {
     std::string peer;
     if (auto st = RequirePinned(*ctx, &peer); !st.ok()) return st;
-    if (!RemoteExecConfigured()) return NotConfigured("remote tasks");
-    const TaskKey key{peer, req->task_id()};
+    if (!RemoteExecConfigured()) return NotConfigured("remote batches");
+    const BatchKey key{peer, req->batch_id()};
     auto no_reservation = [&] {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "no reservation for task " + req->task_id() +
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "no reservation for batch " + req->batch_id() +
                                                                        " (offer it first; offers expire after 30 s)");
     };
 
@@ -600,9 +643,9 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
                             std::to_string(absent) + " input blobs were not pushed (first: " + first_absent + ")");
     }
 
-    v1::TaskSpec spec;
+    v1::BatchSpec spec;
     std::shared_ptr<RuntimeHistory> history;
-    const std::string exec_id = peer + "/" + req->task_id();
+    const std::string exec_id = peer + "/" + req->batch_id();
     {
         std::lock_guard lock(mu_);
         PurgeExpiredLocked();
@@ -610,57 +653,57 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
         if (it == reserved_.end()) return no_reservation();
         spec = std::move(it->second.spec);
         reserved_.erase(it);
-        if (!req->profile_id().empty()) {
-            (*spec.mutable_env_spec()->mutable_params())["profile_id"] = req->profile_id();
-        }
-        const bool preemptible = !spec.policy().has_preemptible() || spec.policy().preemptible();
-        running_[key] = Running{exec_id, std::max(spec.resources().cores(), 1), preemptible, spec, std::move(needed)};
-        running_[key].started = std::chrono::steady_clock::now();
+        spec.set_requester(peer); // whatever the offer said: the caller is the requester
+        Running r;
+        r.exec_id = exec_id;
+        r.preemptible = spec.preemptible();
+        r.spec = spec;
+        r.needed = std::move(needed);
+        r.started = std::chrono::steady_clock::now();
+        running_[key] = std::move(r);
         history = history_;
     }
 
     auto stream = std::make_shared<RunStream>();
-    const std::string task_name = spec.name();
-    TaskCallbacks cb;
-    cb.on_state = [stream, task_name](v1::TaskState s, std::string detail) {
-        v1::JobEvent ev;
-        ev.set_task_name(task_name);
-        ev.set_state(s);
-        ev.set_detail(std::move(detail));
+    const std::string kind = spec.kind();
+    BatchCallbacks cb;
+    cb.on_started = [stream](const std::string& item) {
+        v1::BatchEvent ev;
+        ev.set_started(item);
         stream->Push(std::move(ev), false);
     };
-    cb.on_log = [stream](int fd, std::string_view chunk) { stream->PushLog(fd, chunk); };
-    cb.on_unit = [stream, task_name](const std::string& unit_id, const v1::Digest& digest) {
-        v1::JobEvent ev;
-        ev.set_task_name(task_name);
-        ev.set_state(v1::RUNNING);
-        auto* unit = ev.mutable_unit_committed();
-        unit->set_unit_id(unit_id);
-        *unit->mutable_digest() = digest;
-        stream->Push(std::move(ev), false);
-    };
-    cb.on_done = [stream, task_name, history, spec](v1::TaskResult result) {
-        // Remember how long this command took, for deciding what fits a departure's grace window.
-        if (history && result.exit_code() == 0 && result.error().empty() && !result.cancelled() &&
-            !result.timed_out()) {
-            history->Record(spec, result.duration_ms());
+    cb.on_log = [stream](const v1::ItemLog& log) { stream->PushLog(log); };
+    cb.on_item = [this, stream, history, kind, key](const v1::ItemOutcome& o, const std::string&) {
+        if (history && o.failure() == v1::FAILURE_NONE) history->Record(kind, o.wall_ms());
+        {
+            std::lock_guard lock(mu_);
+            if (auto it = running_.find(key); it != running_.end()) ++it->second.done;
         }
-        v1::JobEvent ev;
-        ev.set_task_name(task_name);
-        auto [state, detail] = FinalState(result);
-        ev.set_state(state);
-        ev.set_detail(std::move(detail));
-        *ev.mutable_result() = std::move(result);
+        v1::BatchEvent ev;
+        *ev.mutable_done() = o;
+        stream->Push(std::move(ev), false);
+    };
+    cb.on_checkpoint = [stream](const std::string& item, const v1::Digest& tree) {
+        v1::BatchEvent ev;
+        ev.mutable_checkpoint()->set_item(item);
+        *ev.mutable_checkpoint()->mutable_tree() = tree;
+        stream->Push(std::move(ev), false);
+    };
+    cb.on_done = [stream](BatchDone done) {
+        v1::BatchEvent ev;
+        auto* f = ev.mutable_finished();
+        f->set_cancelled(done.cancelled);
+        if (done.failure != v1::FAILURE_NONE && !done.cancelled) f->set_error(done.message);
         stream->Push(std::move(ev), true);
     };
-    executor_->Execute(exec_id, spec, std::move(cb));
+    executor_->Execute(exec_id, spec, {}, std::move(cb));
 
-    // Forward events until the final one; on a vanished caller, cancel the task and
-    // still wait for its single on_done so nothing outlives this call.
+    // Forward events until the final one; on a vanished caller, cancel the batch and still wait
+    // for its single on_done so nothing outlives this call.
     bool cancel_sent = false;
     bool caller_gone = false;
     for (bool finished = false; !finished;) {
-        std::deque<v1::JobEvent> batch;
+        std::deque<v1::BatchEvent> batch;
         {
             std::unique_lock lock(stream->mu);
             stream->cv.wait_for(lock, std::chrono::milliseconds(200), [&] { return !stream->events.empty(); });
@@ -688,12 +731,12 @@ grpc::Status NodeService::RunTask(grpc::ServerContext* ctx, const v1::RunRequest
     return grpc::Status::OK;
 }
 
-grpc::Status NodeService::CancelTask(grpc::ServerContext* ctx, const v1::TaskRef* req, v1::Empty* /*resp*/) {
+grpc::Status NodeService::CancelBatch(grpc::ServerContext* ctx, const v1::BatchRef* req, v1::Empty* /*resp*/) {
     std::string peer;
     if (auto st = RequirePinned(*ctx, &peer); !st.ok()) return st;
-    if (!RemoteExecConfigured()) return NotConfigured("remote tasks");
-    // Only the node that offered a task can cancel it: the key includes the caller's id.
-    const TaskKey key{peer, req->task_id()};
+    if (!RemoteExecConfigured()) return NotConfigured("remote batches");
+    // Only the node that offered a batch can cancel it: the key includes the caller's id.
+    const BatchKey key{peer, req->batch_id()};
     std::string exec_id;
     {
         std::lock_guard lock(mu_);
@@ -702,6 +745,38 @@ grpc::Status NodeService::CancelTask(grpc::ServerContext* ctx, const v1::TaskRef
         if (it != running_.end()) exec_id = it->second.exec_id;
     }
     if (!exec_id.empty()) executor_->Cancel(exec_id);
+    return grpc::Status::OK;
+}
+
+grpc::Status NodeService::LookupCache(grpc::ServerContext* ctx, const v1::CacheLookup* req,
+                                      v1::CacheLookupReply* resp) {
+    if (auto st = RequirePinned(*ctx); !st.ok()) return st;
+    std::shared_ptr<run::ItemCache> cache;
+    {
+        std::lock_guard lock(mu_);
+        cache = item_cache_;
+    }
+    if (!cache) return NotConfigured("the item cache");
+    if (req->keys_size() + req->weaks_size() > 100000) return Invalid("too many keys");
+    *resp = cache->Lookup(*req);
+    return grpc::Status::OK;
+}
+
+grpc::Status NodeService::ForgetCache(grpc::ServerContext* ctx, const v1::CacheForget* req, v1::Empty* /*resp*/) {
+    if (auto st = RequirePinned(*ctx); !st.ok()) return st;
+    std::shared_ptr<run::ItemCache> cache;
+    {
+        std::lock_guard lock(mu_);
+        cache = item_cache_;
+    }
+    if (!cache) return NotConfigured("the item cache");
+    if (req->all()) {
+        cache->ForgetAll();
+    } else {
+        for (const auto& k : req->keys()) {
+            if (store::CasStore::IsValidHash(k)) cache->Forget(k);
+        }
+    }
     return grpc::Status::OK;
 }
 

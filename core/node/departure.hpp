@@ -44,22 +44,21 @@ struct ParsedDeparture {
 // nullopt unless `reason` carries the freeze-first marker with a non-zero ttl.
 [[nodiscard]] std::optional<ParsedDeparture> ParseDepartureReason(std::string_view reason);
 
-// ---- how long a task usually runs -----------------------------------------------------------
+// ---- how long an item usually runs -----------------------------------------------------------
 
-// Remembers, per command shape (argv, env, environment provider), a smoothed duration of
-// past successful runs, so a departing donor can tell which running tasks are about to
-// finish. With a file, every Record is appended there and the file is replayed on
-// construction, so the history survives a restart.
+// Remembers, per item kind, a smoothed duration of past successful items, so a departing donor
+// can tell which running batches are about to finish. With a file, every Record is appended there
+// and the file is replayed on construction, so the history survives a restart.
 class RuntimeHistory {
 public:
     explicit RuntimeHistory(std::filesystem::path file = {});
 
-    void Record(const v1::TaskSpec& spec, int64_t duration_ms);
-    // nullopt for a command shape never seen.
-    [[nodiscard]] std::optional<int64_t> Expected(const v1::TaskSpec& spec) const;
+    void Record(const std::string& kind, int64_t item_ms);
+    // Milliseconds one item of `kind` takes; nullopt for a kind never seen.
+    [[nodiscard]] std::optional<int64_t> Expected(const std::string& kind) const;
 
 private:
-    static std::string Key(const v1::TaskSpec& spec);
+    static std::string Key(const std::string& kind);
     void RecordLocked(const std::string& key, int64_t duration_ms);
 
     std::filesystem::path file_;

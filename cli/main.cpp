@@ -2,12 +2,16 @@
 
 #include "cli/client.hpp"
 #include "cli/run_cmd.hpp"
+#include "cli/runs_cmd.hpp"
 #include "cli/status_cmd.hpp"
 #include "cli/team_cmd.hpp"
+
+#include <unistd.h>
 
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -20,11 +24,13 @@ void PrintUsage(std::ostream& os) {
        << "Usage: zm [--socket PATH] <command> [args]\n\n"
        << "Commands:\n"
        << "  run [opts] -- CMD...  Run CMD on the mesh with the current directory as input\n"
-       << "  status                Show this node and its peers\n"
-       << "  monitor               Peers + tasks (WORKING/DONE; q / Ctrl-C)\n"
+       << cli::kRunsUsage
+       << "  status                Show this node, its peers and runs\n"
+       << "  monitor               Peers, runs and work done here (q / Ctrl-C)\n"
        << "  team create|join|leave|info\n"
        << "                        Create or join a team (quote the join phrase)\n"
-       << "  version               Show the version\n\n"
+       << "  version               Show the version\n"
+       << "  NAME [args]           Run the adapter zm-NAME (zm apps lists them)\n\n"
        << "Global options:\n"
        << "  --socket PATH         zmd socket (default: $XDG_RUNTIME_DIR/zeromesh/zmd.sock)\n\n"
        << cli::kRunUsage;
@@ -71,11 +77,29 @@ int main(int argc, char** argv) {
         PrintUsage(std::cout);
         return 0;
     }
-    if (cmd != "run" && cmd != "status" && cmd != "monitor" && cmd != "team") {
-        std::cerr << "zm: unknown command '" << cmd << "'\n\n";
+    if (cmd == "apps") return cli::AppsCommand();
+    static const std::set<std::string> kBuiltins = {"run",    "status", "monitor", "team",  "runs",  "attach", "cancel",
+                                                    "report", "resume", "cache",   "doctor", "env"};
+    if (!kBuiltins.contains(cmd)) {
+        // An adapter: zm render ... runs zm-render ...
+        const std::string exe = "zm-" + cmd;
+        std::vector<char*> argv_exec;
+        std::vector<std::string> copy = {exe};
+        copy.insert(copy.end(), rest.begin(), rest.end());
+        for (auto& a : copy) argv_exec.push_back(a.data());
+        argv_exec.push_back(nullptr);
+        if (!socket.empty()) setenv("ZM_SOCKET", socket.c_str(), 1);
+        execvp(exe.c_str(), argv_exec.data());
+        std::cerr << "zm: unknown command '" << cmd << "' (no " << exe << " on PATH)\n\n";
         PrintUsage(std::cerr);
         return 1;
     }
+    auto need_arg = [&](const char* what) {
+        if (!rest.empty()) return true;
+        std::cerr << "zm " << cmd << ": which " << what << "? (zm runs lists them)\n";
+        return false;
+    };
+    if ((cmd == "attach" || cmd == "cancel" || cmd == "resume") && !need_arg("run")) return 1;
 
     // Parse before connecting, so usage errors don't depend on the daemon.
     std::optional<cli::RunOptions> run_opts;
@@ -86,8 +110,9 @@ int main(int argc, char** argv) {
             std::cerr << "zm run: " << error << "\n\n" << cli::kRunUsage;
             return 1;
         }
-    } else if (cmd == "team") {
-        // Subcommands parse their own args inside TeamCommand.
+    } else if (cmd == "team" || cmd == "report" || cmd == "cache" || cmd == "env" || cmd == "attach" ||
+               cmd == "cancel" || cmd == "resume") {
+        // These parse their own arguments.
     } else if (!rest.empty()) {
         std::cerr << "zm " << cmd << ": unexpected argument '" << rest.front() << "'\n";
         return 1;
@@ -103,5 +128,13 @@ int main(int argc, char** argv) {
     if (cmd == "run") return cli::RunCommand(*client, *run_opts);
     if (cmd == "status") return cli::StatusCommand(*client);
     if (cmd == "team") return cli::TeamCommand(*client, rest);
+    if (cmd == "runs") return cli::RunsCommand(*client);
+    if (cmd == "attach") return cli::AttachCommand(*client, rest.front());
+    if (cmd == "cancel") return cli::CancelCommand(*client, rest.front());
+    if (cmd == "resume") return cli::ResumeCommand(*client, rest.front());
+    if (cmd == "report") return cli::ReportCommand(*client, rest);
+    if (cmd == "cache") return cli::CacheCommand(*client, rest);
+    if (cmd == "doctor") return cli::DoctorCommand(*client);
+    if (cmd == "env") return cli::EnvCommand(*client, rest);
     return cli::MonitorCommand(*client);
 }

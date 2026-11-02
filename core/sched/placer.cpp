@@ -1,6 +1,5 @@
 #include "sched/placer.hpp"
 
-#include "exec/units.hpp"
 #include "node/convert.hpp"
 #include "node/departure.hpp"
 #include "sched/rank.hpp"
@@ -22,122 +21,93 @@ namespace zeromesh::sched {
 
 namespace {
 
-v1::TaskResult Failed(const std::string& node_id, std::string error) {
-    v1::TaskResult r;
-    r.set_exit_code(-1);
-    r.set_executed_by(node_id);
-    r.set_error(std::move(error));
-    return r;
-}
-
-v1::TaskResult Cancelled(const std::string& node_id) {
-    v1::TaskResult r = Failed(node_id, "cancelled");
-    r.set_cancelled(true);
-    return r;
-}
-
-int MaxRetries(const v1::TaskSpec& spec) {
-    if (!spec.policy().has_max_retries()) return 3;
-    return std::max(0, spec.policy().max_retries());
-}
-
-// Only donor-drain preemption is retryable on a finished TaskResult. Run timeouts,
-// non-zero exits, and donor env/policy errors are final (peer loss / push / pull are
-// retried before a TaskResult exists).
-bool IsRetryable(const v1::TaskResult& r, bool drain_preempted, bool user_cancelled) {
-    if (user_cancelled) return false;
-    if (r.timed_out()) return false;
-    if (r.cancelled()) return drain_preempted;
-    return false;
-}
-
-std::string RetryReason(const v1::TaskResult& r, bool drain_preempted) {
-    if (drain_preempted) return "donor drained";
-    if (!r.error().empty()) return r.error();
-    return "retry";
+node::BatchDone Done(const std::string& node, v1::FailureKind kind, std::string message, bool cancelled = false) {
+    node::BatchDone d;
+    d.node = node;
+    d.failure = kind;
+    d.message = std::move(message);
+    d.cancelled = cancelled;
+    return d;
 }
 
 // What to do about a donor that rejected an offer.
 struct Rejection {
-    bool passing{false};                  // true: the donor will take work again soon
+    bool passing{false}; // true: the donor will take work again soon
     std::chrono::milliseconds retry_after{0};
 };
 
 constexpr std::chrono::milliseconds kMinRetryAfter{50};
 
-// Donors state the kind of rejection; one that does not (older nodes) is classified by its
-// prose. A rejection that is neither passing nor a capability miss is still only that donor's
-// "no": the task goes on to the next donor and fails only once none is left.
 Rejection ClassifyRejection(const v1::OfferReply& reply) {
-    using std::chrono::milliseconds;
     switch (reply.reject_kind()) {
     case v1::REJECT_DRAINING:
     case v1::REJECT_BUSY:
-        return {true, std::max(milliseconds(reply.retry_after_ms()), kMinRetryAfter)};
-    case v1::REJECT_UNSUPPORTED:
-        return {false, milliseconds(0)};
+        return {true, std::max(std::chrono::milliseconds(reply.retry_after_ms()), kMinRetryAfter)};
     default:
-        break;
+        return {false, std::chrono::milliseconds(0)};
     }
-    const std::string& why = reply.reason();
-    if (why.find("owner busy") != std::string::npos) return {true, milliseconds(5000)};
-    if (why.find("in use") != std::string::npos || why.find("draining") != std::string::npos) {
-        return {true, kMinRetryAfter};
-    }
-    return {false, milliseconds(0)};
 }
 
-constexpr std::chrono::seconds kCapabilityRecheck{15};
-
-// Longest task horizon (seconds) used when ranking donors by departure hazard.
+// Longest batch horizon (seconds) used when ranking donors by departure hazard.
 constexpr double kHazardHorizonCapS = 900.0;
 
-// A task waiting for capacity looks again at least this often.
+// A batch waiting for capacity looks again at least this often.
 constexpr std::chrono::milliseconds kPlacementRecheck{100};
+
+double BatchSeconds(const v1::BatchSpec& spec) {
+    const double per_item = spec.timeout_s() > 0 ? spec.timeout_s() : 3600;
+    return std::min(per_item * std::max(spec.items_size(), 1), kHazardHorizonCapS);
+}
+
+sched::Need NeedOf(const v1::BatchSpec& spec) {
+    sched::Need n;
+    n.cores = std::max(spec.resources().cores(), 1);
+    n.mem_bytes = spec.resources().mem_bytes();
+    n.gpus = spec.resources().gpus();
+    n.arch = spec.resources().arch();
+    n.may_local = spec.where() != v1::REMOTE_ONLY;
+    n.may_remote = spec.where() != v1::LOCAL_ONLY;
+    return n;
+}
 
 } // namespace
 
-struct Placer::Task {
+struct Placer::Batch {
     std::string id;
-    v1::TaskSpec spec;
-    node::TaskCallbacks cb;
-    std::atomic<bool> cancelled{false};       // user/job cancel: final
-    std::atomic<bool> drain_preempted{false}; // donor drain: retryable cancel
+    v1::BatchSpec spec;
+    node::BatchCallbacks cb;
+    std::set<std::string> exclude;            // nodes this attempt must not use
+    std::atomic<bool> cancelled{false};       // the caller cancelled
+    std::atomic<bool> drain_preempted{false}; // the donor drained
     std::atomic<bool> finished{false};
     std::atomic<bool> worker_done{false};
 
-    // Tail hedging. A hedge is an extra copy of `primary`, registered under its own id; it never
-    // reports to the job, only (on success) to the primary through cb.on_done.
+    // Tail hedging. A hedge is an extra copy of `primary`, registered under its own id; its items
+    // go to the primary's caller, and its end only matters if it finished the batch.
     bool is_hedge{false};
-    std::unordered_set<std::string> exclude; // nodes this task must not be placed on (hedge copies)
-    std::atomic<bool> hedge_counted{false};  // counted in HedgeStats::launched once it got a slot
+    std::atomic<bool> hedge_counted{false};
 
     std::mutex mu;
     bool is_local{false};
     std::string assigned_node; // node currently reserved / running
     std::shared_ptr<node::NodeClient> client;
-    bool running{false};  // a remote Run is in progress
-    bool ever_ran{false}; // a remote Run was started at least once
+    bool running{false};
+    bool ever_ran{false};
     std::chrono::steady_clock::time_point run_started{};
-    std::vector<std::shared_ptr<Task>> hedges; // primary only
+    std::vector<std::shared_ptr<Batch>> hedges; // primary only
     int hedge_seq{0};
     std::chrono::steady_clock::time_point next_hedge{};
-    std::function<void()> on_finished; // runs once after the task's result was delivered
-
-    // Partial commit: units the task has committed so far (their blobs are in our CAS). The
-    // next attempt gets them under .zm_units/ in its input, so it only redoes the rest.
-    std::mutex units_mu;
-    std::map<std::string, v1::Digest> units;
-    bool units_dirty{false};
-    std::function<void(const std::string&, const v1::Digest&)> unit_sink;
+    std::function<void()> on_finished; // runs once after the batch's end was delivered
+    // A primary whose own copy failed while hedges still ran: their outcome decides.
+    std::optional<node::BatchDone> deferred;
 
     bool IsLocal() {
         std::lock_guard lock(mu);
         return is_local;
     }
 
-    // True when this call delivered the result (the first one wins; later ones are ignored).
-    bool Finish(v1::TaskResult r) {
+    // True when this call delivered the end (the first one wins).
+    bool Finish(node::BatchDone d) {
         if (finished.exchange(true)) return false;
         std::function<void()> hook;
         {
@@ -145,40 +115,40 @@ struct Placer::Task {
             hook = std::move(on_finished);
             on_finished = nullptr;
         }
-        if (cb.on_done) cb.on_done(std::move(r));
+        if (cb.on_done) cb.on_done(std::move(d));
         if (hook) hook();
         return true;
     }
-
-    void Done(v1::TaskResult r) { Finish(std::move(r)); }
 };
 
 struct Placer::Shared {
     std::mutex mu;
-    std::map<std::string, std::shared_ptr<Task>> tasks;
-    std::map<std::string, int> in_flight; // node id -> tasks we run there
-    std::map<std::string, int64_t> mem_in_flight; // node id -> memory those tasks declared
-    std::condition_variable cv;           // notified when a reservation is released
+    std::map<std::string, std::shared_ptr<Batch>> batches;
+    std::map<std::string, int> in_flight;         // node id -> batches we run there
+    std::map<std::string, int64_t> mem_in_flight; // node id -> memory those batches declared
+    std::map<std::string, int> gpus_in_flight;    // node id -> GPUs those batches declared
+    std::condition_variable cv;                   // notified when a reservation is released
 
     int InFlightLocked(const std::string& node) const {
         auto it = in_flight.find(node);
         return it == in_flight.end() ? 0 : it->second;
     }
-
     int64_t MemInFlightLocked(const std::string& node) const {
         auto it = mem_in_flight.find(node);
         return it == mem_in_flight.end() ? 0 : it->second;
     }
-
-    // `mem` is the task's declared memory; it follows the task's reservation in and out.
-    void AddLocked(const std::string& node, int delta, int64_t mem = 0) {
+    int GpusInFlightLocked(const std::string& node) const {
+        auto it = gpus_in_flight.find(node);
+        return it == gpus_in_flight.end() ? 0 : it->second;
+    }
+    void AddLocked(const std::string& node, int delta, int64_t mem, int gpus) {
         if ((in_flight[node] += delta) <= 0) in_flight.erase(node);
         if ((mem_in_flight[node] += delta * mem) <= 0) mem_in_flight.erase(node);
+        if ((gpus_in_flight[node] += delta * gpus) <= 0) gpus_in_flight.erase(node);
     }
-
-    void Forget(const std::string& task_id) {
+    void Forget(const std::string& id) {
         std::lock_guard lock(mu);
-        tasks.erase(task_id);
+        batches.erase(id);
     }
 };
 
@@ -191,6 +161,22 @@ Placer::Placer(std::shared_ptr<node::LocalExecutor> local, std::shared_ptr<net::
     if (!peers_ || !factory_ || !cas_ || !merkle_) throw std::invalid_argument("Placer: missing dependency");
     peers_->RegisterPreemptCallback(
         [this](const std::string& node_id, const std::string& reason) { OnPeerDrain(node_id, reason); });
+}
+
+int Placer::SlotsFor(const v1::Resources& resources, v1::Where where) const {
+    const int cores = std::max(resources.cores(), 1);
+    int slots = 0;
+    if (local_ && where != v1::REMOTE_ONLY) slots += local_->CoreCapacity() / cores;
+    if (where != v1::LOCAL_ONLY) {
+        for (const auto& p : peers_->ListActive()) {
+            if (p.id == local_id_) continue;
+            int donated = std::max(p.cores - 1, 1);
+            if (const int limit = CoreLimitOf(p.id); limit >= 0) donated = limit;
+            if (resources.gpus() > 0 && p.gpus < resources.gpus()) continue;
+            slots += donated / cores;
+        }
+    }
+    return std::max(slots, 1);
 }
 
 void Placer::SetHazardModel(std::shared_ptr<const HazardModel> model) {
@@ -215,7 +201,7 @@ int Placer::CoreLimitOf(const std::string& node_id) const {
     return it == core_limit_.end() ? -1 : it->second;
 }
 
-int64_t Placer::InputTreeBytes(const v1::TaskSpec& spec) const {
+int64_t Placer::InputTreeBytes(const v1::BatchSpec& spec) const {
     const auto root = node::FromProto(spec.input_root());
     if (root.hash.empty()) return 0;
     int64_t sum = 0;
@@ -284,14 +270,12 @@ Placer::~Placer() {
         hedge_thread_.request_stop();
         hedge_thread_.join();
     }
-    std::vector<std::shared_ptr<Task>> tasks;
+    std::vector<std::shared_ptr<Batch>> batches;
     {
         std::lock_guard lock(shared_->mu);
-        for (auto& [id, t] : shared_->tasks) tasks.push_back(t);
+        for (auto& [id, b] : shared_->batches) batches.push_back(b);
     }
-    for (auto& t : tasks) {
-        if (!t->IsLocal()) Cancel(t->id);
-    }
+    for (auto& b : batches) Cancel(b->id);
     std::lock_guard lock(workers_mu_);
     workers_.clear();
 }
@@ -312,498 +296,408 @@ int Placer::InFlightOn(const std::string& node_id) const {
 }
 
 void Placer::ReapFinishedLocked() {
-    std::erase_if(workers_, [](const Worker& w) { return w.task->worker_done.load(); });
+    std::erase_if(workers_, [](const Worker& w) { return w.batch->worker_done.load(); });
 }
 
 void Placer::OnPeerDrain(const std::string& node_id, const std::string& reason) {
-    // A freeze-first donor keeps our task frozen (and kills it itself once its ttl runs out, which
-    // we then retry as a drain). Cancelling now would throw away the progress it is protecting.
+    // A freeze-first donor keeps our batch frozen (and kills it itself once its ttl runs out).
+    // Cancelling now would throw away the progress it is protecting.
     if (node::ParseDepartureReason(reason)) return;
-    std::vector<std::shared_ptr<Task>> hit;
+    std::vector<std::shared_ptr<Batch>> hit;
     {
         std::lock_guard lock(shared_->mu);
-        for (auto& [id, t] : shared_->tasks) {
-            std::lock_guard tlock(t->mu);
-            if (t->assigned_node == node_id && !t->is_local) hit.push_back(t);
+        for (auto& [id, b] : shared_->batches) {
+            std::lock_guard block(b->mu);
+            if (b->assigned_node == node_id && !b->is_local) hit.push_back(b);
         }
     }
-    for (auto& t : hit) {
-        t->drain_preempted = true;
+    for (auto& b : hit) {
+        b->drain_preempted = true;
         std::shared_ptr<node::NodeClient> client;
         {
-            std::lock_guard lock(t->mu);
-            client = t->client;
+            std::lock_guard lock(b->mu);
+            client = b->client;
         }
-        if (client) client->Cancel(t->id);
+        if (client) client->Cancel(b->id);
     }
 }
 
-void Placer::Execute(const std::string& task_id, const v1::TaskSpec& spec, node::TaskCallbacks cb) {
-    auto task = std::make_shared<Task>();
-    task->id = task_id;
-    task->spec = spec;
-    task->cb = std::move(cb);
-    task->on_finished = [this, weak = std::weak_ptr<Task>(task)] {
-        if (auto t = weak.lock()) CancelHedges(t);
+void Placer::Execute(const std::string& batch_id, const v1::BatchSpec& spec, std::set<std::string> exclude,
+                     node::BatchCallbacks cb) {
+    auto batch = std::make_shared<Batch>();
+    batch->id = batch_id;
+    batch->spec = spec;
+    batch->cb = std::move(cb);
+    batch->exclude = std::move(exclude);
+    batch->on_finished = [this, weak = std::weak_ptr<Batch>(batch)] {
+        if (auto b = weak.lock()) CancelHedges(b);
     };
     {
         std::lock_guard lock(shared_->mu);
-        shared_->tasks[task_id] = task;
+        shared_->batches[batch_id] = batch;
     }
-    LaunchWorker(task);
+    LaunchWorker(batch);
 }
 
-void Placer::LaunchWorker(const std::shared_ptr<Task>& task) {
+void Placer::LaunchWorker(const std::shared_ptr<Batch>& batch) {
     std::lock_guard lock(workers_mu_);
     ReapFinishedLocked();
-    workers_.push_back(Worker{task, std::jthread([this, task] {
+    workers_.push_back(Worker{batch, std::jthread([this, batch] {
                                   try {
-                                      Place(task);
+                                      Place(batch);
                                   } catch (const std::exception& e) {
-                                      task->Done(Failed(local_id_, std::string("placer: ") + e.what()));
+                                      batch->Finish(Done(local_id_, v1::FAILURE_SANDBOX, std::string("placer: ") + e.what()));
                                   }
-                                  shared_->Forget(task->id);
-                                  task->worker_done = true;
+                                  shared_->Forget(batch->id);
+                                  batch->worker_done = true;
                               })});
 }
 
-void Placer::Cancel(const std::string& task_id) {
-    std::shared_ptr<Task> task;
+void Placer::Cancel(const std::string& batch_id) {
+    std::shared_ptr<Batch> batch;
     {
         std::lock_guard lock(shared_->mu);
-        auto it = shared_->tasks.find(task_id);
-        if (it == shared_->tasks.end()) return;
-        task = it->second;
+        auto it = shared_->batches.find(batch_id);
+        if (it == shared_->batches.end()) return;
+        batch = it->second;
     }
-    task->cancelled = true;
+    batch->cancelled = true;
     bool is_local = false;
     std::shared_ptr<node::NodeClient> client;
     {
-        std::lock_guard lock(task->mu);
-        is_local = task->is_local;
-        client = task->client;
+        std::lock_guard lock(batch->mu);
+        is_local = batch->is_local;
+        client = batch->client;
     }
     if (is_local) {
-        if (local_) local_->Cancel(task_id);
+        if (local_) local_->Cancel(batch_id);
     } else if (client) {
-        client->Cancel(task_id);
+        client->Cancel(batch_id);
     }
+    shared_->cv.notify_all(); // a batch waiting for capacity notices at once
 }
 
-v1::TaskResult Placer::RunLocal(const std::shared_ptr<Task>& task, const v1::TaskSpec& spec) {
-    {
-        std::lock_guard lock(task->mu);
-        task->is_local = true;
-        task->assigned_node = local_id_;
-    }
-    std::promise<v1::TaskResult> done;
+node::BatchDone Placer::RunLocal(const std::shared_ptr<Batch>& batch) {
+    std::promise<node::BatchDone> done;
     auto fut = done.get_future();
-    node::TaskCallbacks cb;
-    cb.on_state = task->cb.on_state;
-    cb.on_log = task->cb.on_log;
-    cb.on_unit = task->unit_sink;
-    cb.on_done = [&done](v1::TaskResult r) { done.set_value(std::move(r)); };
-    local_->Execute(task->id, spec, std::move(cb));
-    if (task->cancelled) local_->Cancel(task->id);
-    v1::TaskResult r = fut.get();
-    {
-        std::lock_guard lock(task->mu);
-        task->is_local = false;
-        task->assigned_node.clear();
-    }
-    return r;
+    node::BatchCallbacks cb = batch->cb;
+    cb.on_done = [&done](node::BatchDone d) { done.set_value(std::move(d)); };
+    local_->Execute(batch->id, batch->spec, {}, std::move(cb));
+    if (batch->cancelled) local_->Cancel(batch->id);
+    return fut.get();
 }
 
-namespace {
 
-bool PullOutputs(node::NodeClient& client, store::CasStore& cas, const v1::TaskResult& r, std::string* error,
-                 uint64_t* bytes_received) {
-    std::unordered_set<std::string> asked;
-    std::vector<v1::Digest> blobs;
-    std::vector<v1::Digest> trees;
-    auto want = [&](const v1::Digest& d, std::vector<v1::Digest>& into) {
-        if (d.hash().empty() || !asked.insert(d.hash()).second) return;
-        into.push_back(d);
-    };
-    want(r.stdout(), blobs);
-    want(r.stderr(), blobs);
-    for (const auto& o : r.outputs()) {
-        if (o.is_symlink()) continue;
-        want(o.digest(), o.is_dir() ? trees : blobs);
-    }
-
-    auto pull_missing = [&](const std::vector<v1::Digest>& ds) {
-        std::vector<v1::Digest> missing;
-        for (const auto& d : ds) {
-            if (!cas.HasBlob(d.hash())) missing.push_back(d);
+node::BatchDone Placer::RunRemote(const std::shared_ptr<Batch>& batch, const std::string& node_id,
+                                  const std::shared_ptr<node::NodeClient>& client) {
+    uint64_t pulled = 0;
+    std::string pull_error;
+    bool cancel_forwarded = false;
+    auto on_event = [&](const v1::BatchEvent& ev) {
+        if ((batch->cancelled || batch->drain_preempted) && !cancel_forwarded) {
+            cancel_forwarded = true;
+            client->Cancel(batch->id);
         }
-        return client.Pull(cas, missing, error, bytes_received);
-    };
-    if (!pull_missing(blobs)) return false;
-    while (!trees.empty()) {
-        if (!pull_missing(trees)) return false;
-        std::vector<v1::Digest> files;
-        std::vector<v1::Digest> next;
-        for (const auto& t : trees) {
-            auto data = cas.GetBlob(t.hash());
-            auto m = data ? store::DirectoryManifest::Deserialize(*data) : std::nullopt;
-            if (!m) {
-                if (error) *error = "output tree " + t.hash() + " is corrupt";
-                return false;
+        if (ev.has_started()) {
+            if (batch->cb.on_started) batch->cb.on_started(ev.started());
+        } else if (ev.has_log()) {
+            if (batch->cb.on_log) batch->cb.on_log(ev.log());
+        } else if (ev.has_done()) {
+            // Fetch the item's outputs now: if this donor is lost next, the item is already safe here.
+            const v1::ItemOutcome& o = ev.done();
+            std::vector<v1::Digest> blobs{o.stdout(), o.stderr()}, trees;
+            for (const auto& f : o.outputs()) {
+                if (f.symlink()) continue;
+                (f.is_dir() ? trees : blobs).push_back(f.digest());
             }
-            for (const auto& f : m->files) want(node::ToProto(f.digest), files);
-            for (const auto& d : m->directories) want(node::ToProto(d.digest), next);
+            std::string err;
+            uint64_t bytes = 0;
+            const bool ok = node::PullTrees(*client, *cas_, blobs, trees, &err, &bytes);
+            pulled += bytes;
+            AddTraffic(node_id, 0, bytes);
+            if (ok) {
+                if (batch->cb.on_item) batch->cb.on_item(o, node_id);
+            } else if (pull_error.empty()) {
+                pull_error = err; // the item is not reported: it will run again
+            }
+        } else if (ev.has_checkpoint()) {
+            std::string err;
+            uint64_t bytes = 0;
+            if (node::PullTrees(*client, *cas_, {}, {ev.checkpoint().tree()}, &err, &bytes)) {
+                if (batch->cb.on_checkpoint) batch->cb.on_checkpoint(ev.checkpoint().item(), ev.checkpoint().tree());
+            }
+            pulled += bytes;
+            AddTraffic(node_id, 0, bytes);
         }
-        if (!pull_missing(files)) return false;
-        trees = std::move(next);
+    };
+    {
+        std::lock_guard lock(batch->mu);
+        batch->running = true;
+        batch->ever_ran = true;
+        batch->run_started = std::chrono::steady_clock::now();
     }
-    return true;
+    std::string err;
+    const auto start = std::chrono::steady_clock::now();
+    auto finished = client->Run(batch->id, on_event, &err);
+    if (pulled > 0) bandwidth_.Observe(node_id, pulled, std::chrono::steady_clock::now() - start);
+
+    node::BatchDone d;
+    d.node = node_id;
+    d.bytes_pulled = pulled;
+    if (batch->cancelled) {
+        d.failure = v1::FAILURE_CANCELLED;
+        d.cancelled = true;
+        d.message = "cancelled";
+    } else if (!finished) {
+        d.failure = v1::FAILURE_DONOR_LEFT;
+        d.message = "node " + node_id + " lost during the run (" + err + ")";
+    } else if (finished->cancelled()) {
+        d.failure = v1::FAILURE_DONOR_LEFT;
+        d.message = batch->drain_preempted ? "node " + node_id + " drained" : "node " + node_id + " stopped the batch";
+    } else if (!finished->error().empty()) {
+        d.failure = v1::FAILURE_SANDBOX;
+        d.message = "node " + node_id + ": " + finished->error();
+    } else if (!pull_error.empty()) {
+        d.failure = v1::FAILURE_DONOR_LEFT;
+        d.message = "node " + node_id + " lost while sending outputs: " + pull_error;
+    }
+    return d;
 }
 
-struct Reservation {
-    std::string node_id;
-    bool is_local{false};
-};
+void Placer::EndAttempt(const std::shared_ptr<Batch>& batch, node::BatchDone d) {
+    if (!batch->is_hedge && d.failure != v1::FAILURE_NONE && !d.cancelled) {
+        std::lock_guard lock(batch->mu);
+        const bool hedging = std::any_of(batch->hedges.begin(), batch->hedges.end(),
+                                         [](const auto& h) { return !h->finished.load(); });
+        if (hedging) {
+            batch->deferred = std::move(d); // a copy elsewhere may still finish the batch
+            return;
+        }
+    }
+    batch->Finish(std::move(d));
+}
 
-} // namespace
-
-void Placer::Place(const std::shared_ptr<Task>& task) {
-    v1::TaskSpec spec = task->spec;
+void Placer::Place(const std::shared_ptr<Batch>& batch) {
+    v1::BatchSpec& spec = batch->spec;
     const net::Telemetry self = telemetry_ ? telemetry_() : net::Telemetry{};
     if (spec.resources().arch().empty() && !self.arch.empty()) spec.mutable_resources()->set_arch(self.arch);
+    const sched::Need need = NeedOf(spec);
+    const int64_t mem = std::max<int64_t>(need.mem_bytes, 0);
+    const int gpus = std::max(need.gpus, 0);
+    const std::string input_root_hash = spec.input_root().hash();
+    const int64_t input_tree_bytes = InputTreeBytes(spec);
+    const double batch_s = BatchSeconds(spec);
 
-    // Units reach the task through here, from a donor's event stream or from a local run. The
-    // sink never outlives Place(), which is the only thing that runs attempts of this task.
-    Task* const task_raw = task.get();
-    task->unit_sink = [task_raw](const std::string& unit_id, const v1::Digest& digest) {
-        {
-            std::lock_guard lock(task_raw->units_mu);
-            task_raw->units[unit_id] = digest;
-            task_raw->units_dirty = true;
-        }
-        if (task_raw->cb.on_unit) task_raw->cb.on_unit(unit_id, digest);
-    };
-
-    const int max_retries = MaxRetries(spec);
-    int attempt = 0;                       // completed failed attempts that consumed a retry
-    std::unordered_set<std::string> skip = task->exclude; // nodes skipped after a retryable infra failure
-    std::unordered_set<std::string> tried; // nodes already offered this placement round
-    // Nodes that lacked the command, and when they may be offered again.
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point> missing_until;
-    // Donors that turned the offer down for now (busy, owner at the keyboard, draining) and when
-    // to offer again. Unlike missing_until they still count as able to run the task.
+    std::set<std::string> skip = batch->exclude; // nodes this attempt will not use again
+    std::set<std::string> tried;                 // offered this round
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> defer_until;
+    std::map<std::string, std::pair<v1::RejectKind, std::string>> refused; // node -> why, for the failure
     auto deferred = [&](const std::string& id) {
         auto it = defer_until.find(id);
         return it != defer_until.end() && std::chrono::steady_clock::now() < it->second;
     };
-    auto lacks_command = [&](const std::string& id) {
-        auto it = missing_until.find(id);
-        return it != missing_until.end() && std::chrono::steady_clock::now() < it->second;
-    };
-    std::string last_reason = "no eligible nodes";
-    std::optional<v1::TaskResult> last_attempt_result; // last real run, if any
-    std::optional<std::vector<v1::Digest>> needed;
-    const std::string input_root_hash = spec.input_root().hash();
-    const int64_t input_tree_bytes = InputTreeBytes(spec);
+    auto blocked = [&](const std::string& id) { return skip.contains(id) || tried.contains(id) || deferred(id); };
 
-    const int64_t task_mem = std::max<int64_t>(spec.resources().mem_bytes(), 0);
-
-    // Seconds a donor must stay for this task to finish. The policy timeout is an upper bound,
-    // not an estimate, so cap it; the hazard ranking only needs a horizon of the right scale.
-    const double task_s = std::min<double>(spec.policy().has_timeout_s() && spec.policy().timeout_s() > 0
-                                               ? spec.policy().timeout_s()
-                                               : 3600,
-                                           kHazardHorizonCapS);
-
-    auto release = [&](const Reservation& res) {
-        std::lock_guard lock(shared_->mu);
-        shared_->AddLocked(res.node_id, -1, task_mem);
-        {
-            std::lock_guard tlock(task->mu);
-            if (task->assigned_node == res.node_id) task->assigned_node.clear();
-            task->client.reset();
-            task->is_local = false;
-            task->running = false;
-        }
-        shared_->cv.notify_all(); // capacity freed: let queued tasks look again
-    };
-
-    auto blocked = [&](const std::string& id) {
-        return skip.contains(id) || tried.contains(id) || lacks_command(id) || deferred(id);
-    };
-
-    auto reserve_next = [&]() -> std::optional<Reservation> {
-        std::lock_guard lock(shared_->mu);
-        std::vector<Candidate> candidates;
-        if (local_ && !blocked(local_id_)) {
-            candidates.push_back(Candidate{.node_id = local_id_,
-                                           .is_local = true,
-                                           .cores_total = self.cores_total,
-                                           .cores_free = self.cores_free,
-                                           .mem_available = self.mem_available,
-                                           .mem_total = self.mem_total,
-                                           .mem_committed = shared_->MemInFlightLocked(local_id_),
-                                           .cpu_load_pct = self.cpu_load_pct,
-                                           .on_ac = self.on_ac,
-                                           .arch = self.arch,
-                                           .latency = std::chrono::milliseconds(0),
-                                           .missing_bytes = 0,
-                                           .in_flight = shared_->InFlightLocked(local_id_)});
+    auto candidates = [&](bool for_reservation) {
+        std::vector<Candidate> out;
+        if (local_ && !(for_reservation ? blocked(local_id_) : skip.contains(local_id_))) {
+            Candidate c{.node_id = local_id_,
+                        .is_local = true,
+                        .cores_total = local_->CoreCapacity(),
+                        .cores_free = self.cores_free,
+                        .mem_available = self.mem_available,
+                        .mem_total = self.mem_total,
+                        .cpu_load_pct = self.cpu_load_pct,
+                        .on_ac = self.on_ac,
+                        .arch = self.arch,
+                        .missing_bytes = 0};
+            c.gpus = self.gpus;
+            if (for_reservation) {
+                c.mem_committed = shared_->MemInFlightLocked(local_id_);
+                c.in_flight = shared_->InFlightLocked(local_id_);
+                c.gpus_in_flight = shared_->GpusInFlightLocked(local_id_);
+            }
+            out.push_back(std::move(c));
         }
         const auto hazard = Hazard();
         const bool use_hazard = hazard && hazard->HasHistory();
         for (const auto& p : peers_->ListActive()) {
-            if (p.id == local_id_ || blocked(p.id)) continue;
-            Candidate cand{.node_id = p.id,
-                           .is_local = false,
-                           .cores_total = p.cores,
-                           .cores_free = p.cores_free,
-                           .mem_available = p.mem_available,
-                           .mem_total = p.memory_bytes,
-                           .mem_committed = shared_->MemInFlightLocked(p.id),
-                           .core_limit = CoreLimitOf(p.id),
-                           .cpu_load_pct = p.cpu_load_pct,
-                           .on_ac = p.is_charging,
-                           .arch = p.arch,
-                           .latency = p.latency,
-                           .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
-                           .in_flight = shared_->InFlightLocked(p.id),
-                           .bandwidth_bytes_per_s = bandwidth_.Measured(p.id).value_or(0.0)};
-            if (use_hazard) cand.expected_min_s = hazard->ExpectedMin(p.id, task_s);
-            candidates.push_back(std::move(cand));
+            if (p.id == local_id_ || (for_reservation ? blocked(p.id) : skip.contains(p.id))) continue;
+            Candidate c{.node_id = p.id,
+                        .is_local = false,
+                        .cores_total = p.cores,
+                        .cores_free = p.cores_free,
+                        .mem_available = p.mem_available,
+                        .mem_total = p.memory_bytes,
+                        .core_limit = CoreLimitOf(p.id),
+                        .cpu_load_pct = p.cpu_load_pct,
+                        .on_ac = p.is_charging,
+                        .arch = p.arch,
+                        .latency = p.latency,
+                        .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
+                        .bandwidth_bytes_per_s = bandwidth_.Measured(p.id).value_or(0.0)};
+            c.gpus = p.gpus;
+            if (for_reservation) {
+                c.mem_committed = shared_->MemInFlightLocked(p.id);
+                c.in_flight = shared_->InFlightLocked(p.id);
+                c.gpus_in_flight = shared_->GpusInFlightLocked(p.id);
+            }
+            if (use_hazard) c.expected_min_s = hazard->ExpectedMin(p.id, batch_s);
+            out.push_back(std::move(c));
         }
         if (use_hazard) {
-            // This node outlives its own tasks: it is the requester.
-            for (auto& c : candidates) {
-                if (c.is_local) c.expected_min_s = task_s;
+            for (auto& c : out) {
+                if (c.is_local) c.expected_min_s = batch_s; // the requester outlives its own batches
             }
         }
-        for (const Candidate& c : Rank(spec, std::move(candidates), input_tree_bytes, task_s)) {
-            shared_->AddLocked(c.node_id, 1, task_mem);
-            {
-                std::lock_guard tlock(task->mu);
-                task->assigned_node = c.node_id;
-                task->is_local = c.is_local;
-            }
-            return Reservation{c.node_id, c.is_local};
+        return out;
+    };
+
+    auto reserve_next = [&]() -> std::optional<Candidate> {
+        std::lock_guard lock(shared_->mu);
+        for (const Candidate& c : Rank(need, candidates(true), input_tree_bytes, batch_s)) {
+            shared_->AddLocked(c.node_id, 1, mem, gpus);
+            std::lock_guard block(batch->mu);
+            batch->assigned_node = c.node_id;
+            batch->is_local = c.is_local;
+            return c;
         }
         return std::nullopt;
     };
-
-    auto begin_retry = [&](const std::string& node, const std::string& reason) {
-        ++attempt;
-        skip.insert(node);
-        tried.clear();
-        task->drain_preempted = false; // fresh attempt
-        const std::string detail =
-            "retry " + std::to_string(attempt) + "/" + std::to_string(max_retries) + ": " + reason;
-        if (task->cb.on_state) task->cb.on_state(v1::QUEUED, detail);
-    };
-
-    auto fail_placement = [&](std::string reason) {
-        if (last_attempt_result) return task->Done(std::move(*last_attempt_result));
-        return task->Done(Failed(local_id_, "no node can run this task: " + std::move(reason)));
-    };
-
-    auto infra_retry_or_fail = [&](const std::string& node, const std::string& reason) -> bool {
-        last_reason = reason;
-        if (attempt < max_retries) {
-            begin_retry(node, reason);
-            return true;
-        }
-        return false;
-    };
-
-    // True when some node could take this task if nothing were in flight (capacity wait vs hard miss).
-    auto any_eligible = [&] {
-        std::vector<Candidate> candidates;
-        if (local_ && !skip.contains(local_id_) && !lacks_command(local_id_)) {
-            candidates.push_back(Candidate{.node_id = local_id_,
-                                           .is_local = true,
-                                           .cores_total = self.cores_total,
-                                           .cores_free = self.cores_free,
-                                           .mem_available = self.mem_available,
-                                           .mem_total = self.mem_total,
-                                           .cpu_load_pct = self.cpu_load_pct,
-                                           .on_ac = self.on_ac,
-                                           .arch = self.arch,
-                                           .missing_bytes = 0,
-                                           .in_flight = 0});
-        }
-        for (const auto& p : peers_->ListActive()) {
-            if (p.id == local_id_ || skip.contains(p.id) || lacks_command(p.id)) continue;
-            candidates.push_back(
-                Candidate{.node_id = p.id,
-                          .is_local = false,
-                          .cores_total = p.cores,
-                          .cores_free = p.cores_free,
-                          .mem_available = p.mem_available,
-                          .mem_total = p.memory_bytes,
-                          .core_limit = CoreLimitOf(p.id),
-                          .cpu_load_pct = p.cpu_load_pct,
-                          .on_ac = p.is_charging,
-                          .arch = p.arch,
-                          .latency = p.latency,
-                          .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
-                          .in_flight = 0});
-        }
-        return !Rank(spec, std::move(candidates), input_tree_bytes, task_s).empty();
-    };
-
-    // Donor drain may arrive as MarkDraining, or only as a cancelled TaskResult if the
-    // preempt callback raced behind CancelPreemptible. Treat PeerState::Draining as drain.
-    auto donor_draining = [&](const std::string& node_id) {
-        if (task->drain_preempted.load()) return true;
-        if (auto p = peers_->Get(node_id); p && p->state == net::PeerState::Draining) {
-            task->drain_preempted = true;
-            return true;
-        }
-        return false;
-    };
-
-    while (true) {
-        // User/job cancel always wins over drain preemption.
-        if (task->cancelled.load()) return task->Done(Cancelled(local_id_));
-
-        // A retry starts from the units the last attempt committed.
+    auto release = [&](const std::string& node_id) {
+        std::lock_guard lock(shared_->mu);
+        shared_->AddLocked(node_id, -1, mem, gpus);
         {
-            std::lock_guard ulock(task->units_mu);
-            if (task->units_dirty) {
-                task->units_dirty = false;
-                try {
-                    store::Digest root = node::FromProto(task->spec.input_root());
-                    for (const auto& [unit_id, digest] : task->units) {
-                        root = merkle_->Overlay(root, std::string(exec::kUnitsDirName) + "/" + unit_id,
-                                                node::FromProto(digest), /*item_is_tree=*/false);
-                    }
-                    *spec.mutable_input_root() = node::ToProto(root);
-                    needed.reset(); // the input tree changed: offer the new one
-                } catch (const std::exception&) {
-                    // Units only save work; without them the attempt starts from scratch.
-                }
-            }
+            std::lock_guard block(batch->mu);
+            if (batch->assigned_node == node_id) batch->assigned_node.clear();
+            batch->client.reset();
+            batch->is_local = false;
+            batch->running = false;
         }
+        shared_->cv.notify_all();
+    };
+    // True when some node could take the batch if nothing were in flight: wait for capacity.
+    auto any_eligible = [&] {
+        std::lock_guard lock(shared_->mu);
+        return !Rank(need, candidates(false), input_tree_bytes, batch_s).empty();
+    };
+    auto unplaceable = [&] {
+        bool env = false, toolchain = false, reachable = false;
+        std::string reasons;
+        for (const auto& [node, why] : refused) {
+            env = env || why.first == v1::REJECT_ENV;
+            toolchain = toolchain || why.first == v1::REJECT_TOOLCHAIN;
+            reachable = reachable || why.first != v1::REJECT_UNSPECIFIED;
+            reasons += (reasons.empty() ? "" : "; ") + node.substr(0, 8) + ": " + why.second;
+        }
+        v1::FailureKind kind = v1::FAILURE_ENV_UNAVAILABLE;
+        if (toolchain && !env) kind = v1::FAILURE_TOOLCHAIN_MISMATCH;
+        if (!refused.empty() && !reachable) kind = v1::FAILURE_DONOR_LEFT;
+        return Done(local_id_, kind, "no node can run this batch" + (reasons.empty() ? std::string() : ": " + reasons));
+    };
 
+    std::optional<std::vector<v1::Digest>> needed;
+    for (;;) {
+        if (batch->cancelled) return void(EndAttempt(batch, Done(local_id_, v1::FAILURE_CANCELLED, "cancelled", true)));
         auto reserved = reserve_next();
         if (!reserved) {
-            // A hedge only takes a slot that is free right now; it never queues behind real work.
-            if (task->is_hedge) return task->Done(Cancelled(local_id_));
-            // Wait for in-flight capacity; timeout_s is the run timeout, not a placement cap.
-            if (!any_eligible()) {
-                return fail_placement(last_reason);
-            }
+            // A hedge only takes a slot that is free now; it never queues behind real work.
+            if (batch->is_hedge) return void(EndAttempt(batch, Done(local_id_, v1::FAILURE_CANCELLED, "no free slot", true)));
+            if (!any_eligible()) return void(EndAttempt(batch, unplaceable()));
             tried.clear();
-            // Wake when a reservation is released; the timeout covers capacity freed elsewhere
-            // (other requesters, peers coming and going) and deferred donors becoming due.
             std::unique_lock wait_lock(shared_->mu);
             shared_->cv.wait_for(wait_lock, kPlacementRecheck);
             continue;
         }
-        tried.insert(reserved->node_id);
-        if (task->is_hedge && !task->hedge_counted.exchange(true)) {
+        const std::string node_id = reserved->node_id;
+        tried.insert(node_id);
+        if (batch->is_hedge && !batch->hedge_counted.exchange(true)) {
             std::lock_guard hedge_lock(hedge_mu_);
             ++hedge_stats_.launched;
         }
 
         if (reserved->is_local) {
-            if (!local_) {
-                release(*reserved);
-                if (infra_retry_or_fail(reserved->node_id, "local executor unavailable")) continue;
-                return fail_placement(last_reason);
+            node::BatchDone d = RunLocal(batch);
+            release(node_id);
+            if (batch->cancelled) {
+                d.failure = v1::FAILURE_CANCELLED;
+                d.cancelled = true;
             }
-            auto result = RunLocal(task, spec);
-            release(*reserved);
-            last_attempt_result = result;
-            const bool user_cancel = task->cancelled.load();
-            const bool drain = donor_draining(reserved->node_id);
-            if (user_cancel) return task->Done(Cancelled(local_id_));
-            if (IsRetryable(result, drain, user_cancel) && attempt < max_retries) {
-                begin_retry(reserved->node_id, RetryReason(result, drain));
-                continue;
-            }
-            return task->Done(std::move(result));
+            return void(EndAttempt(batch, std::move(d)));
         }
 
-        auto peer = peers_->Get(reserved->node_id);
+        auto peer = peers_->Get(node_id);
         auto client = peer ? factory_(*peer) : nullptr;
         if (!client) {
-            release(*reserved);
-            const std::string reason = "node " + reserved->node_id + ": not reachable";
-            if (infra_retry_or_fail(reserved->node_id, reason)) continue;
-            return fail_placement(reason);
+            release(node_id);
+            skip.insert(node_id);
+            refused[node_id] = {v1::REJECT_UNSPECIFIED, "not reachable"};
+            continue;
         }
         if (!needed) {
             needed.emplace();
             std::unordered_set<std::string> seen;
-            auto add_digest = [&](const store::Digest& d) {
-                if (d.hash.empty() || !seen.insert(d.hash).second) return;
-                needed->push_back(node::ToProto(d));
+            auto add = [&](const store::Digest& d) {
+                if (!d.hash.empty() && seen.insert(d.hash).second) needed->push_back(node::ToProto(d));
             };
-            for (const auto& d : merkle_->CollectTree(node::FromProto(spec.input_root()))) {
-                add_digest(d);
-            }
-            if (spec.env_spec().name() == "mirror") {
-                auto it = spec.env_spec().params().find("root_digest");
-                if (it != spec.env_spec().params().end() && store::CasStore::IsValidHash(it->second)) {
-                    store::Digest root;
-                    root.hash = it->second;
-                    if (auto bytes = cas_->GetBlob(it->second)) {
-                        root.size_bytes = static_cast<int64_t>(bytes->size());
-                    }
-                    add_digest(root);
-                }
+            for (const auto& d : merkle_->CollectTree(node::FromProto(spec.input_root()))) add(d);
+            for (const auto& it : spec.items()) {
+                if (it.checkpoint().hash().empty()) continue;
+                for (const auto& d : merkle_->CollectTree(node::FromProto(it.checkpoint()))) add(d);
             }
         }
         {
-            std::lock_guard lock(task->mu);
-            task->client = client;
+            std::lock_guard lock(batch->mu);
+            batch->client = client;
         }
-
+        if (node::EncodedOfferByteSize(batch->id, spec, *needed) > static_cast<size_t>(node::kNodeApiMaxMessageSize)) {
+            release(node_id);
+            return void(EndAttempt(batch, Done(local_id_, v1::FAILURE_SANDBOX,
+                                           "input tree too large to offer: " + std::to_string(needed->size()) + " digests")));
+        }
         std::string err;
-        if (node::EncodedOfferByteSize(task->id, spec, *needed) > static_cast<size_t>(node::kNodeApiMaxMessageSize)) {
-            release(*reserved);
-            return fail_placement("input tree too large to offer: " + std::to_string(needed->size()) + " digests");
-        }
-        auto reply = client->Offer(task->id, spec, *needed, &err);
+        auto reply = client->Offer(batch->id, spec, *needed, &err);
         if (!reply) {
-            release(*reserved);
-            const std::string reason = "node " + reserved->node_id + ": " + err;
-            if (infra_retry_or_fail(reserved->node_id, reason)) continue;
-            return fail_placement(reason);
+            release(node_id);
+            skip.insert(node_id);
+            refused[node_id] = {v1::REJECT_UNSPECIFIED, err};
+            continue;
         }
-        NoteCoreLimit(reserved->node_id, *reply);
+        NoteCoreLimit(node_id, *reply);
         if (!reply->accepted()) {
-            release(*reserved);
-            last_reason = "node " + reserved->node_id + ": " + reply->reason();
+            release(node_id);
             const Rejection rej = ClassifyRejection(*reply);
+            if (batch->cb.on_reject) batch->cb.on_reject(node_id, reply->reject_kind(), reply->reason());
             if (rej.passing) {
-                defer_until[reserved->node_id] = std::chrono::steady_clock::now() + rej.retry_after;
+                defer_until[node_id] = std::chrono::steady_clock::now() + rej.retry_after;
             } else {
-                missing_until[reserved->node_id] = std::chrono::steady_clock::now() + kCapabilityRecheck;
+                skip.insert(node_id);
+                refused[node_id] = {reply->reject_kind(), reply->reason()};
             }
             continue;
         }
-        if (task->cb.on_state) task->cb.on_state(v1::PLACED, "node " + reserved->node_id);
+        if (batch->cb.on_placed) batch->cb.on_placed(node_id);
 
+        // Push what the donor lacks, letting it seed from other donors first.
         std::vector<v1::Digest> missing(reply->missing().begin(), reply->missing().end());
-        if (needed) {
-            // Everything it did not report missing is already there: a future seeding source.
+        {
             std::unordered_set<std::string> missing_hashes;
             for (const auto& d : missing) missing_hashes.insert(d.hash());
             std::vector<v1::Digest> held;
             for (const auto& d : *needed) {
                 if (!missing_hashes.contains(d.hash())) held.push_back(d);
             }
-            NoteHolders(reserved->node_id, held);
+            NoteHolders(node_id, held);
         }
-        uint64_t wire_pushed = 0;
+        uint64_t wire_pushed = 0, seeded_before = 0;
+        {
+            std::lock_guard lock(traffic_mu_);
+            seeded_before = traffic_[node_id].bytes_seeded;
+        }
         bool pushed_ok = true;
         {
-            // One push at a time per donor: whatever a sibling task delivered while we waited
-            // is not sent again.
-            auto donor = SentFor(reserved->node_id);
-            std::lock_guard push_lock(donor->push_mu);
+            auto donor = SentFor(node_id);
+            std::lock_guard push_lock(donor->push_mu); // one push at a time per donor
             const auto now = std::chrono::steady_clock::now();
             std::vector<v1::Digest> to_send;
             {
@@ -813,9 +707,8 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
                     if (!donor->sent.contains(d.hash())) to_send.push_back(d);
                 }
             }
-            // Let the donor fetch what other donors hold; push only the rest.
             const std::vector<v1::Digest> wanted = to_send;
-            to_send = SeedFromPeers(reserved->node_id, *client, std::move(to_send));
+            to_send = SeedFromPeers(node_id, *client, std::move(to_send));
             {
                 std::unordered_set<std::string> still_missing;
                 for (const auto& d : to_send) still_missing.insert(d.hash());
@@ -826,113 +719,35 @@ void Placer::Place(const std::shared_ptr<Task>& task) {
             }
             const auto push_start = std::chrono::steady_clock::now();
             pushed_ok = client->Push(*cas_, to_send, &err, &wire_pushed);
-            if (pushed_ok) bandwidth_.Observe(reserved->node_id, wire_pushed, std::chrono::steady_clock::now() - push_start);
             if (pushed_ok) {
-                {
-                    std::lock_guard lock(donor->mu);
-                    for (const auto& d : to_send) donor->sent[d.hash()] = std::chrono::steady_clock::now();
-                }
-                NoteHolders(reserved->node_id, to_send);
+                bandwidth_.Observe(node_id, wire_pushed, std::chrono::steady_clock::now() - push_start);
+                std::lock_guard lock(donor->mu);
+                for (const auto& d : to_send) donor->sent[d.hash()] = std::chrono::steady_clock::now();
             }
+            if (pushed_ok) NoteHolders(node_id, to_send);
         }
-        AddTraffic(reserved->node_id, wire_pushed, 0);
+        AddTraffic(node_id, wire_pushed, 0);
         if (!pushed_ok) {
-            release(*reserved);
-            const std::string reason = "node " + reserved->node_id + ": uploading inputs failed: " + err;
-            if (infra_retry_or_fail(reserved->node_id, reason)) continue;
-            return fail_placement(reason);
+            release(node_id);
+            skip.insert(node_id);
+            refused[node_id] = {v1::REJECT_UNSPECIFIED, "uploading inputs failed: " + err};
+            continue;
         }
         {
             int64_t pushed = 0;
             for (const auto& d : missing) pushed += std::max<int64_t>(d.size_bytes(), 0);
             if (missing.empty()) pushed = input_tree_bytes;
-            NoteInputsPushed(reserved->node_id, input_root_hash, pushed, input_tree_bytes);
-        }
-        if (task->cancelled.load()) {
-            release(*reserved);
-            return task->Done(Cancelled(local_id_));
+            NoteInputsPushed(node_id, input_root_hash, pushed, input_tree_bytes);
         }
 
-        bool cancel_forwarded = false;
-        auto on_event = [&](const v1::JobEvent& ev) {
-            if ((task->cancelled || task->drain_preempted) && !cancel_forwarded) {
-                cancel_forwarded = true;
-                client->Cancel(task->id);
-            }
-            if (ev.has_unit_committed()) {
-                const auto& u = ev.unit_committed();
-                const std::string& unit_hash = u.digest().hash();
-                if (exec::IsValidUnitId(u.unit_id()) && store::CasStore::IsValidHash(unit_hash) && task->unit_sink) {
-                    // Fetch it now: if this donor is lost next, the unit must already be safe here.
-                    std::string unit_err;
-                    uint64_t unit_bytes = 0;
-                    const bool have = cas_->HasBlob(unit_hash) ||
-                                      client->Pull(*cas_, std::vector<v1::Digest>{u.digest()}, &unit_err, &unit_bytes);
-                    AddTraffic(reserved->node_id, 0, unit_bytes);
-                    if (have) task->unit_sink(u.unit_id(), u.digest());
-                }
-                return;
-            }
-            if (ev.has_result()) return;
-            if (ev.log_fd() != 0) {
-                if (task->cb.on_log) task->cb.on_log(ev.log_fd(), ev.log_chunk());
-            } else if ((ev.state() == v1::PLACED || ev.state() == v1::RUNNING) && task->cb.on_state) {
-                task->cb.on_state(ev.state(), ev.detail());
-            }
-        };
+        node::BatchDone d = RunRemote(batch, node_id, client);
+        release(node_id);
+        d.bytes_pushed = wire_pushed;
         {
-            std::lock_guard lock(task->mu);
-            task->running = true;
-            task->ever_ran = true;
-            task->run_started = std::chrono::steady_clock::now();
+            std::lock_guard lock(traffic_mu_);
+            d.bytes_seeded = traffic_[node_id].bytes_seeded - seeded_before;
         }
-        auto result = client->Run(task->id, on_event, &err);
-        const bool user_cancel = task->cancelled.load();
-        const bool drain = donor_draining(reserved->node_id);
-
-        if (!result) {
-            release(*reserved);
-            if (user_cancel) return task->Done(Cancelled(reserved->node_id));
-            v1::TaskResult lost =
-                Failed(reserved->node_id, "node " + reserved->node_id + " lost during run (" + err + ")");
-            last_attempt_result = lost;
-            if (attempt < max_retries) {
-                begin_retry(reserved->node_id, lost.error());
-                continue;
-            }
-            return task->Done(std::move(lost));
-        }
-        result->set_executed_by(reserved->node_id);
-        last_attempt_result = *result;
-
-        // Decide retry before pulling outputs so partial donor outputs stay discarded.
-        if (IsRetryable(*result, drain, user_cancel) && attempt < max_retries) {
-            release(*reserved);
-            begin_retry(reserved->node_id, RetryReason(*result, drain));
-            continue;
-        }
-        if (user_cancel || result->cancelled()) {
-            release(*reserved);
-            return task->Done(Cancelled(reserved->node_id));
-        }
-        uint64_t wire_pulled = 0;
-        const auto pull_start = std::chrono::steady_clock::now();
-        const bool pulled_ok = PullOutputs(*client, *cas_, *result, &err, &wire_pulled);
-        if (pulled_ok) bandwidth_.Observe(reserved->node_id, wire_pulled, std::chrono::steady_clock::now() - pull_start);
-        AddTraffic(reserved->node_id, 0, wire_pulled);
-        if (!pulled_ok) {
-            release(*reserved);
-            v1::TaskResult lost =
-                Failed(reserved->node_id, "node " + reserved->node_id + " lost while sending outputs: " + err);
-            last_attempt_result = lost;
-            if (attempt < max_retries) {
-                begin_retry(reserved->node_id, lost.error());
-                continue;
-            }
-            return task->Done(std::move(lost));
-        }
-        release(*reserved);
-        return task->Done(std::move(*result));
+        return void(EndAttempt(batch, std::move(d)));
     }
 }
 
@@ -972,18 +787,6 @@ Placer::HedgeStats Placer::Hedging() const {
     return hedge_stats_;
 }
 
-namespace {
-
-double HedgeHorizon(double default_horizon_s, const v1::TaskSpec& spec) {
-    double h = default_horizon_s;
-    if (spec.policy().has_timeout_s() && spec.policy().timeout_s() > 0) {
-        h = std::min(h, static_cast<double>(spec.policy().timeout_s()));
-    }
-    return h;
-}
-
-} // namespace
-
 void Placer::HedgeScan() {
     HedgeConfig cfg;
     {
@@ -993,9 +796,9 @@ void Placer::HedgeScan() {
     if (!cfg.survival || cfg.max_copies < 2) return;
 
     struct Pick {
-        std::shared_ptr<Task> task;
+        std::shared_ptr<Batch> batch;
         std::string node;
-        std::unordered_set<std::string> exclude;
+        std::set<std::string> exclude;
     };
     std::vector<Pick> picks;
     const auto now = std::chrono::steady_clock::now();
@@ -1003,19 +806,20 @@ void Placer::HedgeScan() {
         std::lock_guard lock(shared_->mu);
         int unplaced = 0;
         int running = 0;
-        for (auto& [id, t] : shared_->tasks) {
-            if (t->is_hedge || t->finished.load()) continue;
-            std::lock_guard tlock(t->mu);
-            if (t->assigned_node.empty()) {
+        for (auto& [id, b] : shared_->batches) {
+            if (b->is_hedge || b->finished.load()) continue;
+            std::lock_guard block(b->mu);
+            if (b->assigned_node.empty()) {
                 ++unplaced;
                 continue;
             }
             ++running;
-            if (t->is_local || !t->running || now < t->next_hedge) continue;
+            if (b->is_local || !b->running || now < b->next_hedge) continue;
             int live = 0;
             bool pending = false; // a hedge was launched but has no donor slot yet
-            std::unordered_set<std::string> exclude{t->assigned_node};
-            for (auto& h : t->hedges) {
+            std::set<std::string> exclude = b->exclude;
+            exclude.insert(b->assigned_node);
+            for (auto& h : b->hedges) {
                 if (h->finished.load()) continue;
                 ++live;
                 std::lock_guard hlock(h->mu);
@@ -1023,35 +827,30 @@ void Placer::HedgeScan() {
                 if (!h->assigned_node.empty()) exclude.insert(h->assigned_node);
             }
             if (pending || live + 1 >= cfg.max_copies) continue;
-            picks.push_back(Pick{t, t->assigned_node, std::move(exclude)});
+            picks.push_back(Pick{b, b->assigned_node, std::move(exclude)});
         }
-        // The tail: nothing is waiting for a slot and few tasks are still running.
+        // The tail: nothing is waiting for a slot and few batches are still running.
         if (unplaced > 0 || running > cfg.tail_max_running) return;
     }
-
     for (auto& pick : picks) {
-        const double p = cfg.survival(pick.node, HedgeHorizon(cfg.default_horizon_s, pick.task->spec));
+        const double horizon = std::min(cfg.default_horizon_s, BatchSeconds(pick.batch->spec));
+        const double p = cfg.survival(pick.node, horizon);
         if (!(p < cfg.survive_below)) continue; // also skips NaN
-        LaunchHedge(pick.task, std::move(pick.exclude), cfg);
+        LaunchHedge(pick.batch, std::move(pick.exclude), cfg);
     }
 }
 
-void Placer::LaunchHedge(const std::shared_ptr<Task>& primary, std::unordered_set<std::string> exclude,
-                         const HedgeConfig& cfg) {
-    // Only start a copy if some other node could take it; otherwise wait for the next scan.
+void Placer::LaunchHedge(const std::shared_ptr<Batch>& primary, std::set<std::string> exclude, const HedgeConfig& cfg) {
     bool target = false;
     for (const auto& p : peers_->ListActive()) {
         if (p.id != local_id_ && !exclude.contains(p.id)) target = true;
     }
-    const auto& policy = primary->spec.policy();
-    const bool may_local = !policy.has_may_run_local() || policy.may_run_local();
-    if (local_ && may_local && !exclude.contains(local_id_)) target = true;
+    if (local_ && primary->spec.where() != v1::REMOTE_ONLY && !exclude.contains(local_id_)) target = true;
     if (!target) return;
 
-    auto hedge = std::make_shared<Task>();
+    auto hedge = std::make_shared<Batch>();
     hedge->is_hedge = true;
     hedge->spec = primary->spec;
-    hedge->spec.mutable_policy()->set_max_retries(0);
     hedge->exclude = std::move(exclude);
     {
         std::lock_guard lock(primary->mu);
@@ -1060,20 +859,23 @@ void Placer::LaunchHedge(const std::shared_ptr<Task>& primary, std::unordered_se
         primary->next_hedge = std::chrono::steady_clock::now() + cfg.retry_after;
         primary->hedges.push_back(hedge);
     }
-    hedge->cb.on_done = [this, primary_weak = std::weak_ptr<Task>(primary),
-                         hedge_weak = std::weak_ptr<Task>(hedge)](v1::TaskResult r) {
-        auto h = hedge_weak.lock();
-        if (h) OnHedgeDone(primary_weak.lock(), h, std::move(r));
+    // Items and checkpoints of the copy go to the primary's caller, which keeps the first of each.
+    hedge->cb.on_started = primary->cb.on_started;
+    hedge->cb.on_log = primary->cb.on_log;
+    hedge->cb.on_item = primary->cb.on_item;
+    hedge->cb.on_checkpoint = primary->cb.on_checkpoint;
+    hedge->cb.on_done = [this, primary_weak = std::weak_ptr<Batch>(primary),
+                         hedge_weak = std::weak_ptr<Batch>(hedge)](node::BatchDone d) {
+        if (auto h = hedge_weak.lock()) OnHedgeDone(primary_weak.lock(), h, std::move(d));
     };
     {
         std::lock_guard lock(shared_->mu);
-        shared_->tasks[hedge->id] = hedge;
+        shared_->batches[hedge->id] = hedge;
     }
     LaunchWorker(hedge);
 }
 
-void Placer::OnHedgeDone(const std::shared_ptr<Task>& primary, const std::shared_ptr<Task>& hedge,
-                         v1::TaskResult r) {
+void Placer::OnHedgeDone(const std::shared_ptr<Batch>& primary, const std::shared_ptr<Batch>& hedge, node::BatchDone d) {
     double cpu = 0;
     bool ran = false;
     {
@@ -1084,24 +886,34 @@ void Placer::OnHedgeDone(const std::shared_ptr<Task>& primary, const std::shared
             ran = true;
         }
     }
-    const bool usable = !r.cancelled() && !r.timed_out() && r.exit_code() == 0 && r.error().empty();
     bool won = false;
-    if (usable && primary) {
-        won = primary->Finish(r);
-        if (won) Cancel(primary->id); // stop the original copy; it is no longer needed
+    if (d.failure == v1::FAILURE_NONE && primary) {
+        won = primary->Finish(d);
+        if (won) Cancel(primary->id); // the original copy is no longer needed
+    } else if (primary) {
+        // This copy failed. If the original already failed and waits on its copies, and this was
+        // the last one running, the original's failure stands.
+        std::optional<node::BatchDone> deferred;
+        {
+            std::lock_guard lock(primary->mu);
+            const bool others = std::any_of(primary->hedges.begin(), primary->hedges.end(),
+                                            [](const auto& h) { return !h->finished.load(); });
+            if (primary->deferred && !others) deferred = std::move(primary->deferred);
+        }
+        if (deferred) primary->Finish(std::move(*deferred));
     }
     const bool counted = hedge->hedge_counted.load();
     std::lock_guard lock(hedge_mu_);
     if (won) ++hedge_stats_.won;
-    if (counted && !won && r.cancelled()) ++hedge_stats_.cancelled;
+    if (counted && !won && d.cancelled) ++hedge_stats_.cancelled;
     if (ran) {
         hedge_stats_.cpu_seconds += cpu;
         if (!won) hedge_stats_.wasted_cpu_seconds += cpu;
     }
 }
 
-void Placer::CancelHedges(const std::shared_ptr<Task>& primary) {
-    std::vector<std::shared_ptr<Task>> hedges;
+void Placer::CancelHedges(const std::shared_ptr<Batch>& primary) {
+    std::vector<std::shared_ptr<Batch>> hedges;
     {
         std::lock_guard lock(primary->mu);
         hedges = primary->hedges;

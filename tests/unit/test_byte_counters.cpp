@@ -1,8 +1,6 @@
 #include "tests/unit/node_fixture.hpp"
 
-#include "node/action_cache.hpp"
 #include "node/convert.hpp"
-#include "node/job_manager.hpp"
 #include "sched/placer.hpp"
 
 #include <chrono>
@@ -22,45 +20,15 @@ void Expect(bool cond, const std::string& what) {
     if (!cond) throw std::runtime_error(what);
 }
 
-struct Requester {
-    std::shared_ptr<zeromesh::sched::Placer> placer;
-    std::unique_ptr<zeromesh::node::JobManager> jm;
+using Requester = zeromesh::testing::PlacerRequester;
 
-    explicit Requester(TestNodeFull& self) {
-        auto factory = [&self](const zeromesh::net::Peer& p) {
-            return std::make_shared<zeromesh::node::NodeClient>(p.ip_address + ":" + std::to_string(p.node_port),
-                                                                self.id, self.pins, p.id);
-        };
-        placer = std::make_shared<zeromesh::sched::Placer>(self.executor, self.peers, factory, self.cas, self.merkle,
-                                                           self.node_id, [&self] { return self.telemetry; });
-        jm = std::make_unique<zeromesh::node::JobManager>(
-            self.cas, self.merkle, std::make_shared<zeromesh::node::ActionCache>(self.cas), placer);
-    }
-};
-
-void WaitJob(zeromesh::node::JobManager& jm, const std::string& id) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (jm.Get(id)->done()) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    throw std::runtime_error("job " + id + " did not finish");
-}
-
-// One task per case; every case reads the shared tree plus its own `case_<i>` file.
-v1::JobSpec Sweep(const std::vector<v1::Digest>& roots) {
-    v1::JobSpec job;
-    job.set_name("sweep");
+// One batch per case; every case reads the shared tree plus its own `case.txt`.
+std::vector<v1::BatchSpec> Sweep(const std::vector<v1::Digest>& roots) {
+    std::vector<v1::BatchSpec> out;
     for (size_t i = 0; i < roots.size(); ++i) {
-        auto* t = job.add_tasks();
-        t->set_name("case" + std::to_string(i));
-        t->add_argv("sh");
-        t->add_argv("-c");
-        t->add_argv("cat case.txt shared.bin | wc -c");
-        *t->mutable_input_root() = roots[i];
-        t->mutable_policy()->set_may_run_local(false);
+        out.push_back(zeromesh::testing::ShBatch({{"case" + std::to_string(i), "cat case.txt shared.bin | wc -c"}}, roots[i]));
     }
-    return job;
+    return out;
 }
 
 std::string Blob(size_t n, char c) { return std::string(n, c); }
@@ -125,12 +93,8 @@ TEST(PlacerSendsSharedInputOncePerDonor) {
         }
     }
 
-    const std::string id = req.jm->Submit(Sweep(roots));
-    WaitJob(*req.jm, id);
-    auto st = req.jm->Get(id);
-    for (const auto& [name, state] : st->tasks()) {
-        Expect(state == v1::SUCCEEDED, name + ": " + st->results().at(name).error());
-    }
+    for (const auto& b : Sweep(roots)) req.Execute(b);
+    req.WaitAll();
 
     const auto traffic = req.placer->Traffic();
     ASSERT_EQ(traffic.count("node-b"), static_cast<size_t>(1));
@@ -140,44 +104,3 @@ TEST(PlacerSendsSharedInputOncePerDonor) {
                                std::to_string(one_tree));
 }
 
-TEST(PlacerRerunWithOneChangedInputMovesOnlyThatCase) {
-    auto key = zeromesh::net::GenerateTeamKey();
-    TestNodeFull a("node-a", key), b("node-b", key);
-    a.Start();
-    b.Start();
-    a.Admit(b);
-    a.peers->Upsert(b.AsPeer());
-    Requester req(a);
-
-    constexpr int kCases = 4;
-    TempDir src;
-    zeromesh::testing::WriteFile(src / "shared.bin", Blob(150000, 's'));
-    auto build = [&](int changed) {
-        std::vector<v1::Digest> roots;
-        for (int i = 0; i < kCases; ++i) {
-            const std::string body = "case " + std::to_string(i) + (i == changed ? " CHANGED\n" : "\n");
-            zeromesh::testing::WriteFile(src / "case.txt", body);
-            roots.push_back(zeromesh::node::ToProto(a.merkle->BuildTree(src.path())));
-        }
-        return roots;
-    };
-
-    const std::string first = req.jm->Submit(Sweep(build(-1)));
-    WaitJob(*req.jm, first);
-    const uint64_t after_first = req.placer->Traffic().at("node-b").bytes_pushed;
-
-    const std::string second = req.jm->Submit(Sweep(build(2)));
-    WaitJob(*req.jm, second);
-    auto st = req.jm->Get(second);
-    int hits = 0, ran = 0;
-    for (const auto& [name, r] : st->results()) {
-        (r.cache_hit() ? hits : ran)++;
-    }
-    ASSERT_EQ(hits, kCases - 1);
-    ASSERT_EQ(ran, 1);
-
-    // Only the changed case.txt and the manifests above it travel again (shared.bin stays put).
-    const uint64_t delta = req.placer->Traffic().at("node-b").bytes_pushed - after_first;
-    Expect(delta < 4096, "re-run uploaded " + std::to_string(delta) + " bytes for one changed 10-byte input");
-    Expect(delta > 0, "re-run uploaded nothing, but one input changed");
-}

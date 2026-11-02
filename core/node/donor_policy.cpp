@@ -69,6 +69,11 @@ DonorPolicy DonorPolicy::Parse(std::string_view text, std::ostream& warn, std::s
                 p.allow_network = *v;
             else
                 bad();
+        } else if (key == "allow_gpu") {
+            if (auto v = ParseBool(value))
+                p.allow_gpu = *v;
+            else
+                bad();
         } else if (key == "drain_below_battery") {
             if (auto v = ParseInt(value, 0, 100))
                 p.drain_below_battery = *v;
@@ -166,8 +171,8 @@ constexpr int kRetryBatteryMs = 15000; // battery state changes slowly
 
 } // namespace
 
-std::optional<Refusal> DonorPolicy::Evaluate(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                             int cores_in_use, int64_t mem_promised) const {
+std::optional<Refusal> DonorPolicy::Evaluate(const net::Telemetry& t, const Demand& demand, int cores_in_use,
+                                             int64_t mem_promised, int gpus_in_use) const {
     if (!t.on_ac && t.battery_pct >= 0) {
         if (ShouldDrain(t)) {
             return Refusal{RefusalKind::Busy,
@@ -182,42 +187,50 @@ std::optional<Refusal> DonorPolicy::Evaluate(const net::Telemetry& t, const v1::
                            kRetryBatteryMs};
         }
     }
-    if (spec.policy().allow_network() && !allow_network) {
+    if (demand.network && !allow_network) {
         return Refusal{RefusalKind::Unsupported,
-                       "task needs network access, which this node's donor policy does not allow", 0};
+                       "the batch needs network access, which this node's donor policy does not allow", 0};
     }
-    const std::string& arch = spec.resources().arch();
+    const std::string& arch = demand.arch;
     if (!arch.empty() && !t.arch.empty() && arch != t.arch) {
-        return Refusal{RefusalKind::Unsupported, "task needs arch " + arch + ", this node is " + t.arch, 0};
+        return Refusal{RefusalKind::Unsupported, "the batch needs arch " + arch + ", this node is " + t.arch, 0};
     }
-    const int need = std::max(spec.resources().cores(), 1);
+    const int need = std::max(demand.cores, 1);
     const int limit = CoreLimit(t.cores_total);
     if (need > limit) {
         return Refusal{RefusalKind::Unsupported,
-                       "task needs " + std::to_string(need) + " cores; donor policy allows only " +
+                       "the batch needs " + std::to_string(need) + " cores; donor policy allows only " +
                            std::to_string(limit),
                        0};
     }
     if (cores_in_use + need > limit) {
         return Refusal{RefusalKind::Busy,
-                       "task needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) +
+                       "the batch needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) +
                            " and " + std::to_string(cores_in_use) + " are in use",
                        kRetryCoresBusyMs};
     }
-    const int64_t mem = spec.resources().mem_bytes();
+    const int64_t mem = demand.mem_bytes;
     if (mem > 0 && static_cast<uint64_t>(mem + std::max<int64_t>(mem_promised, 0)) > t.mem_available) {
         return Refusal{RefusalKind::Busy,
-                       "task needs " + std::to_string(mem) + " bytes of memory, " + std::to_string(t.mem_available) +
+                       "the batch needs " + std::to_string(mem) + " bytes of memory, " + std::to_string(t.mem_available) +
                            " are available and " + std::to_string(std::max<int64_t>(mem_promised, 0)) +
-                           " are promised to other tasks",
+                           " are promised to other batches",
                        kRetryMemoryMs};
     }
-    return std::nullopt;
-}
-
-std::optional<std::string> DonorPolicy::Refuses(const net::Telemetry& t, const v1::TaskSpec& spec,
-                                                int cores_in_use, int64_t mem_promised) const {
-    if (auto r = Evaluate(t, spec, cores_in_use, mem_promised)) return std::move(r->reason);
+    if (demand.gpus > 0) {
+        if (!allow_gpu || t.gpus <= 0) {
+            return Refusal{RefusalKind::Unsupported, "the batch needs a GPU, which this node does not donate", 0};
+        }
+        if (demand.gpus > t.gpus) {
+            return Refusal{RefusalKind::Unsupported,
+                           "the batch needs " + std::to_string(demand.gpus) + " GPUs; this node has " +
+                               std::to_string(t.gpus),
+                           0};
+        }
+        if (gpus_in_use + demand.gpus > t.gpus) {
+            return Refusal{RefusalKind::Busy, "every GPU is in use", kRetryCoresBusyMs};
+        }
+    }
     return std::nullopt;
 }
 

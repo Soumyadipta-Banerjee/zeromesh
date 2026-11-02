@@ -48,8 +48,8 @@ struct DrainFields {
     std::string reason;
 };
 
-// ZM3\t<team_id>\t<node_id>\t<boot_id>\t<seq>\t<timestamp_ms>\t<hostname>\t...
-//    \t<state>\t<hex mac>
+// ZM4\t<team_id>\t<node_id>\t<boot_id>\t<seq>\t<timestamp_ms>\t<hostname>\t...
+//    \t<state>\t<mem_total>\t<gpus>\t<hex mac>
 // mac = hex(Mac(key, "zm-announce", everything before the last tab)).
 std::string FormatAnnouncement(const AnnounceFields&, const TeamKey&);
 
@@ -71,7 +71,7 @@ struct DrainNotice {
     int64_t timestamp_ms{0};
 };
 
-// ZM3D\t<team_id>\t<node_id>\t<boot_id>\t<seq>\t<timestamp_ms>\t<reason>\t<hex mac>
+// ZM4D\t<team_id>\t<node_id>\t<boot_id>\t<seq>\t<timestamp_ms>\t<reason>\t<hex mac>
 std::string FormatDrain(const DrainFields&, const TeamKey&);
 std::optional<DrainNotice> ParseDrain(std::string_view packet, const TeamKey&, std::string_view self_node_id);
 

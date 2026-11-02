@@ -141,8 +141,8 @@ public:
 private:
     struct Group;
     void RunGroup(const BatchRunSpec& spec, Group& g, const std::filesystem::path& lower,
-                  const std::filesystem::path& cgroup_dir, bool cgroup_memory, const BatchCallbacks& cb,
-                  std::stop_token stop, bool& cancelled);
+                  const std::filesystem::path& cgroup_dir, const BatchCallbacks& cb, std::stop_token stop,
+                  bool& cancelled);
     bool ProbeOverlay();
 
     std::shared_ptr<store::CasStore> store_;

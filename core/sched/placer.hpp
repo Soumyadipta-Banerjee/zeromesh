@@ -1,22 +1,21 @@
 #pragma once
 
-// Placer (spec §7 step 3, §8, M4): the Executor JobManager uses. It ranks this node
-// and the active team peers for each task and tries them in order:
-//   - local: hand the task to the LocalExecutor;
-//   - remote: OfferTask (a rejection moves on to the next candidate), push the
-//     inputs the peer lacks, RunTask while forwarding its events, then pull the
-//     outputs (whole trees for directory outputs) and stdout/stderr into the local
-//     CAS before reporting the result.
-// Capacity is reserved atomically before Offer/Run so concurrent tasks do not all
-// pile onto the top-ranked node (at most cores_total/task.cores in flight per node;
-// load-derived cores_free is a ranking/UI signal only; a donor's reported core limit caps it,
-// and the memory declared by tasks already placed there is held against its total). Donor
-// drain, peer loss, and push/pull transport failures re-queue up to policy.max_retries
-// (JobEvent QUEUED, detail "retry n/max: reason"). Run timeouts, non-zero exits and user/job
-// cancel are final. An Offer rejection is that donor's answer only: a passing one (busy, owner
-// at the keyboard, draining) defers the donor for the retry_after it names, a capability or
-// policy miss skips it for a while, and the task fails ("no node can run this task: ...")
-// only once no donor is left.
+// Placer: the Executor the run engine uses. For each batch it ranks this node and the active team
+// peers and tries them in order:
+//   - local: hand the batch to the LocalExecutor;
+//   - remote: OfferBatch (a rejection moves on to the next candidate), push the inputs the peer
+//     lacks (or let it seed them from another donor), RunBatch while forwarding its events, and
+//     pull each item's outputs into the local CAS as soon as the donor reports the item.
+// Capacity is reserved atomically before Offer/Run so concurrent batches do not all pile onto the
+// top-ranked node (at most min(cores_total, core_limit)/cores in flight per node; the memory and
+// GPUs declared by batches already placed there are held against the node's totals). A rejection
+// is that donor's answer only: a passing one (busy, owner at the keyboard, draining, fair share)
+// defers the donor for the retry_after it names, any other skips it for this attempt.
+//
+// One Execute is one attempt. It ends when the batch ran (every item reported, or the donor was
+// lost, drained or failed the sandbox), or when no node can run it at all; deciding whether to try
+// again is the caller's job. Tail hedging runs a second copy of a batch near the end of a run on a
+// donor likely to outlive the first; items reach the caller from whichever copy finishes them.
 
 #include "net/peer_table.hpp"
 #include "net/telemetry.hpp"
@@ -35,6 +34,7 @@
 #include <functional>
 #include <list>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -48,34 +48,38 @@ namespace zeromesh::sched {
 class Placer final : public node::Executor {
 public:
     // A client for a peer from the PeerTable, or nullptr if none can be made. Clients may
-    // be shared between tasks (NodeClient is thread-safe).
+    // be shared between batches (NodeClient is thread-safe).
     using ClientFactory = std::function<std::shared_ptr<node::NodeClient>(const net::Peer&)>;
 
-    // `local` may be null (this node never runs tasks itself). `telemetry` describes this
+    // `local` may be null (this node never runs batches itself). `telemetry` describes this
     // node; an empty resources.arch is filled with its arch before ranking and offering.
     // Registers a PeerTable preempt callback so a donor drain cancels in-flight remote runs
     // and re-queues them.
     Placer(std::shared_ptr<node::LocalExecutor> local, std::shared_ptr<net::PeerTable> peers, ClientFactory factory,
            std::shared_ptr<store::CasStore> cas, std::shared_ptr<store::MerkleBuilder> merkle,
            std::string local_node_id, std::function<net::Telemetry()> telemetry);
-    // Cancels every task still placing or running remotely and waits for them.
+    // Cancels every batch still placing or running remotely and waits for them.
     ~Placer() override;
 
     Placer(const Placer&) = delete;
     Placer& operator=(const Placer&) = delete;
 
-    void Execute(const std::string& task_id, const v1::TaskSpec& spec, node::TaskCallbacks cb) override;
-    void Cancel(const std::string& task_id) override;
+    void Execute(const std::string& batch_id, const v1::BatchSpec& spec, std::set<std::string> exclude,
+                 node::BatchCallbacks cb) override;
+    void Cancel(const std::string& batch_id) override;
 
-    // Rank donors by expected committed work (slots x E[min(remaining life, task time)]) from
+    // How many batches needing `resources` the team could run at once right now (at least 1).
+    [[nodiscard]] int SlotsFor(const v1::Resources& resources, v1::Where where) const;
+
+    // Rank donors by expected committed work (slots x E[min(remaining life, batch time)]) from
     // this departure-hazard model. Without a model, or until it has any history, placement
-    // ranks by free slots as before. Safe to call while tasks are being placed.
+    // ranks by free slots as before. Safe to call while batches are being placed.
     void SetHazardModel(std::shared_ptr<const HazardModel> model);
 
-    // Node ids of remote peers that currently have at least one task in flight here.
+    // Node ids of remote peers that currently have at least one of our batches in flight.
     [[nodiscard]] std::vector<std::string> NodesWithInFlight() const;
 
-    // Tasks currently reserved/running on `node_id` (for tests).
+    // Batches currently reserved/running on `node_id` (for tests).
     [[nodiscard]] int InFlightOn(const std::string& node_id) const;
 
     // Payload bytes this requester has moved to / from each remote node.
@@ -96,18 +100,18 @@ public:
     };
     void SetSeeding(SeedConfig cfg);
 
-    // Tail hedging: near the end of a job, copy a task that sits on a donor unlikely to
-    // outlive it onto a second donor. The first copy to succeed wins and the others are
-    // cancelled. Off until `survival` is set (the hazard model supplies it).
+    // Tail hedging: near the end of a run, copy a batch that sits on a donor unlikely to outlive
+    // it onto a second donor. Items count from whichever copy finishes them first; when one copy
+    // finishes the batch the others are cancelled. Off until `survival` is set.
     struct HedgeConfig {
         // P(the donor is still here `horizon_s` seconds from now); unset means never hedge.
         std::function<double(const std::string& node_id, double horizon_s)> survival;
         double survive_below{0.5};  // hedge when the odds fall below this
-        int max_copies{2};          // simultaneous copies of one task, original included
-        int tail_max_running{4};    // "tail": nothing waiting for a slot and at most this many tasks running
-        double default_horizon_s{120.0}; // assumed remaining runtime; capped by the task's timeout
+        int max_copies{2};          // simultaneous copies of one batch, original included
+        int tail_max_running{4};    // "tail": nothing waiting for a slot and at most this many batches running
+        double default_horizon_s{120.0}; // assumed remaining runtime; capped by the batch's timeout
         std::chrono::milliseconds check_interval{200};
-        std::chrono::milliseconds retry_after{1000}; // pause between two hedge launches for one task
+        std::chrono::milliseconds retry_after{1000}; // pause between two hedge launches for one batch
 
         static HedgeConfig FromPolicy(const node::DonorPolicy& policy);
     };
@@ -124,15 +128,20 @@ public:
     // turn missing bytes into transfer time.
     [[nodiscard]] const BandwidthEstimator& Bandwidth() const { return bandwidth_; }
 
-    struct Task;
+    struct Batch;
     struct Shared;
 
 private:
-    void Place(const std::shared_ptr<Task>& task);
-    // Runs locally and waits for the result (so Place can decide on retry).
-    v1::TaskResult RunLocal(const std::shared_ptr<Task>& task, const v1::TaskSpec& spec);
+    void Place(const std::shared_ptr<Batch>& batch);
+    // Ends one copy's attempt; a failed primary with hedges still running waits for them.
+    void EndAttempt(const std::shared_ptr<Batch>& batch, node::BatchDone d);
+    // Runs on this node and waits for it to end.
+    node::BatchDone RunLocal(const std::shared_ptr<Batch>& batch);
+    // Runs on `node_id` through `client` once the offer was accepted and the inputs pushed.
+    node::BatchDone RunRemote(const std::shared_ptr<Batch>& batch, const std::string& node_id,
+                              const std::shared_ptr<node::NodeClient>& client);
     void OnPeerDrain(const std::string& node_id, const std::string& reason);
-    void LaunchWorker(const std::shared_ptr<Task>& task);
+    void LaunchWorker(const std::shared_ptr<Batch>& batch);
     // Lets `target` fetch what it misses from donors known to hold it; returns what is still missing.
     std::vector<v1::Digest> SeedFromPeers(const std::string& target, node::NodeClient& client,
                                           std::vector<v1::Digest> missing);
@@ -142,13 +151,12 @@ private:
     void NoteHolders(const std::string& node_id, const std::vector<v1::Digest>& digests);
     void AddSeeded(const std::string& node_id, uint64_t bytes);
     void HedgeScan();
-    void LaunchHedge(const std::shared_ptr<Task>& primary, std::unordered_set<std::string> exclude,
-                     const HedgeConfig& cfg);
-    void OnHedgeDone(const std::shared_ptr<Task>& primary, const std::shared_ptr<Task>& hedge, v1::TaskResult r);
-    void CancelHedges(const std::shared_ptr<Task>& primary);
+    void LaunchHedge(const std::shared_ptr<Batch>& primary, std::set<std::string> exclude, const HedgeConfig& cfg);
+    void OnHedgeDone(const std::shared_ptr<Batch>& primary, const std::shared_ptr<Batch>& hedge, node::BatchDone d);
+    void CancelHedges(const std::shared_ptr<Batch>& primary);
     void ReapFinishedLocked();
 
-    [[nodiscard]] int64_t InputTreeBytes(const v1::TaskSpec& spec) const;
+    [[nodiscard]] int64_t InputTreeBytes(const v1::BatchSpec& spec) const;
     [[nodiscard]] int64_t EstimatedMissingBytes(const std::string& node_id, const std::string& input_root_hash,
                                                 int64_t total_bytes) const;
     void NoteInputsPushed(const std::string& node_id, const std::string& input_root_hash, int64_t bytes_pushed,
@@ -156,7 +164,7 @@ private:
 
     void AddTraffic(const std::string& node_id, uint64_t pushed, uint64_t pulled);
 
-    // Blobs recently pushed to a donor. Offers made before a sibling task's push lands all
+    // Blobs recently pushed to a donor. Offers made before a sibling batch's push lands all
     // report the same blobs as missing; the push lock plus this set sends each one once.
     struct DonorSent {
         std::mutex push_mu;
@@ -207,7 +215,7 @@ private:
     std::shared_ptr<Shared> shared_;
 
     struct Worker {
-        std::shared_ptr<Task> task;
+        std::shared_ptr<Batch> batch;
         std::jthread thread;
     };
     std::mutex workers_mu_;

@@ -1,5 +1,6 @@
 #include "net/tls.hpp"
 
+#include <absl/base/internal/sysinfo.h>
 #include <grpc/grpc.h>
 #include <grpc/grpc_security_constants.h>
 #include <grpcpp/create_channel.h>
@@ -102,6 +103,10 @@ std::string PeerFingerprint(const grpc::ServerContext& ctx) {
     std::vector<grpc::string_ref> pems = auth->FindPropertyValues(GRPC_X509_PEM_CERT_PROPERTY_NAME);
     if (pems.empty()) return {};
     return FingerprintOfPem(std::string_view(pems.front().data(), pems.front().size()));
+}
+
+void PrepareGrpcRuntime() {
+    (void)absl::base_internal::NominalCPUFrequency();
 }
 
 } // namespace zeromesh::net

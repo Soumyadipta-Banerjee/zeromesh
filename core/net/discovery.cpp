@@ -20,8 +20,8 @@ namespace zeromesh::net {
 
 namespace {
 
-constexpr std::string_view kAnnounceTag = "ZM3";
-constexpr std::string_view kDrainTag = "ZM3D";
+constexpr std::string_view kAnnounceTag = "ZM4";
+constexpr std::string_view kDrainTag = "ZM4D";
 constexpr size_t kBootIdHexLen = 32;
 constexpr std::string_view kAnnounceLabel = "zm-announce";
 constexpr std::string_view kDrainLabel = "zm-drain";
@@ -181,12 +181,16 @@ std::string FormatAnnouncement(const AnnounceFields& a, const TeamKey& key) {
     body += t.on_ac ? '1' : '0';
     body += '\t';
     body += StateName(a.state);
+    body += '\t';
+    AppendNumber(body, t.mem_total);
+    body += '\t';
+    AppendNumber(body, t.gpus);
     return Sign(std::move(body), kAnnounceLabel, key);
 }
 
 std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, const TeamKey& key,
                                                     std::string_view self_node_id) {
-    const auto f = OpenEnvelope(packet, kAnnounceTag, 17, kAnnounceLabel, key, self_node_id);
+    const auto f = OpenEnvelope(packet, kAnnounceTag, 19, kAnnounceLabel, key, self_node_id);
     if (!f) return std::nullopt;
     const auto& v = *f;
 
@@ -198,6 +202,9 @@ std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, con
     const auto mem_available = ParseNumber<uint64_t>(v[11]);
     const auto cpu_load = ParseNumber<double>(v[12]);
     const auto battery = ParseNumber<int>(v[13]);
+    const auto mem_total = ParseNumber<uint64_t>(v[16]);
+    const auto gpus = ParseNumber<int>(v[17]);
+    if (!mem_total || !gpus || *gpus < 0) return std::nullopt;
     if (!seq || *seq == 0 || !timestamp_ms || *timestamp_ms <= 0) return std::nullopt;
     if (!node_port || *node_port < 1 || *node_port > 65535) return std::nullopt;
     if (!cores_total || *cores_total < 0 || !cores_free || *cores_free < 0) return std::nullopt;
@@ -230,6 +237,8 @@ std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, con
     out.peer.battery_pct = *battery;
     out.peer.is_charging = v[14] == "1";
     out.peer.state = state;
+    out.peer.memory_bytes = *mem_total;
+    out.peer.gpus = *gpus;
     return out;
 }
 
@@ -469,7 +478,7 @@ void Discovery::HandlePacket(std::string_view packet, const std::string& sender_
     const auto team = Team();
     if (!team || !peer_table_) return;
 
-    if (packet.starts_with("ZM3\t")) {
+    if (packet.starts_with("ZM4\t")) {
         auto parsed = ParseAnnouncement(packet, *team, config_.node_id);
         if (!parsed) return;
         if (!replay_.Accept(parsed->peer.id, parsed->boot_id, parsed->seq, parsed->timestamp_ms)) {
@@ -484,7 +493,7 @@ void Discovery::HandlePacket(std::string_view packet, const std::string& sender_
         peer.ip_address = sender_ip;
         peer.last_seen = std::chrono::steady_clock::now();
         peer_table_->Upsert(std::move(peer));
-    } else if (packet.starts_with("ZM3D\t")) {
+    } else if (packet.starts_with("ZM4D\t")) {
         if (auto drain = ParseDrain(packet, *team, config_.node_id)) {
             if (!replay_.Accept(drain->node_id, drain->boot_id, drain->seq, drain->timestamp_ms)) {
                 return;

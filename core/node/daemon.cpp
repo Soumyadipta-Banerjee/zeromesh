@@ -1,8 +1,8 @@
 #include "node/daemon.hpp"
 
 #include "plugins/env-host/env_host.hpp"
-#include "plugins/env-mirror/env_mirror.hpp"
-#include "exec/sandbox_runner.hpp"
+#include "plugins/env-tree/env_tree.hpp"
+#include "exec/batch_runner.hpp"
 #include "net/discovery.hpp"
 #include "net/identity.hpp"
 #include "net/peer_table.hpp"
@@ -10,15 +10,18 @@
 #include "net/team.hpp"
 #include "net/telemetry.hpp"
 #include "net/tls.hpp"
-#include "node/action_cache.hpp"
 #include "node/client_service.hpp"
 #include "node/comfort_governor.hpp"
 #include "node/departure.hpp"
 #include "node/donor_policy.hpp"
-#include "node/job_manager.hpp"
 #include "node/local_executor.hpp"
 #include "node/node_client.hpp"
 #include "node/node_service.hpp"
+#include "node/peer_team.hpp"
+#include "node/version_probe.hpp"
+#include "run/item_cache.hpp"
+#include "run/resources.hpp"
+#include "run/run_engine.hpp"
 #include "node/state.hpp"
 #include "plugin/client_api_handle.hpp"
 #include "plugin/loader.hpp"
@@ -203,7 +206,7 @@ int Daemon::Run() {
 
     std::unique_ptr<grpc::Server> client_server;
     std::unique_ptr<grpc::Server> node_server;
-    std::shared_ptr<JobManager> jobs;
+    std::shared_ptr<run::RunEngine> engine;
     std::shared_ptr<LocalExecutor> local_executor;
     std::shared_ptr<sched::Placer> placer;
     std::unique_ptr<ClientService> client_service;
@@ -212,7 +215,8 @@ int Daemon::Run() {
     std::shared_ptr<sched::HazardModel> hazard;      // departures of the peers we place work on
     std::shared_ptr<sched::HazardModel> self_hazard; // this node's own restarts, reported to requesters
     std::shared_ptr<store::CasStore> cas;
-    std::shared_ptr<ActionCache> cache;
+    std::shared_ptr<run::ItemCache> cache;
+    std::shared_ptr<exec::BatchRunner> runner;
     std::shared_ptr<net::Discovery> discovery;
     std::shared_ptr<TeamState> team;
     std::shared_ptr<net::PinStore> pins;
@@ -313,12 +317,13 @@ int Daemon::Run() {
         }
         cas = std::make_shared<store::CasStore>(config_.state_dir / "cas", cas_limits);
         auto merkle = std::make_shared<store::MerkleBuilder>(cas);
-        auto runner = std::make_shared<exec::SandboxRunner>(cas, merkle, config_.state_dir / "scratch");
+        runner = std::make_shared<exec::BatchRunner>(cas, merkle, config_.state_dir / "scratch");
+        if (!runner->unavailable().empty()) std::cerr << "zmd: cannot run batches here: " << runner->unavailable() << "\n";
         registry = std::make_shared<plugin::Registry>();
         registry->RegisterEnv(envhost::Make());
-        registry->RegisterEnv(mirror::MakeMirrorEnv());
+        registry->RegisterEnv(tree::MakeTreeEnv());
         registry->LoadSearchPath();
-        cache = std::make_shared<ActionCache>(cas);
+        cache = std::make_shared<run::ItemCache>(cas, merkle);
         peers = std::make_shared<net::PeerTable>();
         hazard = std::make_shared<sched::HazardModel>(config_.state_dir / "hazard.log");
         sched::ObservePeers(*peers, hazard);
@@ -369,19 +374,42 @@ int Daemon::Run() {
         // Leave a spare core on larger machines so zmd/OS stay responsive. On dual-core donors
         // (common in small VMs) hw-1 leaves a single slot and loses to distcc-style N/N hosts.
         int slots = hw <= 2 ? std::max(1, hw) : std::max(1, hw - 1);
-        local_executor = std::make_shared<LocalExecutor>(runner, registry, node_id, slots,
-                                                         config_.state_dir / "scratch", cas, client_for_node);
+        local_executor =
+            std::make_shared<LocalExecutor>(runner, registry, node_id, slots, config_.state_dir, cas, client_for_node);
 
         placer =
             std::make_shared<sched::Placer>(local_executor, peers, client_factory, cas, merkle, node_id, telemetry_fn);
         placer->SetHazardModel(hazard);
-        jobs = std::make_shared<JobManager>(cas, merkle, cache, placer);
+        auto team_cache = std::make_shared<PeerTeam>(peers, client_for_node, cas, node_id);
+        run::EngineDeps deps;
+        deps.cas = cas;
+        deps.merkle = merkle;
+        deps.cache = cache;
+        deps.executor = placer;
+        deps.resources = std::make_shared<run::ResourceModel>(config_.state_dir / "resources.tsv");
+        deps.team = team_cache;
+        deps.slots = [p = placer.get()](const v1::Resources& r, v1::Where w) { return p->SlotsFor(r, w); };
+        deps.hostname = [peers, node_id](const std::string& id) {
+            if (id == node_id) return Hostname();
+            if (auto p = peers->Get(id); p && !p->hostname.empty()) return p->hostname;
+            return id.substr(0, 8);
+        };
+        deps.runs_dir = config_.state_dir / "runs";
+        deps.node_id = node_id;
+        deps.arch = telemetry_fn().arch;
+        engine = std::make_shared<run::RunEngine>(std::move(deps));
 
         ClientServiceOptions opts;
         opts.node_id = node_id;
         opts.node_port = config_.node_port;
         opts.upload_limit_bytes = UploadLimitFromEnv();
-        client_service = std::make_unique<ClientService>(cas, merkle, jobs, peers, opts, team, local_executor);
+        opts.state_dir = config_.state_dir;
+        ClientServiceParts parts;
+        parts.engine = engine;
+        parts.cache = cache;
+        parts.team_cache = team_cache;
+        parts.local_executor = local_executor;
+        client_service = std::make_unique<ClientService>(cas, merkle, peers, opts, std::move(parts), team);
 
         DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
         drain_controller.SetPolicy(policy);
@@ -398,6 +426,10 @@ int Daemon::Run() {
             policy, peers);
         node_service->SetComfortLevelProvider([g = comfort.get()] { return g->level(); });
         node_service->SetPeerClientFactory(client_for_node); // lets this donor seed from peers
+        node_service->SetItemCache(cache);                   // answers the team's cache lookups
+        auto prober = std::make_shared<VersionProber>(runner, registry, node_id);
+        node_service->SetVersionProbe(
+            [prober](const v1::Program& p, const std::string& resolved) { return (*prober)(p, resolved); });
         // max_copies from donor.toml; the hazard model supplies each donor's survival odds.
         auto hedge_cfg = sched::Placer::HedgeConfig::FromPolicy(policy);
         hedge_cfg.survival = sched::HazardModel::MakeSurvivalFn(hazard);
@@ -565,7 +597,8 @@ int Daemon::Run() {
             }
         });
 
-        // Reclaim CAS toward 90% of the cap. Protected digests are inputs of live jobs.
+        // Reclaim CAS toward 90% of the cap. Protected digests are inputs and fresh outputs of live
+        // runs and batches. Idle input trees go first: their hard links would keep blobs alive.
         gc_thread = std::thread([&]() {
             while (!admit_stop.load()) {
                 if (cas) {
@@ -574,12 +607,13 @@ int Daemon::Run() {
                     if (node_service) {
                         for (const auto& h : node_service->ProtectedBlobHashes()) protect.insert(h);
                     }
-                    if (jobs) {
-                        for (const auto& h : jobs->ProtectedBlobHashes()) protect.insert(h);
+                    if (runner) runner->PruneInputs(std::chrono::minutes(30));
+                    if (engine) {
+                        for (const auto& h : engine->ProtectedBlobHashes()) protect.insert(h);
                     }
                     cas->CollectGarbage(target, protect);
                 }
-                if (cache) cache->PruneStale();
+                if (cache) cache->Prune();
                 for (int i = 0; i < 300 && !admit_stop.load(); ++i) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
@@ -659,7 +693,7 @@ int Daemon::Run() {
     client_server.reset();
     node_service.reset();
     client_service.reset();
-    jobs.reset();   // cancels unfinished jobs
+    engine.reset(); // cancels unfinished runs
     placer.reset(); // cancels remote work and joins workers
     {
         std::lock_guard lock(clients_mu);

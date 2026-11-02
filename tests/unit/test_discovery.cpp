@@ -74,7 +74,7 @@ DiscoveryConfig LoopbackConfig(const std::string& id, int port, const TeamKey& k
 TEST(AnnounceRoundTrip) {
     const TeamKey key = GenerateTeamKey();
     const auto packet = FormatAnnouncement(SampleFields(), key);
-    ASSERT_TRUE(packet.starts_with("ZM3\t" + TeamId(key) + "\t"));
+    ASSERT_TRUE(packet.starts_with("ZM4\t" + TeamId(key) + "\t"));
 
     const auto parsed = ParseAnnouncement(packet, key, "self");
     ASSERT_TRUE(parsed.has_value());
@@ -103,7 +103,7 @@ TEST(AnnounceTamperedRejected) {
     ASSERT_TRUE(pos != std::string::npos);
     packet[pos + 1] = '2';
     ASSERT_FALSE(ParseAnnouncement(packet, key, "self").has_value());
-    ASSERT_FALSE(ParseAnnouncement("ZM3\tgarbage", key, "self").has_value());
+    ASSERT_FALSE(ParseAnnouncement("ZM4\tgarbage", key, "self").has_value());
 }
 
 TEST(AnnounceSelfIgnored) {

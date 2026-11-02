@@ -4,11 +4,9 @@
 
 #include "tests/unit/node_fixture.hpp"
 
-#include "exec/sandbox_runner.hpp"
-#include "node/action_cache.hpp"
+#include "exec/cgroup.hpp"
 #include "node/departure.hpp"
 #include "node/donor_policy.hpp"
-#include "node/job_manager.hpp"
 #include "sched/placer.hpp"
 
 #include <atomic>
@@ -43,13 +41,10 @@ void Expect(bool cond, const std::string& what) {
     if (!cond) throw std::runtime_error(what);
 }
 
-v1::TaskSpec Shell(const std::string& script) {
-    v1::TaskSpec t;
-    t.set_name("t");
-    t.add_argv("sh");
-    t.add_argv("-c");
-    t.add_argv(script);
-    return t;
+v1::BatchSpec Shell(const std::string& script, const std::string& kind = "") {
+    auto b = zeromesh::testing::ShBatch({{"t", script}});
+    b.set_kind(kind);
+    return b;
 }
 
 // Records every freeze/thaw the service asks for.
@@ -77,27 +72,43 @@ struct FakeFreezer {
     }
 };
 
-// One task running on donor `b` for requester `a`, driven through the real NodeApi.
+// One single-item batch running on donor `b` for requester `a`, driven through the real NodeApi.
+// `result` is how it ended: `cancelled` when the donor stopped it, else the item's outcome.
+struct RemoteResult {
+    bool cancelled{false};
+    int exit_code{-1};
+    std::string stdout_tail;
+};
 struct RemoteRun {
     std::shared_ptr<zeromesh::node::NodeClient> client;
     std::string id;
     std::thread th;
-    std::optional<v1::TaskResult> result;
+    std::optional<RemoteResult> result;
     std::string run_err;
     std::atomic<bool> running{false};
 
-    RemoteRun(TestNodeFull& a, TestNodeFull& b, std::string task_id, const v1::TaskSpec& spec)
-        : client(a.ClientTo(b)), id(std::move(task_id)) {
+    RemoteRun(TestNodeFull& a, TestNodeFull& b, std::string batch_id, const v1::BatchSpec& spec)
+        : client(a.ClientTo(b)), id(std::move(batch_id)) {
         std::string err;
         auto reply = client->Offer(id, spec, {}, &err);
         Expect(reply.has_value() && reply->accepted(), err + (reply ? reply->reason() : ""));
         th = std::thread([this] {
-            result = client->Run(
+            std::optional<v1::ItemOutcome> outcome;
+            auto finished = client->Run(
                 id,
-                [this](const v1::JobEvent& ev) {
-                    if (ev.state() == v1::RUNNING) running = true;
+                [this, &outcome](const v1::BatchEvent& ev) {
+                    if (ev.has_started()) running = true;
+                    if (ev.has_done()) outcome = ev.done();
                 },
                 &run_err);
+            if (!finished) return;
+            RemoteResult r;
+            r.cancelled = finished->cancelled() && !outcome;
+            if (outcome) {
+                r.exit_code = outcome->exit_code();
+                r.stdout_tail = outcome->stdout_tail();
+            }
+            result = r;
         });
         const auto deadline = Clock::now() + 10s;
         while (!running && Clock::now() < deadline) std::this_thread::sleep_for(10ms);
@@ -113,22 +124,6 @@ struct RemoteRun {
             client->Cancel(id);
             th.join();
         }
-    }
-};
-
-struct Requester {
-    std::shared_ptr<zeromesh::sched::Placer> placer;
-    std::unique_ptr<zeromesh::node::JobManager> jm;
-
-    explicit Requester(TestNodeFull& self) {
-        auto factory = [&self](const zeromesh::net::Peer& p) {
-            return std::make_shared<zeromesh::node::NodeClient>(p.ip_address + ":" + std::to_string(p.node_port),
-                                                                self.id, self.pins, p.id);
-        };
-        placer = std::make_shared<zeromesh::sched::Placer>(self.executor, self.peers, factory, self.cas, self.merkle,
-                                                           self.node_id, [&self] { return self.telemetry; });
-        jm = std::make_unique<zeromesh::node::JobManager>(
-            self.cas, self.merkle, std::make_shared<zeromesh::node::ActionCache>(self.cas), placer);
     }
 };
 
@@ -176,31 +171,20 @@ TEST(DepartureReasonKeepsFreeTextAndIgnoresPlainReasons) {
 
 // ---- runtime history ------------------------------------------------------------------------
 
-TEST(RuntimeHistorySmoothsDurationsAndSurvivesRestart) {
+TEST(RuntimeHistorySmoothsDurationsPerKindAndSurvivesRestart) {
     TempDir tmp;
     const auto file = tmp / "runtime_history.tsv";
-    v1::TaskSpec spec = Shell("render frame");
-    v1::TaskSpec other = Shell("something else");
     {
         RuntimeHistory h(file);
-        ASSERT_FALSE(h.Expected(spec).has_value());
-        h.Record(spec, 10000);
-        ASSERT_EQ(h.Expected(spec).value(), static_cast<int64_t>(10000));
-        h.Record(spec, 20000);
-        ASSERT_EQ(h.Expected(spec).value(), static_cast<int64_t>(15000)); // average of old and new
-        ASSERT_FALSE(h.Expected(other).has_value());
+        ASSERT_FALSE(h.Expected("render").has_value());
+        h.Record("render", 10000);
+        ASSERT_EQ(h.Expected("render").value(), static_cast<int64_t>(10000));
+        h.Record("render", 20000);
+        ASSERT_EQ(h.Expected("render").value(), static_cast<int64_t>(15000)); // average of old and new
+        ASSERT_FALSE(h.Expected("compile").has_value());
     }
     RuntimeHistory reloaded(file);
-    ASSERT_EQ(reloaded.Expected(spec).value(), static_cast<int64_t>(15000));
-}
-
-TEST(RuntimeHistoryTreatsAnUnsetEnvNameAsHost) {
-    RuntimeHistory h;
-    v1::TaskSpec raw = Shell("x");
-    v1::TaskSpec normalized = raw;
-    normalized.mutable_env_spec()->set_name("host");
-    h.Record(raw, 1234);
-    ASSERT_EQ(h.Expected(normalized).value(), static_cast<int64_t>(1234));
+    ASSERT_EQ(reloaded.Expected("render").value(), static_cast<int64_t>(15000));
 }
 
 // ---- the plan: what keeps running, what freezes ---------------------------------------------
@@ -368,7 +352,7 @@ TEST(DepartureFreezesUnknownTasksAndKillsThemWhenTheTtlExpires) {
     ASSERT_EQ(b.service->TickDeparture(t0 + 600ms), 1); // ttl over: kill, the requester re-dispatches
     run.Join();
     ASSERT_TRUE(run.result.has_value());
-    ASSERT_TRUE(run.result->cancelled());
+    ASSERT_TRUE(run.result->cancelled);
 }
 
 TEST(DepartureEndThawsFrozenTasksAndLetsThemFinish) {
@@ -391,8 +375,8 @@ TEST(DepartureEndThawsFrozenTasksAndLetsThemFinish) {
     ASSERT_FALSE(b.service->Departing());
     run.Join(); // the (fake) freeze never stopped the process; it runs to completion
     ASSERT_TRUE(run.result.has_value());
-    ASSERT_EQ(run.result->exit_code(), 0);
-    ASSERT_EQ(run.result->stdout_head(), std::string("survived\n"));
+    ASSERT_EQ(run.result->exit_code, 0);
+    ASSERT_EQ(run.result->stdout_tail, std::string("survived\n"));
 }
 
 TEST(DepartureKeepsATaskThatFitsTheGraceWindow) {
@@ -404,8 +388,8 @@ TEST(DepartureKeepsATaskThatFitsTheGraceWindow) {
     FakeFreezer fz;
     b.service->SetTaskFreezer(fz.Fn());
     auto history = std::make_shared<RuntimeHistory>();
-    const v1::TaskSpec spec = Shell("sleep 30");
-    history->Record(spec, 2000); // this command usually takes 2 s
+    const v1::BatchSpec spec = Shell("sleep 30", "sleeper");
+    history->Record("sleeper", 2000); // this kind of item usually takes 2 s
     b.service->SetRuntimeHistory(history);
     RemoteRun run(a, b, "t1", spec);
 
@@ -427,8 +411,8 @@ TEST(DepartureFreezesAKeptTaskOnceTheGraceWindowRunsOut) {
     FakeFreezer fz;
     b.service->SetTaskFreezer(fz.Fn());
     auto history = std::make_shared<RuntimeHistory>();
-    const v1::TaskSpec spec = Shell("sleep 30");
-    history->Record(spec, 100); // the estimate was wrong: it is still running after the grace
+    const v1::BatchSpec spec = Shell("sleep 30", "sleeper");
+    history->Record("sleeper", 100); // the estimate was wrong: it is still running after the grace
     b.service->SetRuntimeHistory(history);
     RemoteRun run(a, b, "t1", spec);
 
@@ -440,7 +424,7 @@ TEST(DepartureFreezesAKeptTaskOnceTheGraceWindowRunsOut) {
     ASSERT_EQ(b.service->TickDeparture(t0 + 1000ms), 0);
     ASSERT_EQ(b.service->TickDeparture(t0 + 1800ms), 1); // 700 ms + 1000 ms ttl
     run.Join();
-    ASSERT_TRUE(run.result.has_value() && run.result->cancelled());
+    ASSERT_TRUE(run.result.has_value() && run.result->cancelled);
 }
 
 TEST(DepartureNeverTouchesANonPreemptibleTask) {
@@ -451,8 +435,8 @@ TEST(DepartureNeverTouchesANonPreemptibleTask) {
     a.Admit(b);
     FakeFreezer fz;
     b.service->SetTaskFreezer(fz.Fn());
-    v1::TaskSpec spec = Shell("sleep 30");
-    spec.mutable_policy()->set_preemptible(false);
+    v1::BatchSpec spec = Shell("sleep 30");
+    spec.set_preemptible(false);
     RemoteRun run(a, b, "t1", spec);
 
     const auto t0 = Clock::now();
@@ -478,7 +462,7 @@ TEST(DepartureFallsBackToKillingWhenTasksCannotBeFrozen) {
     ASSERT_EQ(rep.frozen, 0);
     ASSERT_EQ(rep.cancelled, 1);
     run.Join();
-    ASSERT_TRUE(run.result.has_value() && run.result->cancelled());
+    ASSERT_TRUE(run.result.has_value() && run.result->cancelled);
 }
 
 TEST(DepartureWithoutAFreezerBehavesLikeTheOldDrain) {
@@ -491,7 +475,7 @@ TEST(DepartureWithoutAFreezerBehavesLikeTheOldDrain) {
     auto rep = b.service->BeginDeparture(v1::DEPARTURE_BATTERY, 60000ms, 0ms);
     ASSERT_EQ(rep.cancelled, 1);
     run.Join();
-    ASSERT_TRUE(run.result.has_value() && run.result->cancelled());
+    ASSERT_TRUE(run.result.has_value() && run.result->cancelled);
 }
 
 TEST(DepartureRefusesNewOffers) {
@@ -537,14 +521,14 @@ TEST(DrainNoticeCarriesReasonCodeAndTtlToThePeerTable) {
 // ---- real kernel freezer through the sandbox runner -----------------------------------------
 
 TEST(DepartureFreezesARealSandboxCgroupAndItResumes) {
-    if (!zeromesh::exec::DelegatedCgroupParent()) return; // no delegated cgroup v2 subtree here
+    if (!zeromesh::exec::cgroup::DelegatedParent()) return; // no delegated cgroup v2 subtree here
     auto key = zeromesh::net::GenerateTeamKey();
     TestNodeFull a("node-a", key), b("node-b", key);
     a.Start();
     b.Start();
     a.Admit(b);
     b.service->SetTaskFreezer(
-        [&b](const std::string& id, bool freeze) { return b.runner->SetTaskFrozen(id, freeze); });
+        [&b](const std::string& id, bool freeze) { return b.runner->SetFrozen(id, freeze); });
     RemoteRun run(a, b, "t1", Shell("sleep 2; echo done"));
 
     std::optional<std::filesystem::path> dir;
@@ -561,8 +545,8 @@ TEST(DepartureFreezesARealSandboxCgroupAndItResumes) {
     Expect(WaitFrozen(*dir, false), "cgroup never thawed");
     run.Join();
     ASSERT_TRUE(run.result.has_value());
-    ASSERT_EQ(run.result->exit_code(), 0);
-    ASSERT_EQ(run.result->stdout_head(), std::string("done\n"));
+    ASSERT_EQ(run.result->exit_code, 0);
+    ASSERT_EQ(run.result->stdout_tail, std::string("done\n"));
 }
 
 // ---- requester side: a freeze-first donor is waited for, not cancelled ----------------------
@@ -574,35 +558,15 @@ TEST(PlacerWaitsForAFreezeFirstDonorInsteadOfCancelling) {
     b.Start();
     a.Admit(b);
     a.peers->Upsert(b.AsPeer());
-    Requester req(a);
-
-    v1::JobSpec job;
-    job.set_name("j");
-    auto* t = job.add_tasks();
-    *t = Shell("sleep 2; echo finished");
-    t->set_name("t");
-    t->mutable_policy()->set_may_run_local(false);
-    const std::string id = req.jm->Submit(job);
-    auto stream = req.jm->Watch(id);
-    bool running = false;
-    const auto start_deadline = Clock::now() + 10s;
-    while (!running && Clock::now() < start_deadline) {
-        auto ev = stream->Next(100ms);
-        if (ev && ev->state() == v1::RUNNING) running = true;
-    }
-    ASSERT_TRUE(running);
+    zeromesh::testing::PlacerRequester req(a);
+    auto& log = req.Execute(Shell("sleep 2; echo finished"));
+    ASSERT_TRUE(log.WaitStarted());
 
     // The donor announces a freeze-first departure; the placer must not cancel the run.
     a.peers->MarkDraining("node-b", FormatDepartureReason(v1::DEPARTURE_LID, 60000));
-
-    const auto done_deadline = Clock::now() + 30s;
-    while (!req.jm->Get(id)->done() && Clock::now() < done_deadline) std::this_thread::sleep_for(50ms);
-    auto st = req.jm->Get(id);
-    ASSERT_TRUE(st->done());
-    Expect(st->tasks().at("t") == v1::SUCCEEDED, st->results().at("t").error());
-    ASSERT_EQ(st->results().at("t").executed_by(), std::string("node-b"));
-    ASSERT_EQ(st->results().at("t").stdout_head(), std::string("finished\n"));
-    while (auto ev = stream->Next(10ms)) {
-        ASSERT_FALSE(ev->state() == v1::QUEUED && ev->detail().find("retry ") == 0);
-    }
+    ASSERT_TRUE(log.Wait(30s));
+    Expect(log.result.failure == v1::FAILURE_NONE, log.result.message);
+    ASSERT_EQ(log.result.node, std::string("node-b"));
+    ASSERT_EQ(log.items.size(), 1u);
+    ASSERT_EQ(log.items[0].first.stdout_tail(), std::string("finished\n"));
 }

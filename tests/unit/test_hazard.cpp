@@ -338,12 +338,7 @@ TEST(OfferReplyCarriesDonorHazardWhenKnown) {
     b.Start();
     a.Admit(b);
 
-    zeromesh::v1::TaskSpec spec;
-    spec.set_name("h");
-    spec.add_argv("sh");
-    spec.add_argv("-c");
-    spec.add_argv("echo h");
-    spec.mutable_policy()->set_may_run_local(false);
+    const auto spec = zeromesh::testing::ShBatch({{"h", "echo h"}});
 
     auto client = a.ClientTo(b);
     std::string err;
