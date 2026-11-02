@@ -23,39 +23,60 @@ _sym_db = _symbol_database.Default()
 
 
 from zeromesh.v1 import common_pb2 as zeromesh_dot_v1_dot_common__pb2
+from zeromesh.v1 import run_pb2 as zeromesh_dot_v1_dot_run__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18zeromesh/v1/client.proto\x12\x0bzeromesh.v1\x1a\x18zeromesh/v1/common.proto\"6\n\x0fPutObjectsReply\x12#\n\x06stored\x18\x01 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"6\n\x11UploadTreeRequest\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x13\n\x0b\x66orce_large\x18\x02 \x01(\x08\"I\n\x0fUploadTreeReply\x12!\n\x04root\x18\x01 \x01(\x0b\x32\x13.zeromesh.v1.Digest\x12\x13\n\x0btotal_bytes\x18\x02 \x01(\x03\"\x1d\n\x0bSubmitReply\x12\x0e\n\x06job_id\x18\x01 \x01(\t\"\x18\n\x06JobRef\x12\x0e\n\x06job_id\x18\x01 \x01(\t\"Z\n\x0c\x46\x65tchRequest\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12\x11\n\ttask_name\x18\x02 \x01(\t\x12\x11\n\tdest_path\x18\x03 \x01(\t\x12\x14\n\x0conly_changed\x18\x04 \x01(\x08\"\x1d\n\nFetchReply\x12\x0f\n\x07written\x18\x01 \x03(\t\"0\n\x08PeerList\x12$\n\x05peers\x18\x01 \x03(\x0b\x32\x15.zeromesh.v1.PeerInfo\":\n\x10\x41\x63tivitySnapshot\x12&\n\x05tasks\x18\x01 \x03(\x0b\x32\x17.zeromesh.v1.ActiveTask\"!\n\x0fTeamSecretReply\x12\x0e\n\x06phrase\x18\x01 \x01(\t\"!\n\x0fTeamJoinRequest\x12\x0e\n\x06phrase\x18\x01 \x01(\t\"G\n\rTeamInfoReply\x12\x0f\n\x07in_team\x18\x01 \x01(\x08\x12\x0f\n\x07team_id\x18\x02 \x01(\t\x12\x14\n\x0cpeers_pinned\x18\x03 \x01(\x05\x32\xd9\x07\n\tClientApi\x12@\n\nPutObjects\x12\x12.zeromesh.v1.Chunk\x1a\x1c.zeromesh.v1.PutObjectsReply(\x01\x12\x38\n\nGetObjects\x12\x14.zeromesh.v1.Digests\x1a\x12.zeromesh.v1.Chunk0\x01\x12\x39\n\x0b\x46indMissing\x12\x14.zeromesh.v1.Digests\x1a\x14.zeromesh.v1.Digests\x12J\n\nUploadTree\x12\x1e.zeromesh.v1.UploadTreeRequest\x1a\x1c.zeromesh.v1.UploadTreeReply\x12;\n\tSubmitJob\x12\x14.zeromesh.v1.JobSpec\x1a\x18.zeromesh.v1.SubmitReply\x12\x38\n\x08WatchJob\x12\x13.zeromesh.v1.JobRef\x1a\x15.zeromesh.v1.JobEvent0\x01\x12\x35\n\x06GetJob\x12\x13.zeromesh.v1.JobRef\x1a\x16.zeromesh.v1.JobStatus\x12\x34\n\tCancelJob\x12\x13.zeromesh.v1.JobRef\x1a\x12.zeromesh.v1.Empty\x12\x42\n\x0c\x46\x65tchOutputs\x12\x19.zeromesh.v1.FetchRequest\x1a\x17.zeromesh.v1.FetchReply\x12\x36\n\tListPeers\x12\x12.zeromesh.v1.Empty\x1a\x15.zeromesh.v1.PeerList\x12\x41\n\x0cListActivity\x12\x12.zeromesh.v1.Empty\x1a\x1d.zeromesh.v1.ActivitySnapshot\x12\x37\n\rClearActivity\x12\x12.zeromesh.v1.Empty\x1a\x12.zeromesh.v1.Empty\x12>\n\nTeamCreate\x12\x12.zeromesh.v1.Empty\x1a\x1c.zeromesh.v1.TeamSecretReply\x12<\n\x08TeamJoin\x12\x1c.zeromesh.v1.TeamJoinRequest\x1a\x12.zeromesh.v1.Empty\x12\x33\n\tTeamLeave\x12\x12.zeromesh.v1.Empty\x1a\x12.zeromesh.v1.Empty\x12:\n\x08TeamInfo\x12\x12.zeromesh.v1.Empty\x1a\x1a.zeromesh.v1.TeamInfoReplyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18zeromesh/v1/client.proto\x12\x0bzeromesh.v1\x1a\x18zeromesh/v1/common.proto\x1a\x15zeromesh/v1/run.proto\"6\n\x0fPutObjectsReply\x12#\n\x06stored\x18\x01 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"B\n\x0fSnapshotRequest\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x13\n\x0b\x66orce_large\x18\x02 \x01(\x08\x12\x0c\n\x04list\x18\x03 \x01(\x08\"\'\n\x08\x46ileSize\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\r\n\x05\x62ytes\x18\x02 \x01(\x03\"\xb1\x01\n\rSnapshotReply\x12!\n\x04root\x18\x01 \x01(\x0b\x32\x13.zeromesh.v1.Digest\x12\x13\n\x0btotal_bytes\x18\x02 \x01(\x03\x12\r\n\x05\x66iles\x18\x03 \x01(\x03\x12\x10\n\x08rehashed\x18\x04 \x01(\x03\x12\x0e\n\x06\x64\x65nied\x18\x05 \x03(\t\x12&\n\x07largest\x18\x06 \x03(\x0b\x32\x15.zeromesh.v1.FileSize\x12\x0f\n\x07warning\x18\x07 \x01(\t\"\x15\n\x05Probe\x12\x0c\n\x04\x61rgv\x18\x01 \x03(\t\"P\n\x0e\x43\x61ptureRequest\x12\"\n\x06probes\x18\x01 \x03(\x0b\x32\x12.zeromesh.v1.Probe\x12\r\n\x05paths\x18\x02 \x03(\t\x12\x0b\n\x03\x63wd\x18\x03 \x01(\t\"}\n\x0c\x43\x61ptureReply\x12!\n\x04tree\x18\x01 \x01(\x0b\x32\x13.zeromesh.v1.Digest\x12\r\n\x05\x66iles\x18\x02 \x01(\x03\x12\r\n\x05\x62ytes\x18\x03 \x01(\x03\x12\x0e\n\x06\x64\x65nied\x18\x04 \x03(\t\x12\x0c\n\x04note\x18\x05 \x01(\t\x12\x0e\n\x06reused\x18\x06 \x01(\x08\"\x18\n\x06RunRef\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"C\n\x0f\x41\x64\x64ItemsRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12 \n\x05items\x18\x02 \x03(\x0b\x32\x11.zeromesh.v1.Item\"2\n\x0cWatchRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x12\n\nfrom_start\x18\x02 \x01(\x08\"/\n\x07RunList\x12$\n\x04runs\x18\x01 \x03(\x0b\x32\x16.zeromesh.v1.RunStatus\":\n\rForgetRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x0b\n\x03\x61ll\x18\x02 \x01(\x08\x12\x0c\n\x04team\x18\x03 \x01(\x08\" \n\x0b\x46orgetReply\x12\x11\n\tforgotten\x18\x01 \x01(\x03\"0\n\x08PeerList\x12$\n\x05peers\x18\x01 \x03(\x0b\x32\x15.zeromesh.v1.PeerInfo\"\x8b\x01\n\x0b\x41\x63tiveBatch\x12\r\n\x05\x62\x61tch\x18\x01 \x01(\t\x12\x11\n\trequester\x18\x02 \x01(\t\x12\x0c\n\x04kind\x18\x03 \x01(\t\x12\r\n\x05items\x18\x04 \x01(\x05\x12\x0c\n\x04\x64one\x18\x05 \x01(\x05\x12\x0f\n\x07\x63urrent\x18\x06 \x01(\t\x12\r\n\x05\x63ores\x18\x07 \x01(\x05\x12\x0f\n\x07running\x18\x08 \x01(\x08\"c\n\x10\x41\x63tivitySnapshot\x12$\n\x04runs\x18\x01 \x03(\x0b\x32\x16.zeromesh.v1.RunStatus\x12)\n\x07\x62\x61tches\x18\x02 \x03(\x0b\x32\x18.zeromesh.v1.ActiveBatch\"_\n\x07\x46inding\x12\r\n\x05\x63heck\x18\x01 \x01(\t\x12\'\n\x08severity\x18\x02 \x01(\x0e\x32\x15.zeromesh.v1.Severity\x12\x0f\n\x07message\x18\x03 \x01(\t\x12\x0b\n\x03\x66ix\x18\x04 \x01(\t\"5\n\x0b\x44octorReply\x12&\n\x08\x66indings\x18\x01 \x03(\x0b\x32\x14.zeromesh.v1.Finding\"!\n\x0fTeamSecretReply\x12\x0e\n\x06phrase\x18\x01 \x01(\t\"!\n\x0fTeamJoinRequest\x12\x0e\n\x06phrase\x18\x01 \x01(\t\"G\n\rTeamInfoReply\x12\x0f\n\x07in_team\x18\x01 \x01(\x08\x12\x0f\n\x07team_id\x18\x02 \x01(\t\x12\x14\n\x0cpeers_pinned\x18\x03 \x01(\x05*B\n\x08Severity\x12\x0f\n\x0bSEVERITY_OK\x10\x00\x12\x11\n\rSEVERITY_WARN\x10\x01\x12\x12\n\x0eSEVERITY_ERROR\x10\x02\x32\xb1\n\n\tClientApi\x12@\n\nPutObjects\x12\x12.zeromesh.v1.Chunk\x1a\x1c.zeromesh.v1.PutObjectsReply(\x01\x12\x38\n\nGetObjects\x12\x14.zeromesh.v1.Digests\x1a\x12.zeromesh.v1.Chunk0\x01\x12\x39\n\x0b\x46indMissing\x12\x14.zeromesh.v1.Digests\x1a\x14.zeromesh.v1.Digests\x12\x44\n\x08Snapshot\x12\x1c.zeromesh.v1.SnapshotRequest\x1a\x1a.zeromesh.v1.SnapshotReply\x12\x44\n\nCaptureEnv\x12\x1b.zeromesh.v1.CaptureRequest\x1a\x19.zeromesh.v1.CaptureReply\x12\x36\n\tSubmitRun\x12\x14.zeromesh.v1.RunSpec\x1a\x13.zeromesh.v1.RunRef\x12<\n\x08\x41\x64\x64Items\x12\x1c.zeromesh.v1.AddItemsRequest\x1a\x12.zeromesh.v1.Empty\x12\x33\n\x08\x43loseRun\x12\x13.zeromesh.v1.RunRef\x1a\x12.zeromesh.v1.Empty\x12>\n\x08WatchRun\x12\x19.zeromesh.v1.WatchRequest\x1a\x15.zeromesh.v1.RunEvent0\x01\x12\x35\n\x06GetRun\x12\x13.zeromesh.v1.RunRef\x1a\x16.zeromesh.v1.RunStatus\x12\x35\n\tGetReport\x12\x13.zeromesh.v1.RunRef\x1a\x13.zeromesh.v1.Report\x12\x34\n\tCancelRun\x12\x13.zeromesh.v1.RunRef\x1a\x12.zeromesh.v1.Empty\x12\x35\n\tResumeRun\x12\x13.zeromesh.v1.RunRef\x1a\x13.zeromesh.v1.RunRef\x12\x34\n\x08ListRuns\x12\x12.zeromesh.v1.Empty\x1a\x14.zeromesh.v1.RunList\x12\x43\n\x0b\x46orgetCache\x12\x1a.zeromesh.v1.ForgetRequest\x1a\x18.zeromesh.v1.ForgetReply\x12\x36\n\tListPeers\x12\x12.zeromesh.v1.Empty\x1a\x15.zeromesh.v1.PeerList\x12\x41\n\x0cListActivity\x12\x12.zeromesh.v1.Empty\x1a\x1d.zeromesh.v1.ActivitySnapshot\x12\x36\n\x06\x44octor\x12\x12.zeromesh.v1.Empty\x1a\x18.zeromesh.v1.DoctorReply\x12>\n\nTeamCreate\x12\x12.zeromesh.v1.Empty\x1a\x1c.zeromesh.v1.TeamSecretReply\x12<\n\x08TeamJoin\x12\x1c.zeromesh.v1.TeamJoinRequest\x1a\x12.zeromesh.v1.Empty\x12\x33\n\tTeamLeave\x12\x12.zeromesh.v1.Empty\x1a\x12.zeromesh.v1.Empty\x12:\n\x08TeamInfo\x12\x12.zeromesh.v1.Empty\x1a\x1a.zeromesh.v1.TeamInfoReplyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'zeromesh.v1.client_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_PUTOBJECTSREPLY']._serialized_start=67
-  _globals['_PUTOBJECTSREPLY']._serialized_end=121
-  _globals['_UPLOADTREEREQUEST']._serialized_start=123
-  _globals['_UPLOADTREEREQUEST']._serialized_end=177
-  _globals['_UPLOADTREEREPLY']._serialized_start=179
-  _globals['_UPLOADTREEREPLY']._serialized_end=252
-  _globals['_SUBMITREPLY']._serialized_start=254
-  _globals['_SUBMITREPLY']._serialized_end=283
-  _globals['_JOBREF']._serialized_start=285
-  _globals['_JOBREF']._serialized_end=309
-  _globals['_FETCHREQUEST']._serialized_start=311
-  _globals['_FETCHREQUEST']._serialized_end=401
-  _globals['_FETCHREPLY']._serialized_start=403
-  _globals['_FETCHREPLY']._serialized_end=432
-  _globals['_PEERLIST']._serialized_start=434
-  _globals['_PEERLIST']._serialized_end=482
-  _globals['_ACTIVITYSNAPSHOT']._serialized_start=484
-  _globals['_ACTIVITYSNAPSHOT']._serialized_end=542
-  _globals['_TEAMSECRETREPLY']._serialized_start=544
-  _globals['_TEAMSECRETREPLY']._serialized_end=577
-  _globals['_TEAMJOINREQUEST']._serialized_start=579
-  _globals['_TEAMJOINREQUEST']._serialized_end=612
-  _globals['_TEAMINFOREPLY']._serialized_start=614
-  _globals['_TEAMINFOREPLY']._serialized_end=685
-  _globals['_CLIENTAPI']._serialized_start=688
-  _globals['_CLIENTAPI']._serialized_end=1673
+  _globals['_SEVERITY']._serialized_start=1545
+  _globals['_SEVERITY']._serialized_end=1611
+  _globals['_PUTOBJECTSREPLY']._serialized_start=90
+  _globals['_PUTOBJECTSREPLY']._serialized_end=144
+  _globals['_SNAPSHOTREQUEST']._serialized_start=146
+  _globals['_SNAPSHOTREQUEST']._serialized_end=212
+  _globals['_FILESIZE']._serialized_start=214
+  _globals['_FILESIZE']._serialized_end=253
+  _globals['_SNAPSHOTREPLY']._serialized_start=256
+  _globals['_SNAPSHOTREPLY']._serialized_end=433
+  _globals['_PROBE']._serialized_start=435
+  _globals['_PROBE']._serialized_end=456
+  _globals['_CAPTUREREQUEST']._serialized_start=458
+  _globals['_CAPTUREREQUEST']._serialized_end=538
+  _globals['_CAPTUREREPLY']._serialized_start=540
+  _globals['_CAPTUREREPLY']._serialized_end=665
+  _globals['_RUNREF']._serialized_start=667
+  _globals['_RUNREF']._serialized_end=691
+  _globals['_ADDITEMSREQUEST']._serialized_start=693
+  _globals['_ADDITEMSREQUEST']._serialized_end=760
+  _globals['_WATCHREQUEST']._serialized_start=762
+  _globals['_WATCHREQUEST']._serialized_end=812
+  _globals['_RUNLIST']._serialized_start=814
+  _globals['_RUNLIST']._serialized_end=861
+  _globals['_FORGETREQUEST']._serialized_start=863
+  _globals['_FORGETREQUEST']._serialized_end=921
+  _globals['_FORGETREPLY']._serialized_start=923
+  _globals['_FORGETREPLY']._serialized_end=955
+  _globals['_PEERLIST']._serialized_start=957
+  _globals['_PEERLIST']._serialized_end=1005
+  _globals['_ACTIVEBATCH']._serialized_start=1008
+  _globals['_ACTIVEBATCH']._serialized_end=1147
+  _globals['_ACTIVITYSNAPSHOT']._serialized_start=1149
+  _globals['_ACTIVITYSNAPSHOT']._serialized_end=1248
+  _globals['_FINDING']._serialized_start=1250
+  _globals['_FINDING']._serialized_end=1345
+  _globals['_DOCTORREPLY']._serialized_start=1347
+  _globals['_DOCTORREPLY']._serialized_end=1400
+  _globals['_TEAMSECRETREPLY']._serialized_start=1402
+  _globals['_TEAMSECRETREPLY']._serialized_end=1435
+  _globals['_TEAMJOINREQUEST']._serialized_start=1437
+  _globals['_TEAMJOINREQUEST']._serialized_end=1470
+  _globals['_TEAMINFOREPLY']._serialized_start=1472
+  _globals['_TEAMINFOREPLY']._serialized_end=1543
+  _globals['_CLIENTAPI']._serialized_start=1614
+  _globals['_CLIENTAPI']._serialized_end=2943
 # @@protoc_insertion_point(module_scope)

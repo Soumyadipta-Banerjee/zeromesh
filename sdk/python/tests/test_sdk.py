@@ -1,5 +1,7 @@
-"""Unit and integration tests for the ZeroMesh Python SDK."""
+"""The Python SDK: spec building without a daemon, then adapters, sessions and resume against real zmds."""
 
+import argparse
+import json
 import os
 import re
 import shutil
@@ -7,21 +9,21 @@ import socket
 import sys
 import tempfile
 import time
+
 import pytest
 
-# Ensure tests can import zmtest from tests/integration and zeromesh from sdk/python
 current_dir = os.path.dirname(os.path.abspath(__file__))
 repo_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
-integration_dir = os.path.join(repo_root, "tests", "integration")
-sdk_dir = os.path.join(repo_root, "sdk", "python")
-
-for p in (integration_dir, sdk_dir):
+for p in (os.path.join(repo_root, "tests", "integration"), os.path.join(repo_root, "sdk", "python")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-import zmtest
-import zeromesh
-from zeromesh.v1 import common_pb2
+import zmtest  # noqa: E402
+import zeromesh  # noqa: E402
+from zeromesh import cli, report  # noqa: E402
+from zeromesh.adapter import (Adapter, AdapterError, Depfile, Env, Item, Out, Policy, Program, Res, Stage,  # noqa: E402
+                              parse_size, run_adapter)
+from zeromesh.v1 import run_pb2  # noqa: E402
 
 
 def free_port() -> int:
@@ -41,6 +43,12 @@ def wait_until(pred, timeout: float = 15.0, interval: float = 0.2) -> bool:
     return False
 
 
+def shared_flags(*argv):
+    p = argparse.ArgumentParser()
+    cli.add_shared_flags(p)
+    return p.parse_args(list(argv))
+
+
 @pytest.fixture
 def tmp_dir():
     d = tempfile.mkdtemp(prefix="zmsdk-")
@@ -55,328 +63,255 @@ def shared_zmd():
     zmd.close()
 
 
-def test_connect_daemon_not_running(tmp_dir):
-    """Verifies that connect() raises DaemonNotRunning when zmd is not running."""
-    non_existent = os.path.join(tmp_dir, "nonexistent.sock")
-    with pytest.raises(zeromesh.DaemonNotRunning) as exc_info:
-        zeromesh.connect(socket_path=non_existent)
-    assert "zmd is not running (start it with: zmd)" in str(exc_info.value)
+# ---- without a daemon --------------------------------------------------------------------------
 
-    # Also test default socket resolution when pointing to empty directory
-    old_env = os.environ.get("ZM_RUNTIME_DIR")
+
+def test_connect_raises_when_nothing_listens(tmp_dir, monkeypatch):
+    with pytest.raises(zeromesh.DaemonNotRunning):
+        zeromesh.connect(os.path.join(tmp_dir, "none.sock"))
+    monkeypatch.setenv("ZM_SOCKET", "/somewhere/zmd.sock")
+    assert zeromesh.default_socket_path() == "/somewhere/zmd.sock"
+    monkeypatch.delenv("ZM_SOCKET")
+    monkeypatch.setenv("ZM_RUNTIME_DIR", "/rt")
+    assert zeromesh.default_socket_path() == "/rt/zmd.sock"
+
+
+def test_sizes_and_durations():
+    assert parse_size("512M") == 512 << 20
+    assert parse_size("1.5GiB") == int(1.5 * (1 << 30))
+    assert parse_size("4096") == 4096
+    assert parse_size(None) == 0
+    with pytest.raises(AdapterError):
+        parse_size("lots")
+    assert cli.parse_duration("90") == 90
+    assert cli.parse_duration("30m") == 1800
+    assert cli.parse_duration("2h") == 7200
+    with pytest.raises(AdapterError):
+        cli.parse_duration("soon")
+
+
+def test_policy_sets_only_what_was_given():
+    p = Policy(keep_going=True, retries=0, timeout=60).to_proto()
+    assert p.HasField("keep_going") and p.keep_going
+    assert p.HasField("infra_retries") and p.infra_retries == 0
+    assert p.timeout_s == 60
+    assert not p.HasField("cache") and not p.HasField("exit_retries")
+
+
+def test_item_outputs_land_under_out():
+    it = Item(id="a", argv=["tool", 3], outputs=[Out("x.png"), Out("log", dest="logs/a.log", required=False),
+                                                 Out("/abs.txt", dest="/elsewhere/abs.txt")],
+              footprint=Depfile("a.d", search_dirs=["include"]), after=["b"], seq=4).to_proto("/out")
+    assert list(it.argv) == ["tool", "3"]
+    assert [(o.path, o.dest, o.optional) for o in it.outputs] == [
+        ("x.png", "/out/x.png", False), ("log", "/out/logs/a.log", True), ("/abs.txt", "/elsewhere/abs.txt", False)]
+    assert it.depfile == "a.d" and list(it.search_dirs) == ["include"]
+    assert list(it.after) == ["b"] and it.seq == 4
+    assert Item(id="c", argv=["x"], outputs=[Out.changed("res")]).to_proto("/out").changed_dest == "/out/res"
+
+
+def test_environments():
+    host = Env.host("blender", version=">=4.0")
+    assert host.programs == (Program("blender", ">=4.0"),)
+    assert host.as_capture().probes == (("blender", "--version"),)
+    probed = Env.host(Program("cc", probe=("cc", "-dumpversion")))
+    assert probed.as_capture().probes == (("cc", "-dumpversion"),)
+    assert Env.ref("abc").tree == "sha256:abc"
+    with pytest.raises(AdapterError):
+        Env.ref("abc").as_capture()
+    with pytest.raises(AdapterError):
+        Env().as_capture()
+
+
+def test_shared_flags_change_every_stage_and_the_policy():
+    stage = Stage(env=Env.host("solver"), res=Res(cores=1, mem="1G"), kind="k")
+    s = cli.apply_to_stage(shared_flags("--env", "capture", "--cores", "4", "--remote-only"), stage)
+    assert s.env.probes == (("solver", "--version"),)
+    assert s.res.cores == 4 and s.res.mem == "1G" and s.where == "remote"
+    s = cli.apply_to_stage(shared_flags("--env", "sha256:ff", "--mem", "2G", "--local-only"), stage)
+    assert s.env.tree == "sha256:ff" and s.res.mem == 2 << 30 and s.where == "local"
+    assert cli.apply_to_stage(shared_flags(), stage) is stage
+    with pytest.raises(AdapterError):
+        cli.apply_to_stage(shared_flags("--env", "docker"), stage)
+    p = cli.apply_to_policy(shared_flags("--keep-going", "--no-cache", "--batch", "5", "--budget", "1h"), Policy())
+    assert p.keep_going and p.cache is False and p.batch == 5 and p.budget == 3600
+
+
+class Echo(Adapter):
+    """Writes one file per name; `exit:N` and `noout` misbehave on purpose."""
+
+    name = "zm-echo"
+    kind = "echo"
+    policy = Policy(keep_going=True)
+
+    def add_args(self, p):
+        p.add_argument("names", nargs="+")
+
+    def check(self, a):
+        if "bad" in a.names:
+            raise AdapterError("'bad' is not a name")
+
+    def items(self, a):
+        for n in a.names:
+            if n.startswith("exit:"):
+                cmd = f"exit {n[5:]}"
+            elif n == "noout":
+                cmd = "true"
+            else:
+                cmd = f'printf "%s %s" "$ZM_ITEM_ID" "$(cat input.txt)" > {n}.txt'
+            yield Item(id=n.replace(":", "-"), argv=["sh", "-c", cmd], outputs=[Out(f"{n}.txt")])
+
+    def finish(self, a, run):
+        self.run = run
+
+
+def test_dry_run_needs_no_daemon(tmp_dir, capsys):
+    rc = run_adapter(Echo(), ["--dry-run", "--socket", os.path.join(tmp_dir, "none.sock"), "a", "b"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "a: sh -c" in out and "2 item(s)" in out
+
+
+def test_check_errors_are_usage_errors(tmp_dir, capsys):
+    assert run_adapter(Echo(), ["--socket", os.path.join(tmp_dir, "none.sock"), "bad"]) == 2
+    assert "'bad' is not a name" in capsys.readouterr().err
+    assert run_adapter(Echo(), ["--socket", os.path.join(tmp_dir, "none.sock"), "a"]) == 2  # no daemon
+
+
+# ---- against zmd -------------------------------------------------------------------------------
+
+
+def run_echo(zmd, workspace, out, *names, extra=()):
+    adapter = Echo()
+    old = os.getcwd()
+    os.chdir(workspace)
     try:
-        os.environ["ZM_RUNTIME_DIR"] = tmp_dir
-        with pytest.raises(zeromesh.DaemonNotRunning) as exc_info:
-            zeromesh.connect()
-        assert "zmd is not running (start it with: zmd)" in str(exc_info.value)
+        rc = run_adapter(adapter, ["--socket", zmd.socket, "-o", out, *extra, *names])
     finally:
-        if old_env is not None:
-            os.environ["ZM_RUNTIME_DIR"] = old_env
-        else:
-            os.environ.pop("ZM_RUNTIME_DIR", None)
+        os.chdir(old)
+    return rc, getattr(adapter, "run", None)
 
 
-def test_upload_map_wait_fetch(shared_zmd, tmp_dir):
-    """Tests the full pipeline: upload directory, map tasks, wait for completion, fetch outputs."""
-    zm = zeromesh.connect(socket_path=shared_zmd.socket)
+def test_adapter_runs_items_places_outputs_and_reports(shared_zmd, tmp_dir):
+    ws, out = os.path.join(tmp_dir, "ws"), os.path.join(tmp_dir, "out")
+    os.makedirs(ws)
+    with open(os.path.join(ws, "input.txt"), "w") as f:
+        f.write("hello")
+    rc, run = run_echo(shared_zmd, ws, out, "a", "b", "c")
+    assert rc == 0, shared_zmd.log()
+    for n in "abc":
+        with open(os.path.join(out, f"{n}.txt")) as f:
+            assert f.read() == f"{n} hello"
+    assert sorted(run.succeeded) == ["a", "b", "c"] and not run.failed
+    assert run.placed("a") == [os.path.join(out, "a.txt")]
+    rep = report.load(os.path.join(out, "report.json"))
+    assert rep.run.succeeded == 3 and len(rep.items) == 3
+    assert os.path.exists(os.path.join(out, "report.trace.json"))
 
-    # 1. Create a directory of 3 files
-    input_dir = os.path.join(tmp_dir, "input_files")
-    os.makedirs(input_dir)
-    files = {
-        "file1.txt": "12345",              # 5 bytes
-        "file2.txt": "abcdefgh",           # 8 bytes
-        "file3.txt": "hello world\n",      # 12 bytes
-    }
-    for fname, content in files.items():
-        with open(os.path.join(input_dir, fname), "w") as f:
-            f.write(content)
-
-    # 2. Upload tree to CAS
-    root_digest = zm.upload(input_dir)
-    assert root_digest.hash
-    assert root_digest.size_bytes > 0
-
-    # 3. Map command across the 3 files
-    # sh -c 'wc -c < {} > {}.len'
-    job = zm.map(
-        argv=["sh", "-c", "wc -c < {} > {}.len"],
-        items=list(files.keys()),
-        input_root=root_digest,
-        outputs=["{}.len"],
-        name="test_wc",
-    )
-
-    # 4. Wait for completion
-    status = job.wait()
-    assert status.done
-    assert len(status.results) == 3
-
-    # 5. Fetch and check the 3 results
-    fetch_dir = os.path.join(tmp_dir, "fetched_outputs")
-    for idx, fname in enumerate(files.keys()):
-        task_name = f"task_{idx}"
-        written = job.fetch(task_name, fetch_dir)
-        len_file = os.path.join(fetch_dir, f"{fname}.len")
-        assert os.path.exists(len_file), f"Expected {len_file} to exist in {written}"
-        with open(len_file) as f:
-            content = f.read().strip()
-            expected = str(len(files[fname]))
-            assert content == expected, f"File {fname} length mismatch: got {content}, expected {expected}"
+    # Unchanged items in an unchanged workspace are cache hits.
+    shutil.rmtree(out)
+    rc, run = run_echo(shared_zmd, ws, out, "a", "b", "c")
+    assert rc == 0 and run.status.cached == 3
+    assert os.path.exists(os.path.join(out, "b.txt"))
 
 
-def test_task_failed_exit_code(shared_zmd):
-    """Verifies that a task exiting non-zero raises TaskFailed with exit_code and stderr."""
-    zm = zeromesh.connect(socket_path=shared_zmd.socket)
+def test_failures_carry_their_kind_and_resume_reruns_only_them(shared_zmd, tmp_dir, capsys):
+    ws, out = os.path.join(tmp_dir, "ws"), os.path.join(tmp_dir, "out")
+    os.makedirs(ws)
+    with open(os.path.join(ws, "input.txt"), "w") as f:
+        f.write("x")
+    rc, run = run_echo(shared_zmd, ws, out, "ok", "exit:3", "noout")
+    assert rc == 1
+    kinds = {r.id: r.failure.kind for r in run.failed}
+    assert kinds == {"exit-3": run_pb2.FAILURE_EXIT, "noout": run_pb2.FAILURE_MISSING_OUTPUT}
+    assert {r.id: r.failure.exit_code for r in run.failed}["exit-3"] == 3
+    err = capsys.readouterr().err
+    assert "FAILED  exit-3: exit" in err and "FAILED  noout: missing output" in err
 
-    job = zm.map(
-        argv=["sh", "-c", "echo 'something went wrong' >&2; exit 3"],
-        items=[1],
-        name="failing_task",
-    )
-
-    with pytest.raises(zeromesh.TaskFailed) as exc_info:
-        job.wait()
-
-    err = exc_info.value
-    assert err.exit_code == 3
-    assert b"something went wrong" in err.stderr_head
-    assert err.task_name == "task_0"
-    assert "exit code 3" in str(err)
+    rc, resumed = run_echo(shared_zmd, ws, out, "ok", extra=("--resume", run.id))
+    assert rc == 1  # the same two items fail again
+    assert resumed.id != run.id and resumed.status.cached == 1 and resumed.status.failed == 2
 
 
-def test_cancel_sleep_finishes_within_2s(shared_zmd):
-    """Verifies that cancel() on a sleep 30 task finishes within 2 seconds."""
-    zm = zeromesh.connect(socket_path=shared_zmd.socket)
+class Combined(Adapter):
+    """Three items, one process: the combine command writes each item's file."""
 
-    job = zm.map(
-        argv=["sleep", "30"],
-        items=[1],
-        name="long_sleep",
-    )
+    name = "zm-combined"
+    kind = "combined"
 
-    # Brief delay so daemon queues/places the task
-    time.sleep(0.1)
+    def combine(self, a):
+        return ["sh", "-c", 'for i in $(seq {first} {last}); do echo "combined $i" > f$i.txt; done']
 
-    t0 = time.monotonic()
-    job.cancel()
-    st = job.wait(check=False)
-    elapsed = time.monotonic() - t0
+    def items(self, a):
+        for i in range(1, 4):
+            yield Item(id=f"f{i}", seq=i, argv=["sh", "-c", f'echo "part {i}" > f{i}.txt'], outputs=[Out(f"f{i}.txt")])
 
-    assert elapsed < 2.0, f"cancel() and wait() took {elapsed:.2f}s, expected < 2.0s"
-    assert st.done
-    res = st.results["task_0"]
-    assert res.cancelled or st.tasks["task_0"] == common_pb2.CANCELLED
+    def finish(self, a, run):
+        self.run = run
 
 
-def test_two_node_team_remote_execution():
-    """Verifies end-to-end execution on a 2-node team with may_run_local=False."""
+def test_combine_runs_consecutive_items_as_one_process(shared_zmd, tmp_dir):
+    out = os.path.join(tmp_dir, "out")
+    adapter = Combined()
+    old = os.getcwd()
+    os.chdir(tmp_dir)
+    try:
+        rc = run_adapter(adapter, ["--socket", shared_zmd.socket, "-o", out, "--batch", "3", "--no-cache"])
+    finally:
+        os.chdir(old)
+    assert rc == 0, shared_zmd.log()
+    for i in range(1, 4):
+        with open(os.path.join(out, f"f{i}.txt")) as f:
+            assert f.read() == f"combined {i}\n"  # the combine command ran, not each item's argv
+    batches = {r.attempts[-1].batch for r in adapter.run.results.values()}
+    assert len(batches) == 1, batches
+
+
+def test_session_takes_items_while_it_runs(shared_zmd, tmp_dir):
+    client = zeromesh.connect(shared_zmd.socket)
+    out = os.path.join(tmp_dir, "out")
+    with zeromesh.Session("zm-explore", workspace=tmp_dir, out=out, client=client,
+                          policy=Policy(cache=False)) as s:
+        s.add(Item(id="first", argv=["sh", "-c", "echo 1 > n.txt"], outputs=[Out("n.txt", dest="first.txt")]))
+        seen = []
+        for r in s.as_completed():
+            seen.append(r.id)
+            if r.id == "first":
+                s.add(Item(id="second", argv=["sh", "-c", "echo 2 > n.txt"], outputs=[Out("n.txt", dest="second.txt")]))
+                s.close()
+    assert seen == ["first", "second"]
+    assert s.status.succeeded == 2
+    with open(os.path.join(out, "second.txt")) as f:
+        assert f.read() == "2\n"
+    client.close()
+
+
+def test_adapter_items_run_on_a_peer_with_remote_only(tmp_dir):
     discovery_port = free_port()
-    port_a = free_port()
-    port_b = free_port()
 
     def env_for(port):
-        return {
-            "ZM_NODE_PORT": str(port),
-            "ZM_DISCOVERY_PORT": str(discovery_port),
-        }
+        return {"ZM_NODE_PORT": str(port), "ZM_DISCOVERY_PORT": str(discovery_port)}
 
-    zmd_a = zmtest.Zmd(env=env_for(port_a))
-    zmd_b = zmtest.Zmd(env=env_for(port_b))
+    a = zmtest.Zmd(env=env_for(free_port()))
+    b = zmtest.Zmd(env=env_for(free_port()))
     try:
-        # A creates team
-        create = zmd_a.zm("team", "create")
-        assert create.returncode == 0, f"team create failed: {create.stderr}"
-        m = re.search(r"'([^']+)'", create.stdout)
-        assert m, f"no phrase in output: {create.stdout}"
-        phrase = m.group(1)
-
-        # B joins team
-        join = zmd_b.zm("team", "join", phrase)
-        assert join.returncode == 0, f"team join failed: {join.stderr}"
-
-        # Connect SDK clients to node A and node B
-        zm_a = zeromesh.connect(socket_path=zmd_a.socket)
-        zm_b = zeromesh.connect(socket_path=zmd_b.socket)
-
-        # Get Node B's ID via its ClientApi
-        id_b = next(p.node_id for p in zm_b.peers() if p.is_self)
-
-        # Wait until node A sees node B admitted
-        def b_admitted():
-            peers = zm_a.peers()
-            for p in peers:
-                if p.node_id == id_b and p.admitted:
-                    return True
-            return False
-
-        assert wait_until(b_admitted, timeout=15.0), "Node A never admitted Node B"
-
-        # Submit task with may_run_local=False, may_run_remote=True
-        job = zm_a.map(
-            argv=["sh", "-c", "echo 'remote execution on peer' > out.txt"],
-            items=[1],
-            outputs=["out.txt"],
-            may_run_local=False,
-            may_run_remote=True,
-            name="remote_job",
-        )
-
-        st = job.wait()
-        assert st.done
-        res = st.results["task_0"]
-        assert res.exit_code == 0
-        assert res.executed_by == id_b, f"Expected task to execute on peer {id_b}, but got {res.executed_by}"
-
-        # Fetch output from task
-        with tempfile.TemporaryDirectory() as out_dir:
-            job.fetch("task_0", out_dir)
-            out_file = os.path.join(out_dir, "out.txt")
-            assert os.path.exists(out_file)
-            with open(out_file) as f:
-                assert f.read() == "remote execution on peer\n"
+        m = re.search(r"'([^']+)'", a.zm("team", "create").stdout)
+        assert m
+        assert b.zm("team", "join", m.group(1)).returncode == 0
+        ca, cb = zeromesh.connect(a.socket), zeromesh.connect(b.socket)
+        id_b = next(p.node_id for p in cb.peers() if p.is_self)
+        assert wait_until(lambda: any(p.node_id == id_b and p.admitted for p in ca.peers())), "A never admitted B"
+        with open(os.path.join(tmp_dir, "input.txt"), "w") as f:
+            f.write("remote")
+        rc, run = run_echo(a, tmp_dir, os.path.join(tmp_dir, "out"), "r1", "r2", extra=("--remote-only",))
+        assert rc == 0, a.log() + b.log()
+        assert {r.attempts[-1].node for r in run.results.values()} == {id_b}
+        with open(os.path.join(tmp_dir, "out", "r2.txt")) as f:
+            assert f.read() == "r2 remote"
+        doc = json.load(open(os.path.join(tmp_dir, "out", "report.json")))
+        assert doc["run"]["name"] == "zm-echo"
+        ca.close()
+        cb.close()
     finally:
-        zmd_a.close()
-        zmd_b.close()
-
-
-def test_job_events_stream(shared_zmd):
-    """Verifies that job.events() streams real-time log chunks and status events."""
-    zm = zeromesh.connect(socket_path=shared_zmd.socket)
-    job = zm.map(
-        argv=["sh", "-c", "echo 'streamed stdout message'"],
-        items=[1],
-        name="events_test",
-    )
-
-    events = list(job.events())
-    assert len(events) > 0
-    logs = [e.log_chunk for e in events if e.log_chunk]
-    combined_log = b"".join(logs).decode("utf-8")
-    assert "streamed stdout message" in combined_log
-
-    status = job.wait()
-    assert status.done
-
-
-def test_submit_dag_pipeline(shared_zmd, tmp_dir):
-    """Tests low-level submit() with a 3-task DAG with depends_on and inputs_from."""
-    zm = zeromesh.connect(socket_path=shared_zmd.socket)
-    host = common_pb2.EnvSpec(name="host")
-
-    t_a = common_pb2.TaskSpec(
-        name="task_a",
-        argv=["sh", "-c", "echo 10 > a.txt"],
-        outputs=["a.txt"],
-        env_spec=host,
-    )
-    t_b = common_pb2.TaskSpec(
-        name="task_b",
-        argv=["sh", "-c", "echo 20 > b.txt"],
-        outputs=["b.txt"],
-        env_spec=host,
-    )
-    t_c = common_pb2.TaskSpec(
-        name="task_c",
-        argv=["sh", "-c", "cat from_a/a.txt from_b/b.txt > combined.txt"],
-        outputs=["combined.txt"],
-        env_spec=host,
-        depends_on=["task_a", "task_b"],
-        inputs_from=[
-            common_pb2.InputFrom(task="task_a", path="from_a"),
-            common_pb2.InputFrom(task="task_b", path="from_b"),
-        ],
-    )
-
-    spec = common_pb2.JobSpec(name="dag_job", tasks=[t_a, t_b, t_c])
-    job = zm.submit(spec)
-    st = job.wait()
-    assert st.done
-    for name in ("task_a", "task_b", "task_c"):
-        assert st.results[name].exit_code == 0
-
-    fetch_dir = os.path.join(tmp_dir, "dag_fetch")
-    job.fetch("task_c", fetch_dir)
-    res_file = os.path.join(fetch_dir, "combined.txt")
-    assert os.path.exists(res_file)
-    with open(res_file) as f:
-        assert f.read() == "10\n20\n"
-
-
-def test_wait_check_raises_job_cancelled(shared_zmd):
-    zm = zeromesh.connect(socket_path=shared_zmd.socket)
-    job = zm.map(argv=["sleep", "30"], items=[1], name="cancel_me")
-    time.sleep(0.1)
-    job.cancel()
-    with pytest.raises(zeromesh.JobCancelled):
-        job.wait(check=True)
-
-
-def test_wait_check_raises_job_timeout_on_timed_out_flag():
-    """timed_out must win over a non-zero exit_code from the daemon."""
-    from unittest import mock
-
-    from zeromesh.job import Job
-
-    res = mock.Mock(
-        exit_code=-1,
-        timed_out=True,
-        cancelled=False,
-        error="",
-        stderr_head=b"",
-    )
-    st = mock.Mock(done=True, results={"task_0": res})
-    client = mock.Mock()
-    client._stub.WatchJob.return_value = iter([])
-    client._stub.GetJob.return_value = st
-
-    job = Job(client, "job-timeout")
-    with pytest.raises(zeromesh.JobTimeout):
-        job.wait(check=True)
-
-
-def test_wait_check_raises_job_cancelled_on_cancelled_flag():
-    from unittest import mock
-
-    from zeromesh.job import Job
-
-    res = mock.Mock(
-        exit_code=-1,
-        timed_out=False,
-        cancelled=True,
-        error="",
-        stderr_head=b"",
-    )
-    st = mock.Mock(done=True, results={"task_0": res})
-    client = mock.Mock()
-    client._stub.WatchJob.return_value = iter([])
-    client._stub.GetJob.return_value = st
-
-    job = Job(client, "job-cancel")
-    with pytest.raises(zeromesh.JobCancelled):
-        job.wait(check=True)
-
-
-def test_wait_check_false(shared_zmd):
-    """Verifies that wait(check=False) returns JobStatus instead of raising on task error."""
-    zm = zeromesh.connect(socket_path=shared_zmd.socket)
-    job = zm.map(
-        argv=["sh", "-c", "exit 42"],
-        items=[1],
-        name="failing_no_check",
-    )
-    st = job.wait(check=False)
-    assert st.done
-    assert st.results["task_0"].exit_code == 42
-
-
-def test_team_info_and_peers(shared_zmd):
-    """Verifies that team_info() and peers() return valid protobuf responses."""
-    zm = zeromesh.connect(socket_path=shared_zmd.socket)
-    info = zm.team_info()
-    assert hasattr(info, "in_team")
-    assert hasattr(info, "peers_pinned")
-
-    peers = zm.peers()
-    assert isinstance(peers, list)
-
+        a.close()
+        b.close()

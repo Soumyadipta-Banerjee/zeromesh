@@ -21,7 +21,7 @@ def generate_protos():
         with open(init_file, "w") as f:
             f.write('"""Generated gRPC and Protobuf bindings for zeromesh.v1."""\n')
 
-    proto_files = ["common.proto", "client.proto", "node.proto"]
+    proto_files = ["common.proto", "run.proto", "client.proto", "node.proto"]
     for pf in proto_files:
         proto_path = os.path.join(proto_root, "zeromesh", "v1", pf)
         if not os.path.exists(proto_path):
@@ -57,7 +57,7 @@ class CustomDevelop(develop):
 # Runtime deps are declared in pyproject.toml ([project].dependencies).
 setup(
     name="zeromesh",
-    version="0.1.0",
+    version="0.2.0",
     description="ZeroMesh Python SDK for zero-setup compute mesh",
     author="ZeroMesh Team",
     packages=find_packages(),

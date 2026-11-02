@@ -3,11 +3,14 @@
 #include "node/daemon.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 
 namespace zeromesh::cli {
 
 std::filesystem::path DefaultSocketPath() {
+    // `zm --socket P adapter` passes P on as ZM_SOCKET, so an adapter calling zm reaches the same zmd.
+    if (const char* s = std::getenv("ZM_SOCKET"); s && *s) return s;
     return node::DaemonConfig::FromEnv().socket_path();
 }
 

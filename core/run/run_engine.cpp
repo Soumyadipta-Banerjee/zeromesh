@@ -150,6 +150,7 @@ struct RunEngine::Run {
     std::unordered_map<std::string, size_t> index;
     bool open{false};
     bool cancelled{false};
+    bool finishing{false}; // the report is being written; `done` (and the finished event) follow
     bool done{false};
     std::string ended_by;
     int64_t started_ms{0};
@@ -424,7 +425,7 @@ void RunEngine::Cancel(const std::string& run_id) {
         auto it = runs_.find(run_id);
         if (it == runs_.end() || !it->second) return;
         Run& run = *it->second;
-        if (run.done) return;
+        if (run.done || run.finishing) return;
         CancelLocked(run, "cancel");
         dirty_ = true;
     }
@@ -513,7 +514,7 @@ bool RunEngine::Pump(const RunPtr& run) {
     std::vector<std::string> stop;
     {
         std::lock_guard lock(mu_);
-        if (run->done) return false;
+        if (run->done || run->finishing) return false;
         const int64_t now = NowMs();
         if (!run->cancelled && run->policy.has_deadline_unix_ms() && run->policy.deadline_unix_ms() > 0 &&
             now >= run->policy.deadline_unix_ms()) {
@@ -804,7 +805,7 @@ void RunEngine::Dispatch(const RunPtr& run) {
     std::vector<Launch> launches;
     {
         std::lock_guard lock(mu_);
-        if (run->cancelled || run->done) return;
+        if (run->cancelled || run->done || run->finishing) return;
         // Ready items, grouped by what a batch must share.
         struct Key {
             size_t stage;
@@ -1259,30 +1260,33 @@ void RunEngine::Finish(const RunPtr& run) {
     v1::Report report;
     {
         std::lock_guard lock(mu_);
-        if (run->done) return;
-        run->done = true;
+        if (run->done || run->finishing) return;
+        run->finishing = true;
         run->finished_ms = NowMs();
         run->finished_at = std::chrono::steady_clock::now();
         report = ReportLocked(*run);
-        v1::RunEvent ev;
-        *ev.mutable_finished() = report.run();
-        Emit(*run, std::move(ev));
-        for (auto& w : run->watchers) w->End();
-        run->watchers.clear();
-        // Keep a few finished runs in memory; the rest are served from the history.
-        size_t finished = 0;
-        for (auto it = order_.rbegin(); it != order_.rend(); ++it) {
-            auto r = runs_.find(*it);
-            if (r != runs_.end() && r->second->done && ++finished > kFinishedRunsKept) r->second.reset();
-        }
-        std::erase_if(order_, [&](const std::string& id) {
-            auto r = runs_.find(id);
-            if (r == runs_.end() || r->second) return false;
-            runs_.erase(r);
-            return true;
-        });
     }
+    // The report files exist before anyone hears the run ended: a watcher may read them at once.
     WriteReport(run, report);
+    std::lock_guard lock(mu_);
+    run->done = true;
+    v1::RunEvent ev;
+    *ev.mutable_finished() = report.run();
+    Emit(*run, std::move(ev));
+    for (auto& w : run->watchers) w->End();
+    run->watchers.clear();
+    // Keep a few finished runs in memory; the rest are served from the history.
+    size_t finished = 0;
+    for (auto it = order_.rbegin(); it != order_.rend(); ++it) {
+        auto r = runs_.find(*it);
+        if (r != runs_.end() && r->second->done && ++finished > kFinishedRunsKept) r->second.reset();
+    }
+    std::erase_if(order_, [&](const std::string& id) {
+        auto r = runs_.find(id);
+        if (r == runs_.end() || r->second) return false;
+        runs_.erase(r);
+        return true;
+    });
 }
 
 void RunEngine::WriteReport(const RunPtr& run, const v1::Report& report) {
@@ -1320,7 +1324,7 @@ v1::RunStatus RunEngine::StatusLocked(const Run& run) const {
     v1::RunStatus st;
     st.set_run_id(run.id);
     st.set_name(run.spec.name());
-    st.set_done(run.done);
+    st.set_done(run.done || run.finishing);
     st.set_open(run.open);
     st.set_total(static_cast<int32_t>(run.items.size()));
     for (const auto& it : run.items) {

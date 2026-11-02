@@ -5,8 +5,9 @@ import warnings
 
 from zeromesh.v1 import client_pb2 as zeromesh_dot_v1_dot_client__pb2
 from zeromesh.v1 import common_pb2 as zeromesh_dot_v1_dot_common__pb2
+from zeromesh.v1 import run_pb2 as zeromesh_dot_v1_dot_run__pb2
 
-GRPC_GENERATED_VERSION = '1.84.2'
+GRPC_GENERATED_VERSION = '1.85.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -51,35 +52,65 @@ class ClientApiStub:
                 request_serializer=zeromesh_dot_v1_dot_common__pb2.Digests.SerializeToString,
                 response_deserializer=zeromesh_dot_v1_dot_common__pb2.Digests.FromString,
                 _registered_method=True)
-        self.UploadTree = channel.unary_unary(
-                '/zeromesh.v1.ClientApi/UploadTree',
-                request_serializer=zeromesh_dot_v1_dot_client__pb2.UploadTreeRequest.SerializeToString,
-                response_deserializer=zeromesh_dot_v1_dot_client__pb2.UploadTreeReply.FromString,
+        self.Snapshot = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/Snapshot',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.SnapshotRequest.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_client__pb2.SnapshotReply.FromString,
                 _registered_method=True)
-        self.SubmitJob = channel.unary_unary(
-                '/zeromesh.v1.ClientApi/SubmitJob',
-                request_serializer=zeromesh_dot_v1_dot_common__pb2.JobSpec.SerializeToString,
-                response_deserializer=zeromesh_dot_v1_dot_client__pb2.SubmitReply.FromString,
+        self.CaptureEnv = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/CaptureEnv',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.CaptureRequest.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_client__pb2.CaptureReply.FromString,
                 _registered_method=True)
-        self.WatchJob = channel.unary_stream(
-                '/zeromesh.v1.ClientApi/WatchJob',
-                request_serializer=zeromesh_dot_v1_dot_client__pb2.JobRef.SerializeToString,
-                response_deserializer=zeromesh_dot_v1_dot_common__pb2.JobEvent.FromString,
+        self.SubmitRun = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/SubmitRun',
+                request_serializer=zeromesh_dot_v1_dot_run__pb2.RunSpec.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
                 _registered_method=True)
-        self.GetJob = channel.unary_unary(
-                '/zeromesh.v1.ClientApi/GetJob',
-                request_serializer=zeromesh_dot_v1_dot_client__pb2.JobRef.SerializeToString,
-                response_deserializer=zeromesh_dot_v1_dot_common__pb2.JobStatus.FromString,
-                _registered_method=True)
-        self.CancelJob = channel.unary_unary(
-                '/zeromesh.v1.ClientApi/CancelJob',
-                request_serializer=zeromesh_dot_v1_dot_client__pb2.JobRef.SerializeToString,
+        self.AddItems = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/AddItems',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.AddItemsRequest.SerializeToString,
                 response_deserializer=zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
                 _registered_method=True)
-        self.FetchOutputs = channel.unary_unary(
-                '/zeromesh.v1.ClientApi/FetchOutputs',
-                request_serializer=zeromesh_dot_v1_dot_client__pb2.FetchRequest.SerializeToString,
-                response_deserializer=zeromesh_dot_v1_dot_client__pb2.FetchReply.FromString,
+        self.CloseRun = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/CloseRun',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
+                _registered_method=True)
+        self.WatchRun = channel.unary_stream(
+                '/zeromesh.v1.ClientApi/WatchRun',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.WatchRequest.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_run__pb2.RunEvent.FromString,
+                _registered_method=True)
+        self.GetRun = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/GetRun',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_run__pb2.RunStatus.FromString,
+                _registered_method=True)
+        self.GetReport = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/GetReport',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_run__pb2.Report.FromString,
+                _registered_method=True)
+        self.CancelRun = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/CancelRun',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
+                _registered_method=True)
+        self.ResumeRun = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/ResumeRun',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
+                _registered_method=True)
+        self.ListRuns = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/ListRuns',
+                request_serializer=zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_client__pb2.RunList.FromString,
+                _registered_method=True)
+        self.ForgetCache = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/ForgetCache',
+                request_serializer=zeromesh_dot_v1_dot_client__pb2.ForgetRequest.SerializeToString,
+                response_deserializer=zeromesh_dot_v1_dot_client__pb2.ForgetReply.FromString,
                 _registered_method=True)
         self.ListPeers = channel.unary_unary(
                 '/zeromesh.v1.ClientApi/ListPeers',
@@ -91,10 +122,10 @@ class ClientApiStub:
                 request_serializer=zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
                 response_deserializer=zeromesh_dot_v1_dot_client__pb2.ActivitySnapshot.FromString,
                 _registered_method=True)
-        self.ClearActivity = channel.unary_unary(
-                '/zeromesh.v1.ClientApi/ClearActivity',
+        self.Doctor = channel.unary_unary(
+                '/zeromesh.v1.ClientApi/Doctor',
                 request_serializer=zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
-                response_deserializer=zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
+                response_deserializer=zeromesh_dot_v1_dot_client__pb2.DoctorReply.FromString,
                 _registered_method=True)
         self.TeamCreate = channel.unary_unary(
                 '/zeromesh.v1.ClientApi/TeamCreate',
@@ -140,37 +171,74 @@ class ClientApiServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def UploadTree(self, request, context):
+    def Snapshot(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def SubmitJob(self, request, context):
+    def CaptureEnv(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def WatchJob(self, request, context):
+    def SubmitRun(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetJob(self, request, context):
+    def AddItems(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def CancelJob(self, request, context):
+    def CloseRun(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def FetchOutputs(self, request, context):
+    def WatchRun(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetRun(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetReport(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CancelRun(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ResumeRun(self, request, context):
+        """resubmit a past run; finished items come from the cache
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListRuns(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ForgetCache(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -183,15 +251,13 @@ class ClientApiServicer:
         raise NotImplementedError('Method not implemented!')
 
     def ListActivity(self, request, context):
-        """Submitted jobs + local sandboxes (working and finished rows for zm monitor).
-        """
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def ClearActivity(self, request, context):
-        """Drops finished rows from ListActivity. Running tasks stay; job results stay fetchable.
-        """
+    def Doctor(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -238,35 +304,65 @@ def add_ClientApiServicer_to_server(servicer, server):
                     request_deserializer=zeromesh_dot_v1_dot_common__pb2.Digests.FromString,
                     response_serializer=zeromesh_dot_v1_dot_common__pb2.Digests.SerializeToString,
             ),
-            'UploadTree': grpc.unary_unary_rpc_method_handler(
-                    servicer.UploadTree,
-                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.UploadTreeRequest.FromString,
-                    response_serializer=zeromesh_dot_v1_dot_client__pb2.UploadTreeReply.SerializeToString,
+            'Snapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.Snapshot,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.SnapshotRequest.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_client__pb2.SnapshotReply.SerializeToString,
             ),
-            'SubmitJob': grpc.unary_unary_rpc_method_handler(
-                    servicer.SubmitJob,
-                    request_deserializer=zeromesh_dot_v1_dot_common__pb2.JobSpec.FromString,
-                    response_serializer=zeromesh_dot_v1_dot_client__pb2.SubmitReply.SerializeToString,
+            'CaptureEnv': grpc.unary_unary_rpc_method_handler(
+                    servicer.CaptureEnv,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.CaptureRequest.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_client__pb2.CaptureReply.SerializeToString,
             ),
-            'WatchJob': grpc.unary_stream_rpc_method_handler(
-                    servicer.WatchJob,
-                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.JobRef.FromString,
-                    response_serializer=zeromesh_dot_v1_dot_common__pb2.JobEvent.SerializeToString,
+            'SubmitRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitRun,
+                    request_deserializer=zeromesh_dot_v1_dot_run__pb2.RunSpec.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
             ),
-            'GetJob': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetJob,
-                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.JobRef.FromString,
-                    response_serializer=zeromesh_dot_v1_dot_common__pb2.JobStatus.SerializeToString,
-            ),
-            'CancelJob': grpc.unary_unary_rpc_method_handler(
-                    servicer.CancelJob,
-                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.JobRef.FromString,
+            'AddItems': grpc.unary_unary_rpc_method_handler(
+                    servicer.AddItems,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.AddItemsRequest.FromString,
                     response_serializer=zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
             ),
-            'FetchOutputs': grpc.unary_unary_rpc_method_handler(
-                    servicer.FetchOutputs,
-                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.FetchRequest.FromString,
-                    response_serializer=zeromesh_dot_v1_dot_client__pb2.FetchReply.SerializeToString,
+            'CloseRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.CloseRun,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
+            ),
+            'WatchRun': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchRun,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.WatchRequest.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_run__pb2.RunEvent.SerializeToString,
+            ),
+            'GetRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetRun,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_run__pb2.RunStatus.SerializeToString,
+            ),
+            'GetReport': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetReport,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_run__pb2.Report.SerializeToString,
+            ),
+            'CancelRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelRun,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
+            ),
+            'ResumeRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResumeRun,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+            ),
+            'ListRuns': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListRuns,
+                    request_deserializer=zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_client__pb2.RunList.SerializeToString,
+            ),
+            'ForgetCache': grpc.unary_unary_rpc_method_handler(
+                    servicer.ForgetCache,
+                    request_deserializer=zeromesh_dot_v1_dot_client__pb2.ForgetRequest.FromString,
+                    response_serializer=zeromesh_dot_v1_dot_client__pb2.ForgetReply.SerializeToString,
             ),
             'ListPeers': grpc.unary_unary_rpc_method_handler(
                     servicer.ListPeers,
@@ -278,10 +374,10 @@ def add_ClientApiServicer_to_server(servicer, server):
                     request_deserializer=zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
                     response_serializer=zeromesh_dot_v1_dot_client__pb2.ActivitySnapshot.SerializeToString,
             ),
-            'ClearActivity': grpc.unary_unary_rpc_method_handler(
-                    servicer.ClearActivity,
+            'Doctor': grpc.unary_unary_rpc_method_handler(
+                    servicer.Doctor,
                     request_deserializer=zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
-                    response_serializer=zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
+                    response_serializer=zeromesh_dot_v1_dot_client__pb2.DoctorReply.SerializeToString,
             ),
             'TeamCreate': grpc.unary_unary_rpc_method_handler(
                     servicer.TeamCreate,
@@ -397,7 +493,7 @@ class ClientApi:
             _registered_method=True)
 
     @staticmethod
-    def UploadTree(request,
+    def Snapshot(request,
             target,
             options=(),
             channel_credentials=None,
@@ -410,9 +506,9 @@ class ClientApi:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/zeromesh.v1.ClientApi/UploadTree',
-            zeromesh_dot_v1_dot_client__pb2.UploadTreeRequest.SerializeToString,
-            zeromesh_dot_v1_dot_client__pb2.UploadTreeReply.FromString,
+            '/zeromesh.v1.ClientApi/Snapshot',
+            zeromesh_dot_v1_dot_client__pb2.SnapshotRequest.SerializeToString,
+            zeromesh_dot_v1_dot_client__pb2.SnapshotReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -424,7 +520,7 @@ class ClientApi:
             _registered_method=True)
 
     @staticmethod
-    def SubmitJob(request,
+    def CaptureEnv(request,
             target,
             options=(),
             channel_credentials=None,
@@ -437,9 +533,9 @@ class ClientApi:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/zeromesh.v1.ClientApi/SubmitJob',
-            zeromesh_dot_v1_dot_common__pb2.JobSpec.SerializeToString,
-            zeromesh_dot_v1_dot_client__pb2.SubmitReply.FromString,
+            '/zeromesh.v1.ClientApi/CaptureEnv',
+            zeromesh_dot_v1_dot_client__pb2.CaptureRequest.SerializeToString,
+            zeromesh_dot_v1_dot_client__pb2.CaptureReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -451,34 +547,7 @@ class ClientApi:
             _registered_method=True)
 
     @staticmethod
-    def WatchJob(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_stream(
-            request,
-            target,
-            '/zeromesh.v1.ClientApi/WatchJob',
-            zeromesh_dot_v1_dot_client__pb2.JobRef.SerializeToString,
-            zeromesh_dot_v1_dot_common__pb2.JobEvent.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetJob(request,
+    def SubmitRun(request,
             target,
             options=(),
             channel_credentials=None,
@@ -491,9 +560,9 @@ class ClientApi:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/zeromesh.v1.ClientApi/GetJob',
-            zeromesh_dot_v1_dot_client__pb2.JobRef.SerializeToString,
-            zeromesh_dot_v1_dot_common__pb2.JobStatus.FromString,
+            '/zeromesh.v1.ClientApi/SubmitRun',
+            zeromesh_dot_v1_dot_run__pb2.RunSpec.SerializeToString,
+            zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
             options,
             channel_credentials,
             insecure,
@@ -505,7 +574,7 @@ class ClientApi:
             _registered_method=True)
 
     @staticmethod
-    def CancelJob(request,
+    def AddItems(request,
             target,
             options=(),
             channel_credentials=None,
@@ -518,8 +587,8 @@ class ClientApi:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/zeromesh.v1.ClientApi/CancelJob',
-            zeromesh_dot_v1_dot_client__pb2.JobRef.SerializeToString,
+            '/zeromesh.v1.ClientApi/AddItems',
+            zeromesh_dot_v1_dot_client__pb2.AddItemsRequest.SerializeToString,
             zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
             options,
             channel_credentials,
@@ -532,7 +601,7 @@ class ClientApi:
             _registered_method=True)
 
     @staticmethod
-    def FetchOutputs(request,
+    def CloseRun(request,
             target,
             options=(),
             channel_credentials=None,
@@ -545,9 +614,198 @@ class ClientApi:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/zeromesh.v1.ClientApi/FetchOutputs',
-            zeromesh_dot_v1_dot_client__pb2.FetchRequest.SerializeToString,
-            zeromesh_dot_v1_dot_client__pb2.FetchReply.FromString,
+            '/zeromesh.v1.ClientApi/CloseRun',
+            zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+            zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/zeromesh.v1.ClientApi/WatchRun',
+            zeromesh_dot_v1_dot_client__pb2.WatchRequest.SerializeToString,
+            zeromesh_dot_v1_dot_run__pb2.RunEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/zeromesh.v1.ClientApi/GetRun',
+            zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+            zeromesh_dot_v1_dot_run__pb2.RunStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetReport(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/zeromesh.v1.ClientApi/GetReport',
+            zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+            zeromesh_dot_v1_dot_run__pb2.Report.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CancelRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/zeromesh.v1.ClientApi/CancelRun',
+            zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+            zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResumeRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/zeromesh.v1.ClientApi/ResumeRun',
+            zeromesh_dot_v1_dot_client__pb2.RunRef.SerializeToString,
+            zeromesh_dot_v1_dot_client__pb2.RunRef.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListRuns(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/zeromesh.v1.ClientApi/ListRuns',
+            zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
+            zeromesh_dot_v1_dot_client__pb2.RunList.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ForgetCache(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/zeromesh.v1.ClientApi/ForgetCache',
+            zeromesh_dot_v1_dot_client__pb2.ForgetRequest.SerializeToString,
+            zeromesh_dot_v1_dot_client__pb2.ForgetReply.FromString,
             options,
             channel_credentials,
             insecure,
@@ -613,7 +871,7 @@ class ClientApi:
             _registered_method=True)
 
     @staticmethod
-    def ClearActivity(request,
+    def Doctor(request,
             target,
             options=(),
             channel_credentials=None,
@@ -626,9 +884,9 @@ class ClientApi:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/zeromesh.v1.ClientApi/ClearActivity',
+            '/zeromesh.v1.ClientApi/Doctor',
             zeromesh_dot_v1_dot_common__pb2.Empty.SerializeToString,
-            zeromesh_dot_v1_dot_common__pb2.Empty.FromString,
+            zeromesh_dot_v1_dot_client__pb2.DoctorReply.FromString,
             options,
             channel_credentials,
             insecure,

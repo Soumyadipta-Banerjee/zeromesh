@@ -1,29 +1,25 @@
 #!/usr/bin/env python3
-"""Simple Hello World example using ZeroMesh SDK."""
+"""The smallest adapter: one item per name, each writing a greeting file.
 
-import sys
-import zeromesh
+    python3 hello_world.py Ada Grace Linus        # outputs in ./zm-out/
+    python3 hello_world.py --remote-only Ada      # on another machine of the team
+"""
 
-def main():
-    try:
-        zm = zeromesh.connect()
-    except zeromesh.DaemonNotRunning as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+from zeromesh.adapter import Adapter, Item, Out, main
 
-    print("Connected to zmd. Running distributed task...")
-    job = zm.map(
-        argv=["echo", "Hello from ZeroMesh task {}!"],
-        items=["A", "B", "C"],
-        name="hello_job",
-    )
 
-    for event in job.events():
-        if event.log_chunk:
-            print(event.log_chunk.decode("utf-8", errors="replace"), end="")
+class Hello(Adapter):
+    name = "zm-hello"
+    kind = "hello"
 
-    status = job.wait()
-    print(f"Job completed: {len(status.results)} tasks succeeded.")
+    def add_args(self, p):
+        p.add_argument("names", nargs="+", help="who to greet")
+
+    def items(self, a):
+        for n in a.names:
+            yield Item(id=n, argv=["sh", "-c", f'echo "Hello, {n}, from $ZM_NODE_ID" > {n}.txt'],
+                       outputs=[Out(f"{n}.txt")])
+
 
 if __name__ == "__main__":
-    main()
+    main(Hello)

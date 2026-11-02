@@ -13,8 +13,9 @@ namespace zeromesh::cli {
 inline constexpr const char* kNotRunning = "zmd is not running (start it with: zmd)";
 inline constexpr int kExitNotRunning = 2;
 
-// The daemon's socket, resolved exactly like zmd resolves it (ZM_RUNTIME_DIR, then
-// $XDG_RUNTIME_DIR/zeromesh, then /tmp/zeromesh-<uid>).
+// The daemon's socket: $ZM_SOCKET when set (zm passes --socket on to adapters that way), otherwise
+// resolved exactly like zmd resolves it (ZM_RUNTIME_DIR, then $XDG_RUNTIME_DIR/zeromesh, then
+// /tmp/zeromesh-<uid>).
 std::filesystem::path DefaultSocketPath();
 
 // A ClientApi stub over the daemon's unix socket.

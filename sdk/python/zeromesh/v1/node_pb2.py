@@ -23,39 +23,72 @@ _sym_db = _symbol_database.Default()
 
 
 from zeromesh.v1 import common_pb2 as zeromesh_dot_v1_dot_common__pb2
+from zeromesh.v1 import run_pb2 as zeromesh_dot_v1_dot_run__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16zeromesh/v1/node.proto\x12\x0bzeromesh.v1\x1a\x18zeromesh/v1/common.proto\",\n\nAdmitHello\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05nonce\x18\x02 \x01(\x0c\"=\n\x0e\x41\x64mitChallenge\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05nonce\x18\x02 \x01(\x0c\x12\x0b\n\x03mac\x18\x03 \x01(\x0c\"\x19\n\nAdmitProof\x12\x0b\n\x03mac\x18\x01 \x01(\x0c\"b\n\x05Offer\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12#\n\x04spec\x18\x02 \x01(\x0b\x32\x15.zeromesh.v1.TaskSpec\x12#\n\x06needed\x18\x03 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"\x8b\x02\n\nOfferReply\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12$\n\x07missing\x18\x03 \x03(\x0b\x32\x13.zeromesh.v1.Digest\x12\x15\n\rcomfort_level\x18\x04 \x01(\r\x12\x1c\n\x0fhazard_per_hour\x18\x05 \x01(\x01H\x00\x88\x01\x01\x12,\n\x0breject_kind\x18\x06 \x01(\x0e\x32\x17.zeromesh.v1.RejectKind\x12\x16\n\x0eretry_after_ms\x18\x07 \x01(\r\x12\x17\n\ncore_limit\x18\x08 \x01(\rH\x01\x88\x01\x01\x42\x12\n\x10_hazard_per_hourB\r\n\x0b_core_limit\"H\n\x0bSeedRequest\x12\x13\n\x0bsource_hint\x18\x01 \x01(\t\x12$\n\x07\x64igests\x18\x02 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"@\n\tSeedReply\x12$\n\x07\x66\x65tched\x18\x01 \x03(\x0b\x32\x13.zeromesh.v1.Digest\x12\r\n\x05\x65rror\x18\x02 \x01(\t\"1\n\nRunRequest\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12\x12\n\nprofile_id\x18\x02 \x01(\t\"\x1a\n\x07TaskRef\x12\x0f\n\x07task_id\x18\x01 \x01(\t\"|\n\x0b\x44rainNotice\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12*\n\x04\x63ode\x18\x03 \x01(\x0e\x32\x1c.zeromesh.v1.DepartureReason\x12\x0e\n\x06ttl_ms\x18\x04 \x01(\r\x12\x10\n\x08grace_ms\x18\x05 \x01(\r*b\n\nRejectKind\x12\x16\n\x12REJECT_UNSPECIFIED\x10\x00\x12\x13\n\x0fREJECT_DRAINING\x10\x01\x12\x0f\n\x0bREJECT_BUSY\x10\x02\x12\x16\n\x12REJECT_UNSUPPORTED\x10\x03*\x98\x01\n\x0f\x44\x65partureReason\x12\x19\n\x15\x44\x45PARTURE_UNSPECIFIED\x10\x00\x12\x14\n\x10\x44\x45PARTURE_UNPLUG\x10\x01\x12\x15\n\x11\x44\x45PARTURE_BATTERY\x10\x02\x12\x11\n\rDEPARTURE_LID\x10\x03\x12\x13\n\x0f\x44\x45PARTURE_OWNER\x10\x04\x12\x15\n\x11\x44\x45PARTURE_SUSPEND\x10\x05\x32\xcd\x04\n\x07NodeApi\x12=\n\x05\x41\x64mit\x12\x17.zeromesh.v1.AdmitHello\x1a\x1b.zeromesh.v1.AdmitChallenge\x12;\n\x0c\x41\x64mitConfirm\x12\x17.zeromesh.v1.AdmitProof\x1a\x12.zeromesh.v1.Empty\x12\x31\n\x04Ping\x12\x12.zeromesh.v1.Empty\x1a\x15.zeromesh.v1.PeerInfo\x12\x38\n\tOfferTask\x12\x12.zeromesh.v1.Offer\x1a\x17.zeromesh.v1.OfferReply\x12\x35\n\tPushBlobs\x12\x12.zeromesh.v1.Chunk\x1a\x12.zeromesh.v1.Empty(\x01\x12\x37\n\tPullBlobs\x12\x14.zeromesh.v1.Digests\x1a\x12.zeromesh.v1.Chunk0\x01\x12=\n\tSeedBlobs\x12\x18.zeromesh.v1.SeedRequest\x1a\x16.zeromesh.v1.SeedReply\x12;\n\x07RunTask\x12\x17.zeromesh.v1.RunRequest\x1a\x15.zeromesh.v1.JobEvent0\x01\x12\x36\n\nCancelTask\x12\x14.zeromesh.v1.TaskRef\x1a\x12.zeromesh.v1.Empty\x12\x35\n\x05\x44rain\x12\x18.zeromesh.v1.DrainNotice\x1a\x12.zeromesh.v1.Emptyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16zeromesh/v1/node.proto\x12\x0bzeromesh.v1\x1a\x18zeromesh/v1/common.proto\x1a\x15zeromesh/v1/run.proto\",\n\nAdmitHello\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05nonce\x18\x02 \x01(\x0c\"=\n\x0e\x41\x64mitChallenge\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05nonce\x18\x02 \x01(\x0c\x12\x0b\n\x03mac\x18\x03 \x01(\x0c\"\x19\n\nAdmitProof\x12\x0b\n\x03mac\x18\x01 \x01(\x0c\"\x97\x02\n\tBatchItem\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgv\x18\x02 \x03(\t\x12,\n\x03\x65nv\x18\x03 \x03(\x0b\x32\x1f.zeromesh.v1.BatchItem.EnvEntry\x12\x0b\n\x03\x63wd\x18\x04 \x01(\t\x12\x0f\n\x07outputs\x18\x05 \x03(\t\x12\x18\n\x10optional_outputs\x18\x06 \x03(\t\x12\x17\n\x0f\x63\x61pture_changed\x18\x07 \x01(\x08\x12\x0f\n\x07\x64\x65pfile\x18\x08 \x01(\t\x12\x0b\n\x03seq\x18\t \x01(\x03\x12\'\n\ncheckpoint\x18\n \x01(\x0b\x32\x13.zeromesh.v1.Digest\x1a*\n\x08\x45nvEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xa3\x03\n\tBatchSpec\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\'\n\ninput_root\x18\x02 \x01(\x0b\x32\x13.zeromesh.v1.Digest\x12\x1d\n\x03\x65nv\x18\x03 \x01(\x0b\x32\x10.zeromesh.v1.Env\x12)\n\tresources\x18\x04 \x01(\x0b\x32\x16.zeromesh.v1.Resources\x12%\n\x05items\x18\x05 \x03(\x0b\x32\x16.zeromesh.v1.BatchItem\x12%\n\x07\x63ombine\x18\x06 \x01(\x0b\x32\x14.zeromesh.v1.Combine\x12\x0c\n\x04kind\x18\x07 \x01(\t\x12\x0c\n\x04warm\x18\x08 \x01(\x08\x12\x0f\n\x07network\x18\t \x01(\x08\x12\x11\n\ttimeout_s\x18\n \x01(\x05\x12\x14\n\x0chung_after_s\x18\x0b \x01(\x05\x12\x13\n\x0bpreemptible\x18\x0c \x01(\x08\x12\x13\n\x0bstream_logs\x18\r \x01(\x08\x12\x11\n\trequester\x18\x0e \x01(\t\x12!\n\x05where\x18\x0f \x01(\x0e\x32\x12.zeromesh.v1.Where\x12\x11\n\tmem_limit\x18\x10 \x01(\x03\"d\n\x05Offer\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\t\x12$\n\x04spec\x18\x02 \x01(\x0b\x32\x16.zeromesh.v1.BatchSpec\x12#\n\x06needed\x18\x03 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"\x8b\x02\n\nOfferReply\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12$\n\x07missing\x18\x03 \x03(\x0b\x32\x13.zeromesh.v1.Digest\x12\x15\n\rcomfort_level\x18\x04 \x01(\r\x12\x1c\n\x0fhazard_per_hour\x18\x05 \x01(\x01H\x00\x88\x01\x01\x12,\n\x0breject_kind\x18\x06 \x01(\x0e\x32\x17.zeromesh.v1.RejectKind\x12\x16\n\x0eretry_after_ms\x18\x07 \x01(\r\x12\x17\n\ncore_limit\x18\x08 \x01(\rH\x01\x88\x01\x01\x42\x12\n\x10_hazard_per_hourB\r\n\x0b_core_limit\"\x1e\n\nRunRequest\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\t\"\x1c\n\x08\x42\x61tchRef\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\t\"\xcc\x02\n\x0bItemOutcome\x12\n\n\x02id\x18\x01 \x01(\t\x12\x11\n\texit_code\x18\x02 \x01(\x05\x12)\n\x07\x66\x61ilure\x18\x03 \x01(\x0e\x32\x18.zeromesh.v1.FailureKind\x12\x0f\n\x07message\x18\x04 \x01(\t\x12(\n\x07outputs\x18\x05 \x03(\x0b\x32\x17.zeromesh.v1.OutputFile\x12#\n\x06stdout\x18\x06 \x01(\x0b\x32\x13.zeromesh.v1.Digest\x12#\n\x06stderr\x18\x07 \x01(\x0b\x32\x13.zeromesh.v1.Digest\x12\x13\n\x0bstdout_tail\x18\x08 \x01(\x0c\x12\x13\n\x0bstderr_tail\x18\t \x01(\x0c\x12\x0f\n\x07wall_ms\x18\n \x01(\x03\x12\x0e\n\x06\x63pu_ms\x18\x0b \x01(\x03\x12\x10\n\x08peak_mem\x18\x0c \x01(\x03\x12\x11\n\tfootprint\x18\r \x03(\t\"B\n\x0f\x43heckpointSaved\x12\x0c\n\x04item\x18\x01 \x01(\t\x12!\n\x04tree\x18\x02 \x01(\x0b\x32\x13.zeromesh.v1.Digest\"1\n\rBatchFinished\x12\r\n\x05\x65rror\x18\x01 \x01(\t\x12\x11\n\tcancelled\x18\x02 \x01(\x08\"\xdb\x01\n\nBatchEvent\x12\x11\n\x07started\x18\x01 \x01(\tH\x00\x12#\n\x03log\x18\x02 \x01(\x0b\x32\x14.zeromesh.v1.ItemLogH\x00\x12(\n\x04\x64one\x18\x03 \x01(\x0b\x32\x18.zeromesh.v1.ItemOutcomeH\x00\x12\x32\n\ncheckpoint\x18\x04 \x01(\x0b\x32\x1c.zeromesh.v1.CheckpointSavedH\x00\x12.\n\x08\x66inished\x18\x05 \x01(\x0b\x32\x1a.zeromesh.v1.BatchFinishedH\x00\x42\x07\n\x05\x65vent\"+\n\rFootprintFile\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0c\n\x04hash\x18\x02 \x01(\t\"d\n\tFootprint\x12)\n\x05\x66iles\x18\x01 \x03(\x0b\x32\x1a.zeromesh.v1.FootprintFile\x12,\n\x08listings\x18\x02 \x03(\x0b\x32\x1a.zeromesh.v1.FootprintFile\"\xc4\x01\n\nCachedItem\x12(\n\x07outputs\x18\x01 \x03(\x0b\x32\x17.zeromesh.v1.OutputFile\x12#\n\x06stdout\x18\x02 \x01(\x0b\x32\x13.zeromesh.v1.Digest\x12#\n\x06stderr\x18\x03 \x01(\x0b\x32\x13.zeromesh.v1.Digest\x12\x0f\n\x07wall_ms\x18\x04 \x01(\x03\x12\x10\n\x08peak_mem\x18\x05 \x01(\x03\x12\x0c\n\x04node\x18\x06 \x01(\t\x12\x11\n\tfootprint\x18\x07 \x03(\t\"*\n\x0b\x43\x61\x63heLookup\x12\x0c\n\x04keys\x18\x01 \x03(\t\x12\r\n\x05weaks\x18\x02 \x03(\t\"?\n\tKeyedItem\x12\x0b\n\x03key\x18\x01 \x01(\t\x12%\n\x04item\x18\x02 \x01(\x0b\x32\x17.zeromesh.v1.CachedItem\"J\n\x0eWeakFootprints\x12\x0c\n\x04weak\x18\x01 \x01(\t\x12*\n\nfootprints\x18\x02 \x03(\x0b\x32\x16.zeromesh.v1.Footprint\"i\n\x10\x43\x61\x63heLookupReply\x12$\n\x04hits\x18\x01 \x03(\x0b\x32\x16.zeromesh.v1.KeyedItem\x12/\n\nfootprints\x18\x02 \x03(\x0b\x32\x1b.zeromesh.v1.WeakFootprints\"(\n\x0b\x43\x61\x63heForget\x12\x0c\n\x04keys\x18\x01 \x03(\t\x12\x0b\n\x03\x61ll\x18\x02 \x01(\x08\"|\n\x0b\x44rainNotice\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12*\n\x04\x63ode\x18\x03 \x01(\x0e\x32\x1c.zeromesh.v1.DepartureReason\x12\x0e\n\x06ttl_ms\x18\x04 \x01(\r\x12\x10\n\x08grace_ms\x18\x05 \x01(\r\"H\n\x0bSeedRequest\x12\x13\n\x0bsource_hint\x18\x01 \x01(\t\x12$\n\x07\x64igests\x18\x02 \x03(\x0b\x32\x13.zeromesh.v1.Digest\"@\n\tSeedReply\x12$\n\x07\x66\x65tched\x18\x01 \x03(\x0b\x32\x13.zeromesh.v1.Digest\x12\r\n\x05\x65rror\x18\x02 \x01(\t*\x88\x01\n\nRejectKind\x12\x16\n\x12REJECT_UNSPECIFIED\x10\x00\x12\x13\n\x0fREJECT_DRAINING\x10\x01\x12\x0f\n\x0bREJECT_BUSY\x10\x02\x12\x16\n\x12REJECT_UNSUPPORTED\x10\x03\x12\x0e\n\nREJECT_ENV\x10\x04\x12\x14\n\x10REJECT_TOOLCHAIN\x10\x05*\x98\x01\n\x0f\x44\x65partureReason\x12\x19\n\x15\x44\x45PARTURE_UNSPECIFIED\x10\x00\x12\x14\n\x10\x44\x45PARTURE_UNPLUG\x10\x01\x12\x15\n\x11\x44\x45PARTURE_BATTERY\x10\x02\x12\x11\n\rDEPARTURE_LID\x10\x03\x12\x13\n\x0f\x44\x45PARTURE_OWNER\x10\x04\x12\x15\n\x11\x44\x45PARTURE_SUSPEND\x10\x05\x32\xd8\x05\n\x07NodeApi\x12=\n\x05\x41\x64mit\x12\x17.zeromesh.v1.AdmitHello\x1a\x1b.zeromesh.v1.AdmitChallenge\x12;\n\x0c\x41\x64mitConfirm\x12\x17.zeromesh.v1.AdmitProof\x1a\x12.zeromesh.v1.Empty\x12\x31\n\x04Ping\x12\x12.zeromesh.v1.Empty\x1a\x15.zeromesh.v1.PeerInfo\x12\x39\n\nOfferBatch\x12\x12.zeromesh.v1.Offer\x1a\x17.zeromesh.v1.OfferReply\x12\x35\n\tPushBlobs\x12\x12.zeromesh.v1.Chunk\x1a\x12.zeromesh.v1.Empty(\x01\x12\x37\n\tPullBlobs\x12\x14.zeromesh.v1.Digests\x1a\x12.zeromesh.v1.Chunk0\x01\x12=\n\tSeedBlobs\x12\x18.zeromesh.v1.SeedRequest\x1a\x16.zeromesh.v1.SeedReply\x12>\n\x08RunBatch\x12\x17.zeromesh.v1.RunRequest\x1a\x17.zeromesh.v1.BatchEvent0\x01\x12\x38\n\x0b\x43\x61ncelBatch\x12\x15.zeromesh.v1.BatchRef\x1a\x12.zeromesh.v1.Empty\x12\x35\n\x05\x44rain\x12\x18.zeromesh.v1.DrainNotice\x1a\x12.zeromesh.v1.Empty\x12\x46\n\x0bLookupCache\x12\x18.zeromesh.v1.CacheLookup\x1a\x1d.zeromesh.v1.CacheLookupReply\x12;\n\x0b\x46orgetCache\x12\x18.zeromesh.v1.CacheForget\x1a\x12.zeromesh.v1.Emptyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'zeromesh.v1.node_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_REJECTKIND']._serialized_start=916
-  _globals['_REJECTKIND']._serialized_end=1014
-  _globals['_DEPARTUREREASON']._serialized_start=1017
-  _globals['_DEPARTUREREASON']._serialized_end=1169
-  _globals['_ADMITHELLO']._serialized_start=65
-  _globals['_ADMITHELLO']._serialized_end=109
-  _globals['_ADMITCHALLENGE']._serialized_start=111
-  _globals['_ADMITCHALLENGE']._serialized_end=172
-  _globals['_ADMITPROOF']._serialized_start=174
-  _globals['_ADMITPROOF']._serialized_end=199
-  _globals['_OFFER']._serialized_start=201
-  _globals['_OFFER']._serialized_end=299
-  _globals['_OFFERREPLY']._serialized_start=302
-  _globals['_OFFERREPLY']._serialized_end=569
-  _globals['_SEEDREQUEST']._serialized_start=571
-  _globals['_SEEDREQUEST']._serialized_end=643
-  _globals['_SEEDREPLY']._serialized_start=645
-  _globals['_SEEDREPLY']._serialized_end=709
-  _globals['_RUNREQUEST']._serialized_start=711
-  _globals['_RUNREQUEST']._serialized_end=760
-  _globals['_TASKREF']._serialized_start=762
-  _globals['_TASKREF']._serialized_end=788
-  _globals['_DRAINNOTICE']._serialized_start=790
-  _globals['_DRAINNOTICE']._serialized_end=914
-  _globals['_NODEAPI']._serialized_start=1172
-  _globals['_NODEAPI']._serialized_end=1761
+  _globals['_BATCHITEM_ENVENTRY']._loaded_options = None
+  _globals['_BATCHITEM_ENVENTRY']._serialized_options = b'8\001'
+  _globals['_REJECTKIND']._serialized_start=2985
+  _globals['_REJECTKIND']._serialized_end=3121
+  _globals['_DEPARTUREREASON']._serialized_start=3124
+  _globals['_DEPARTUREREASON']._serialized_end=3276
+  _globals['_ADMITHELLO']._serialized_start=88
+  _globals['_ADMITHELLO']._serialized_end=132
+  _globals['_ADMITCHALLENGE']._serialized_start=134
+  _globals['_ADMITCHALLENGE']._serialized_end=195
+  _globals['_ADMITPROOF']._serialized_start=197
+  _globals['_ADMITPROOF']._serialized_end=222
+  _globals['_BATCHITEM']._serialized_start=225
+  _globals['_BATCHITEM']._serialized_end=504
+  _globals['_BATCHITEM_ENVENTRY']._serialized_start=462
+  _globals['_BATCHITEM_ENVENTRY']._serialized_end=504
+  _globals['_BATCHSPEC']._serialized_start=507
+  _globals['_BATCHSPEC']._serialized_end=926
+  _globals['_OFFER']._serialized_start=928
+  _globals['_OFFER']._serialized_end=1028
+  _globals['_OFFERREPLY']._serialized_start=1031
+  _globals['_OFFERREPLY']._serialized_end=1298
+  _globals['_RUNREQUEST']._serialized_start=1300
+  _globals['_RUNREQUEST']._serialized_end=1330
+  _globals['_BATCHREF']._serialized_start=1332
+  _globals['_BATCHREF']._serialized_end=1360
+  _globals['_ITEMOUTCOME']._serialized_start=1363
+  _globals['_ITEMOUTCOME']._serialized_end=1695
+  _globals['_CHECKPOINTSAVED']._serialized_start=1697
+  _globals['_CHECKPOINTSAVED']._serialized_end=1763
+  _globals['_BATCHFINISHED']._serialized_start=1765
+  _globals['_BATCHFINISHED']._serialized_end=1814
+  _globals['_BATCHEVENT']._serialized_start=1817
+  _globals['_BATCHEVENT']._serialized_end=2036
+  _globals['_FOOTPRINTFILE']._serialized_start=2038
+  _globals['_FOOTPRINTFILE']._serialized_end=2081
+  _globals['_FOOTPRINT']._serialized_start=2083
+  _globals['_FOOTPRINT']._serialized_end=2183
+  _globals['_CACHEDITEM']._serialized_start=2186
+  _globals['_CACHEDITEM']._serialized_end=2382
+  _globals['_CACHELOOKUP']._serialized_start=2384
+  _globals['_CACHELOOKUP']._serialized_end=2426
+  _globals['_KEYEDITEM']._serialized_start=2428
+  _globals['_KEYEDITEM']._serialized_end=2491
+  _globals['_WEAKFOOTPRINTS']._serialized_start=2493
+  _globals['_WEAKFOOTPRINTS']._serialized_end=2567
+  _globals['_CACHELOOKUPREPLY']._serialized_start=2569
+  _globals['_CACHELOOKUPREPLY']._serialized_end=2674
+  _globals['_CACHEFORGET']._serialized_start=2676
+  _globals['_CACHEFORGET']._serialized_end=2716
+  _globals['_DRAINNOTICE']._serialized_start=2718
+  _globals['_DRAINNOTICE']._serialized_end=2842
+  _globals['_SEEDREQUEST']._serialized_start=2844
+  _globals['_SEEDREQUEST']._serialized_end=2916
+  _globals['_SEEDREPLY']._serialized_start=2918
+  _globals['_SEEDREPLY']._serialized_end=2982
+  _globals['_NODEAPI']._serialized_start=3279
+  _globals['_NODEAPI']._serialized_end=4007
 # @@protoc_insertion_point(module_scope)

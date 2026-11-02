@@ -1,128 +1,115 @@
 # ZeroMesh Python SDK
 
-The `zeromesh` Python package provides a clean, ergonomic client for submitting, mapping, and monitoring compute jobs across a ZeroMesh peer network.
-
-It talks directly to the local ZeroMesh daemon (`zmd`) over its UNIX domain socket using the protobuf `ClientApi`.
+Write an **adapter**: a small program that describes a tool's work as items. The platform snapshots
+the workspace, ships the software, places items on the team's machines, retries what infrastructure
+broke, caches what did not change, writes each item's outputs back as it finishes and leaves a
+standard report.
 
 ## Installation
 
 ```bash
-pip install ./sdk/python
+pip install -e sdk/python      # needs grpcio and protobuf; a running zmd
 ```
 
-For development (pytest, regenerating protos on `pip install -e`):
-
-```bash
-pip install './sdk/python[dev]'
-```
-
-Ensure `zmd` is running locally before submitting jobs:
-```bash
-zmd &
-```
-
-## Quick Start: Distributed Parameter Mapping
+## An adapter
 
 ```python
-import zeromesh
+from zeromesh.adapter import Adapter, AdapterError, Item, Out, Env, Res, Policy, main
 
-# 1. Connect to local daemon (raises zeromesh.DaemonNotRunning if daemon is offline)
-zm = zeromesh.connect()
+class Sweep(Adapter):
+    name = "zm-sweep"                       # the command; `zm sweep` runs `zm-sweep`
+    kind = "solver"                         # costs and memory are learned per kind
+    env = Env.host("solver", version=">=2") # or Env.capture([...]) / Env.ref("sha256:...")
+    res = Res(cores=2, mem="1G")            # mem set = a hard limit; unset = learned
+    policy = Policy(keep_going=True)
 
-# 2. Upload workspace / scene tree to Content-Addressable Storage (CAS)
-root = zm.upload("./scene")
+    def add_args(self, p):                  # domain flags only
+        p.add_argument("cases", nargs="+")
 
-# 3. Map commands across parameters or items
-job = zm.map(
-    argv=["blender", "-b", "shot.blend", "-f", "{}"],
-    items=range(1, 241),
-    input_root=root,
-    outputs=["out/"],
-    env="host",
-    cores=1,
-)
+    def check(self, a):                     # fail early, before anything is uploaded
+        if not a.cases:
+            raise AdapterError("no cases")
 
-# 4. Stream real-time events
-for event in job.events():
-    if event.log_chunk:
-        print(event.log_chunk.decode("utf-8", errors="replace"), end="")
+    def items(self, a):
+        for case in a.cases:
+            yield Item(id=case, argv=["solver", case], outputs=[Out(f"{case}.out")])
 
-# 5. Wait for completion (raises TaskFailed if any task returns non-zero exit code)
-status = job.wait()
+    def finish(self, a, run):               # here, after the run, with every result
+        print(len(run.succeeded), "solved; outputs under", run.out_dir)
 
-# 6. Fetch outputs from completed tasks
-for task_name in status.results:
-    job.fetch(task_name, "renders/")
-
-print(f"Job {job.job_id} completed successfully!")
+if __name__ == "__main__":
+    main(Sweep)
 ```
 
-## Advanced DAG Workflows
+`main` exits 0 when every item succeeded, 1 when some did not, 2 for a usage error or a missing zmd,
+and 130 on Ctrl-C (finished items are kept; `--resume RUN` continues).
 
-For complex Directed Acyclic Graph (DAG) pipelines with task dependencies and intermediate outputs:
+### Items
+
+| Field | Meaning |
+|---|---|
+| `id` | stable across runs: names the item in reports, the cache and `--resume` |
+| `argv`, `cwd`, `env` | the command, its directory relative to the workspace root, extra variables |
+| `outputs` | `Out(path, dest=None, required=True)`: written to `dest` under `--out` (default: the same path); `Out.changed(dest)`: every file the item creates or modifies |
+| `inputs` | workspace paths it reads (default: all); the cache keys on them |
+| `footprint` | `Depfile("x.d", search_dirs=[...])`: the item writes a Make-style depfile and the cache keys on what it lists |
+| `stage`, `seq`, `after`, `cost`, `priority` | stage name, position for `combine`, items that must succeed first, a size hint, order |
+
+### Environments
+
+- `Env.host("blender", version=">=4.0")`: donors use their own install. Without `version`, only donors
+  with exactly this machine's build qualify; with it, the version is probed at offer time.
+- `Env.capture(probes=[["blender", "--version"]], paths=["/opt/blender"])`: captured here (what the probes
+  read and run, plus the paths) and shipped by digest, so donors without the software run the items.
+- `Env.ref("sha256:...")`: a tree captured earlier by `zm env capture`.
+
+### Stages and combine
+
+The class attributes describe the default stage. `stages(a)` returns more `Stage(name=..., env=...,
+res=..., kind=..., where="anywhere|local|remote")`; an item picks one with `stage=`. `combine(a)` returns
+one command for consecutive items of the default stage, with `{first}` and `{last}` replaced by their
+`seq`: tools with a slow start (a renderer loading a scene) pay it once per batch, and each item's
+outputs are still committed and retried on their own.
+
+### Shared flags
+
+Every adapter takes `--env host|capture|sha256:TREE`, `--cores N`, `--mem SIZE`, `--gpu N`,
+`--remote-only`, `--local-only`, `--keep-going`, `--no-cache`, `--batch N`, `--deadline DURATION`,
+`--budget DURATION`, `--dry-run`, `--show-upload`, `--force-large`, `--resume RUN`, `--socket PATH`,
+`-v` (stream item output) and `-o/--out DIR` (default `zm-out`; `report.json` and
+`report.trace.json` go there).
+
+## Sessions
+
+For work that grows from results:
 
 ```python
-import zeromesh
-from zeromesh.v1 import common_pb2
+from zeromesh import Session, Item, Out
 
-zm = zeromesh.connect()
-
-# Define upstream task A
-task_a = common_pb2.TaskSpec(
-    name="build",
-    argv=["gcc", "-c", "main.c", "-o", "main.o"],
-    outputs=["main.o"],
-    env_spec=common_pb2.EnvSpec(name="host"),
-)
-
-# Define downstream task B that depends on task A
-task_b = common_pb2.TaskSpec(
-    name="link",
-    argv=["gcc", "main.o", "-o", "app"],
-    outputs=["app"],
-    env_spec=common_pb2.EnvSpec(name="host"),
-    depends_on=["build"],
-    inputs_from=[common_pb2.InputFrom(task="build", path=".")],
-)
-
-# Submit DAG
-job = zm.submit(common_pb2.JobSpec(name="build_pipeline", tasks=[task_a, task_b]))
-job.wait()
-job.fetch("link", "./bin")
+with Session("zm-explore", workspace=".") as s:
+    s.add(Item(id="seed", argv=["solver", "seed"], outputs=[Out("seed.out")]))
+    for result in s.as_completed():
+        if result.id == "seed":
+            s.add(Item(id="refine", argv=["solver", "refine"], outputs=[Out("refine.out")]))
+            s.close()                      # no more items; the loop ends when they are done
 ```
 
-## Peer Discovery & Team Management
+## Reports
 
 ```python
-peers = zm.peers()
-for peer in peers:
-    print(f"Peer: {peer.hostname} ({peer.node_id[:8]}) - State: {peer.state} - Admitted: {peer.admitted}")
-
-info = zm.team_info()
-print(f"Team ID: {info.team_id}, Active: {info.in_team}, Pinned peers: {info.peers_pinned}")
+from zeromesh import report
+rep = report.load("zm-out/report.json")   # zeromesh.v1.run_pb2.Report
+for r in report.failed(rep):
+    print(report.describe(r))             # "case7: out of memory: ..."
 ```
 
-## Saving Partial Results (`commit_unit`)
+## The low-level client
 
-A task made of many units (frames, sweep cases) can save each one as it finishes. If the donor leaves or the
-task is cut off, the next attempt starts with those units already present, so only the rest runs again.
+`zeromesh.connect()` returns a `Client` with one method per ClientApi call (`snapshot`,
+`capture_env`, `submit`, `watch`, `get_report`, `cancel`, `resume`, `peers`, `doctor`, `team_*`, ...).
+The socket is `$ZM_SOCKET` (set by `zm` for the adapters it starts), else the one zmd uses.
 
-```python
-import zeromesh
+## Examples and tests
 
-for i in range(100):
-    if zeromesh.is_committed(f"case{i}"):
-        continue                                   # an earlier attempt finished it
-    result = run_case(i)
-    zeromesh.commit_unit(f"case{i}", result)       # bytes, text, or a file path (copied); atomic
-```
-
-`commit_unit` works only inside a task (it writes to `$ZM_UNITS_DIR`). Unit ids are 1-128 characters of
-`A-Z a-z 0-9 . _ -` and may not start with a dot. Job events carry a `unit_committed` field as units arrive.
-
-## Error Handling
-
-- `zeromesh.DaemonNotRunning`: Raised if `zmd` is not running or socket is unreachable.
-- `zeromesh.TaskFailed`: Raised by `job.wait()` on task failure. Contains `exit_code`, `stderr_head`, and `result`.
-- `zeromesh.JobCancelled`: Raised if job was aborted.
-- `KeyboardInterrupt`: Safely traps interrupt, cancels the remote job on `zmd`, and exits.
+`examples/hello_world.py` and `examples/parameter_sweep.py` are complete adapters.
+`meson test -C build sdk_python` runs the SDK's tests against real zmd processes.
