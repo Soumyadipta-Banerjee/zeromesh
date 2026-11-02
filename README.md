@@ -55,6 +55,12 @@ Requirements: Linux, a C++20 compiler (GCC ≥ 11 or Clang ≥ 13), Meson + Ninj
 pytest: `python3 -m venv ~/.venvs/zeromesh && ~/.venvs/zeromesh/bin/pip install './sdk/python[dev]'`, then run
 `make test` with that venv's `bin` first on `PATH` (meson records the interpreter when it configures).
 
+Running work also needs cgroup v2 and a systemd user manager (every current desktop distribution has
+both): zmd runs all work in a cgroup delegated to it, whose memory the kernel holds to `max_memory_pct`
+of RAM (75% by default, `~/.config/zeromesh/donor.toml`), always leaving 512 MiB for the system. Its systemd unit has `Delegate=`; started any
+other way (a terminal, SSH, the tests), zmd asks the user's systemd for a delegated scope itself. A
+node without one runs no items and `zm doctor` says why.
+
 On Ubuntu, AppArmor blocks unprivileged user namespaces by default. Without this, donors fail every
 sandboxed task with `bwrap: loopback: Failed RTM_NEWADDR` (shared compiles fall back to local or
 fail with `--no-retry-local`):

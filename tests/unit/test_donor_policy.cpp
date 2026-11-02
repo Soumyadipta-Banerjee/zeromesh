@@ -43,6 +43,12 @@ TEST(DonorPolicyDefaults) {
     ASSERT_EQ(p.CoreLimit(1), 1);
     ASSERT_FALSE(p.allow_network);
     ASSERT_EQ(p.drain_below_battery, 20);
+    ASSERT_EQ(p.max_memory_pct, 75);
+    ASSERT_EQ(p.MemoryBudget(8ull << 30), 6ull << 30);
+    ASSERT_EQ(p.MemoryBudget(0), 0ull); // unknown machine size: no budget to hold reservations to
+    // A small machine keeps 512 MiB for itself, whatever the share (75% of 1459 MiB would leave 365).
+    ASSERT_EQ(p.MemoryBudget(1459ull << 20), 947ull << 20);
+    ASSERT_EQ(p.MemoryBudget(256ull << 20), 128ull << 20); // a tiny one keeps half
 
     auto why = Why(p, Laptop(30, false), Echo(), 0);
     ASSERT_TRUE(why.has_value());
@@ -60,19 +66,46 @@ TEST(DonorPolicyDefaults) {
     ASSERT_TRUE(Why(p, Laptop(-1, true), big, 0).has_value());
 }
 
-TEST(DonorPolicyCountsMemoryPromisedToOtherTasks) {
+TEST(DonorPolicyHoldsMemoryReservationsToTheBudget) {
     DonorPolicy p;
+    p.max_memory_pct = 50;
     auto t = Laptop(-1, true);
-    t.mem_available = 4ull << 30;
+    t.mem_total = 8ull << 30;     // a 4 GiB budget
+    t.mem_available = 1ull << 20; // what happens to be free this second plays no part
     auto spec = Echo();
     spec.mem_bytes = 1ll << 30;
-    // 1 GiB fits in 4 GiB when nothing else is promised, and when 2 GiB is, but not when 3.5 GiB is.
+    // 1 GiB fits when nothing is promised, and beside 3 GiB (exactly the budget), not beside more.
     ASSERT_FALSE(p.Evaluate(t, spec, 0, 0).has_value());
-    ASSERT_FALSE(p.Evaluate(t, spec, 0, 2ll << 30).has_value());
-    auto busy = p.Evaluate(t, spec, 0, 7ll << 29);
+    ASSERT_FALSE(p.Evaluate(t, spec, 0, 3ll << 30).has_value());
+    auto busy = p.Evaluate(t, spec, 0, (3ll << 30) + 1);
     ASSERT_TRUE(busy.has_value());
     ASSERT_TRUE(busy->kind == zeromesh::node::RefusalKind::Busy); // passing: the requester retries when memory frees
     ASSERT_TRUE(busy->reason.find("promised") != std::string::npos);
+    // Reserving more than the whole budget is an estimate, not a need: it holds all of it (runs
+    // alone), so it waits for an empty node but is not refused.
+    spec.mem_bytes = 5ll << 30;
+    ASSERT_FALSE(p.Evaluate(t, spec, 0, 0).has_value());
+    auto wait = p.Evaluate(t, spec, 0, 1);
+    ASSERT_TRUE(wait.has_value() && wait->kind == zeromesh::node::RefusalKind::Busy);
+    // One that must run alone holds all of it too, however little it reserves.
+    spec.mem_bytes = 1ll << 20;
+    spec.alone = true;
+    ASSERT_FALSE(p.Evaluate(t, spec, 0, 0).has_value());
+    auto alone = p.Evaluate(t, spec, 0, 1);
+    ASSERT_TRUE(alone.has_value() && alone->kind == zeromesh::node::RefusalKind::Busy);
+    ASSERT_TRUE(alone->reason.find("to itself") != std::string::npos);
+    // A known need, or a hard limit, above the budget never fits here: unsupported, saying what does.
+    spec.alone = false;
+    spec.mem_need = 5ll << 30;
+    auto never = p.Evaluate(t, spec, 0, 0);
+    ASSERT_TRUE(never.has_value());
+    ASSERT_TRUE(never->kind == zeromesh::node::RefusalKind::Unsupported);
+    ASSERT_TRUE(never->reason.find("needs at least 5120 MiB of memory; work on this node may use 4096 MiB") !=
+                std::string::npos);
+    spec.mem_need = 0;
+    spec.mem_limit = 5ll << 30;
+    auto limit = p.Evaluate(t, spec, 0, 0);
+    ASSERT_TRUE(limit.has_value() && limit->kind == zeromesh::node::RefusalKind::Unsupported);
 }
 
 TEST(DonorPolicyNetwork) {
@@ -94,21 +127,26 @@ TEST(DonorPolicyParse) {
                                                      "allow_on_battery_above = 80   # trailing comment\n"
                                                      "\n"
                                                      "max_cores=3\n"
+                                                     "max_memory_pct = 40\n"
                                                      "allow_network = true\n");
     DonorPolicy p = DonorPolicy::Load(dir.path());
     ASSERT_EQ(p.allow_on_battery_above, 80);
     ASSERT_EQ(p.max_cores, 3);
     ASSERT_EQ(p.CoreLimit(8), 3);
+    ASSERT_EQ(p.max_memory_pct, 40);
+    ASSERT_EQ(p.MemoryBudget(10ull << 30), 4ull << 30);
     ASSERT_TRUE(p.allow_network);
     ASSERT_EQ(p.drain_below_battery, 20);
 
     std::ostringstream warn;
-    DonorPolicy q = DonorPolicy::Parse("colour = blue\ndrain_below_battery = lots\nnonsense\n", warn);
+    DonorPolicy q = DonorPolicy::Parse("colour = blue\ndrain_below_battery = lots\nnonsense\nmax_memory_pct = 0\n", warn);
     ASSERT_EQ(q.drain_below_battery, 20);
+    ASSERT_EQ(q.max_memory_pct, 75); // 0 would let no work run: refused, the default kept
     const std::string w = warn.str();
     ASSERT_TRUE(w.find("donor.toml:1: unknown key 'colour'") != std::string::npos);
     ASSERT_TRUE(w.find("donor.toml:2: bad value") != std::string::npos);
     ASSERT_TRUE(w.find("donor.toml:3:") != std::string::npos);
+    ASSERT_TRUE(w.find("donor.toml:4: bad value for max_memory_pct") != std::string::npos);
 }
 
 TEST(DonorPolicyParseM4Keys) {

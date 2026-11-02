@@ -72,6 +72,7 @@ core_sources = files(
   'core/node/node_client.cpp',
   'core/node/donor_policy.cpp',
   'core/node/comfort_governor.cpp',
+  'core/node/work_pressure.cpp',
   'core/node/departure.cpp',
   'core/node/blob_transfer.cpp',
   'core/node/requester_blob_source.cpp',

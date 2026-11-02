@@ -21,8 +21,12 @@ struct DoctorFacts {
     bool overlay{false}; // inputs reach items through an overlay
     // kernel.apparmor_restrict_unprivileged_userns; nullopt where the knob does not exist.
     std::optional<int> apparmor_restricts_userns;
-    std::optional<std::string> cgroup; // the delegated cgroup v2 parent; nullopt without delegation
-    bool cgroup_memory{false};         // its memory controller applies limits (declared mem_bytes)
+    // Containment (exec/cgroup.hpp): the cgroup all work runs in and its memory budget, or why work
+    // cannot be contained here.
+    std::string work_cgroup;
+    std::string containment_problem;
+    uint64_t memory_budget{0}; // bytes; 0 = none
+    int memory_pct{0};         // the donor policy's max_memory_pct behind it
     bool dev_fuse{false};              // /dev/fuse opens read-write
     bool fusermount{false};            // fusermount3 on PATH
     bool strace{false};                // strace on PATH (zm env capture)

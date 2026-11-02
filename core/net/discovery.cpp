@@ -190,12 +190,14 @@ std::string FormatAnnouncement(const AnnounceFields& a, const TeamKey& key) {
     AppendNumber(body, t.mem_total);
     body += '\t';
     AppendNumber(body, t.gpus);
+    body += '\t';
+    AppendNumber(body, t.work_mem);
     return Sign(std::move(body), kAnnounceLabel, key);
 }
 
 std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, const TeamKey& key,
                                                     std::string_view self_node_id) {
-    const auto f = OpenEnvelope(packet, kAnnounceTag, 19, kAnnounceLabel, key, self_node_id);
+    const auto f = OpenEnvelope(packet, kAnnounceTag, 20, kAnnounceLabel, key, self_node_id);
     if (!f) return std::nullopt;
     const auto& v = *f;
 
@@ -209,7 +211,8 @@ std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, con
     const auto battery = ParseNumber<int>(v[13]);
     const auto mem_total = ParseNumber<uint64_t>(v[16]);
     const auto gpus = ParseNumber<int>(v[17]);
-    if (!mem_total || !gpus || *gpus < 0) return std::nullopt;
+    const auto work_mem = ParseNumber<uint64_t>(v[18]);
+    if (!mem_total || !gpus || *gpus < 0 || !work_mem) return std::nullopt;
     if (!seq || *seq == 0 || !timestamp_ms || *timestamp_ms <= 0) return std::nullopt;
     if (!node_port || *node_port < 1 || *node_port > 65535) return std::nullopt;
     if (!cores_total || *cores_total < 0 || !cores_free || *cores_free < 0) return std::nullopt;
@@ -243,6 +246,7 @@ std::optional<ParsedAnnouncement> ParseAnnouncement(std::string_view packet, con
     out.peer.is_charging = v[14] == "1";
     out.peer.state = state;
     out.peer.memory_bytes = *mem_total;
+    out.peer.work_memory_bytes = *work_mem;
     out.peer.gpus = *gpus;
     return out;
 }

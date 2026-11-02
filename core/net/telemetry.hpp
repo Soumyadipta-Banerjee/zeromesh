@@ -13,6 +13,7 @@ struct Telemetry {
     int cores_free{0};
     uint64_t mem_total{0};     // bytes
     uint64_t mem_available{0}; // bytes
+    uint64_t work_mem{0};      // bytes all work here may use together (the donor policy's budget); 0: none
     double cpu_load_pct{0.0};  // 0..100
     int battery_pct{-1};       // -1 when there is no battery
     bool on_ac{true};

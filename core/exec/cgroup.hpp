@@ -1,60 +1,80 @@
 #pragma once
 
-// cgroup v2 helpers for task sandboxes. zmd finds the deepest cgroup along its own ancestry where
-// it may create children (a systemd user session delegates one), moves itself into a "zm-daemon"
-// leaf there, and creates one "zm-task-*" cgroup per batch beside it. A batch always gets a cgroup
-// when delegation exists, with whichever limits the delegated controllers allow: the cgroup is what
-// lets a departing donor freeze the batch, the comfort governor throttle it, and the runner see
-// OOM kills and CPU progress, even when no limit could be applied.
+// cgroup v2 containment of the work a node runs.
+//
+// zmd needs its own cgroup delegated to it with the memory, pids and cpu controllers. Its systemd
+// unit gets one through Delegate=; a zmd started any other way asks the user's systemd for a scope
+// with Delegate=yes (EnsureDelegatedScope). There zmd lives in a leaf, and all work runs under one
+// subtree whose memory.max is the node's memory budget: however wrong an estimate is, work cannot
+// take the machine's memory, an OOM kill stays inside the subtree, and zmd keeps answering.
+//
+//   <delegated>/zm-daemon            zmd itself (processes may only live in leaves)
+//   <delegated>/zm-work              memory.max = the budget, no swap
+//   <delegated>/zm-work/b-<id>       one batch: cpu.max, memory.max (a declared limit), oom.group, pids.max
+//   <delegated>/zm-work/b-<id>/<p>   one process of the batch: its exact memory peak, CPU time, OOM kills
+//
+// The batch's cgroup is also what a departing donor freezes and what the comfort governor throttles.
 
 #include <sys/types.h>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace zeromesh::exec::cgroup {
 
-// The parent task cgroups are created under; nullopt without cgroup v2 delegation. The first call
-// moves this process into <parent>/zm-daemon (the no-internal-processes rule requires it).
-std::optional<std::filesystem::path> TaskParent();
+// Why work cannot be contained in this process's cgroup; empty when it can.
+std::string ContainmentProblem();
 
-// The deepest cgroup along our ancestry that this process may create children in, without moving
-// anything (a probe for tests and diagnostics).
-std::optional<std::filesystem::path> DelegatedParent();
+// When ContainmentProblem() is not empty and systemd can give this user a scope with Delegate=yes,
+// re-executes the program in one: same pid, arguments and environment. Tries once per launch and
+// returns when nothing was re-executed. Call first in main, before any thread starts.
+void EnsureDelegatedScope(char** argv);
 
-struct Group {
-    std::filesystem::path dir;
-    bool memory{false}; // memory.max applied
-    bool cpu{false};    // cpu.max applied
+struct Work {
+    std::filesystem::path root; // where batches go; empty when work cannot be contained here
+    std::string problem;        // why not, when root is empty
+    uint64_t budget{0};         // root's memory.max in bytes; 0: none below the machine's own
 };
 
-// A fresh child of `parent` with memory.max = mem_bytes (0: none) and cpu.max = cores (0: none)
-// where those controllers are delegated. nullopt when the directory cannot be created.
-std::optional<Group> Create(const std::filesystem::path& parent, int cores, uint64_t mem_bytes);
-void Remove(const std::filesystem::path& dir);
+// Moves this process into <delegated>/zm-daemon and makes <delegated>/zm-work with memory.max =
+// budget_bytes (0: none). Later calls return the same root with the new budget applied.
+Work SetUpWork(uint64_t budget_bytes);
 
-// Moves the calling process into `dir` (call in the child between fork and exec).
-void Join(const std::filesystem::path& dir);
+// A batch's cgroup under `work`: cpu.max = cores (0: none), memory.max = mem_limit (0: none),
+// memory.oom.group = 1 (an OOM kill takes all of the batch's processes) and pids.max, with the
+// memory controller enabled for its children. nullopt (and *error) when any of that cannot be done.
+std::optional<std::filesystem::path> CreateBatch(const std::filesystem::path& work, int cores, uint64_t mem_limit,
+                                                 std::string* error = nullptr);
+
+// A child of a batch's cgroup for one process and its descendants. nullopt (and *error) when it
+// cannot be made.
+std::optional<std::filesystem::path> CreateChild(const std::filesystem::path& batch, const std::string& name,
+                                                 std::string* error = nullptr);
+
+// Kills what is left in `dir` and below, waits up to `wait` for it to empty, then removes the
+// cgroups bottom-up. False when something could not be removed.
+bool Remove(const std::filesystem::path& dir, std::chrono::milliseconds wait = std::chrono::seconds(5));
+
+// cgroup.procs of `dir`, opened for writing (close-on-exec), or -1. A forked child joins `dir` by
+// writing "0" to it: no allocation between fork and exec.
+int OpenProcs(const std::filesystem::path& dir);
 
 [[nodiscard]] uint64_t OomKills(const std::filesystem::path& dir);
+// Times the cgroup's own memory.max stopped an allocation (memory.events.local "oom"): the limit of
+// this cgroup was hit, not one of an ancestor.
+[[nodiscard]] uint64_t LimitOoms(const std::filesystem::path& dir);
 [[nodiscard]] bool Frozen(const std::filesystem::path& dir);
 bool SetFrozen(const std::filesystem::path& dir, bool frozen);
-// Total CPU time of the cgroup (cpu.stat usage_usec), present even without the cpu controller.
+// CPU time of the cgroup and below (cpu.stat usage_usec, present without the cpu controller too).
 [[nodiscard]] std::optional<uint64_t> CpuUsageUsec(const std::filesystem::path& dir);
-// Memory of the cgroup now (memory.current) and the most it has used (memory.peak, Linux 5.19+).
-[[nodiscard]] std::optional<uint64_t> MemoryCurrent(const std::filesystem::path& dir);
+// The most memory the cgroup and below have used together (memory.peak, Linux 5.19+).
 [[nodiscard]] std::optional<uint64_t> MemoryPeak(const std::filesystem::path& dir);
 [[nodiscard]] std::vector<pid_t> Procs(const std::filesystem::path& dir);
-// SIGKILLs every process in the cgroup at once (cgroup.kill); false when unsupported.
+// SIGKILLs every process in the cgroup and below at once (cgroup.kill, Linux 5.14+).
 bool KillAll(const std::filesystem::path& dir);
-
-// Whether limits can be enforced here: a throwaway cgroup is created and removed.
-struct Enforcement {
-    bool memory{false};
-    bool cpu{false};
-};
-[[nodiscard]] Enforcement Probe();
 
 } // namespace zeromesh::exec::cgroup

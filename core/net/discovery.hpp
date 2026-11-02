@@ -51,7 +51,7 @@ struct DrainFields {
 };
 
 // ZM4\t<team_id>\t<node_id>\t<boot_id>\t<seq>\t<timestamp_ms>\t<hostname>\t...
-//    \t<state>\t<mem_total>\t<gpus>\t<hex mac>
+//    \t<state>\t<mem_total>\t<gpus>\t<work_mem>\t<hex mac>
 // mac = hex(Mac(key, "zm-announce", everything before the last tab)).
 std::string FormatAnnouncement(const AnnounceFields&, const TeamKey&);
 

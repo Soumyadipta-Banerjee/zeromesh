@@ -30,16 +30,15 @@ int64_t MissingForRank(const Candidate& c, int64_t unknown_missing_bytes) {
 // the later keys (missing bytes, load, ...).
 constexpr double kLiveputBucketRatio = 1.05;
 
-// Memory the donor can still promise: what is free right now, and what is left of its total after
-// the tasks we already placed there.
-bool FitsMemory(const Candidate& c, int64_t mem) {
-    if (mem <= 0) return true;
-    if (c.mem_available < static_cast<uint64_t>(mem)) return false;
-    if (c.mem_total > 0) {
-        const int64_t uncommitted = static_cast<int64_t>(c.mem_total) - std::max<int64_t>(c.mem_committed, 0);
-        if (uncommitted < mem) return false;
-    }
-    return true;
+// What the batch needs must fit the node's memory for work at all; what it holds there must fit in
+// what is available and beside the batches we already placed there.
+bool FitsMemory(const Candidate& c, const Need& need) {
+    const auto total = static_cast<int64_t>(c.mem_total);
+    if (total > 0 && (need.mem_need > total || need.mem_limit > total)) return false;
+    const int64_t held = HeldOn(c, need);
+    if (held <= 0) return true;
+    if (c.mem_available < static_cast<uint64_t>(held)) return false;
+    return total <= 0 || total - std::max<int64_t>(c.mem_committed, 0) >= held;
 }
 
 // A transfer under this share of the task's time is noise; ordering then stays on slots alone.
@@ -48,6 +47,13 @@ constexpr double kTransferNoiseShare = 0.01;
 bool KnownLife(const Candidate& c) { return std::isfinite(c.expected_min_s) && c.expected_min_s > 0.0; }
 
 } // namespace
+
+int64_t HeldOn(const Candidate& c, const Need& need) {
+    const int64_t reserved = std::max<int64_t>(need.mem_bytes, 0);
+    const auto total = static_cast<int64_t>(c.mem_total);
+    if (total <= 0) return reserved;
+    return need.alone ? total : std::min(reserved, total);
+}
 
 double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes) {
     const double bandwidth =
@@ -61,7 +67,6 @@ std::vector<Candidate> Rank(const Need& need, std::vector<Candidate> candidates,
     const bool may_local = need.may_local;
     const bool may_remote = need.may_remote;
     const int cores = std::max(need.cores, 1);
-    const int64_t mem = need.mem_bytes;
 
     std::string arch = need.arch;
     if (arch.empty()) {
@@ -74,7 +79,7 @@ std::vector<Candidate> Rank(const Need& need, std::vector<Candidate> candidates,
         if (c.is_local ? !may_local : !may_remote) return true;
         if (!arch.empty() && c.arch != arch) return true;
         if (FreeSlots(c, cores) < 1) return true;
-        if (!FitsMemory(c, mem)) return true;
+        if (!FitsMemory(c, need)) return true;
         if (need.gpus > 0 && c.gpus - c.gpus_in_flight < need.gpus) return true;
         return false;
     });

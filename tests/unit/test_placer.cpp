@@ -96,7 +96,7 @@ TEST(PlacerReportsWhyNoNodeCanRunABatch) {
         AttemptLog log;
         placer->Execute("run/b1", ShBatch({{"x", "true"}}), {}, log.Callbacks());
         ASSERT_TRUE(log.Wait());
-        ASSERT_TRUE(log.result.failure == v1::FAILURE_ENV_UNAVAILABLE);
+        ASSERT_TRUE(log.result.failure == v1::FAILURE_NO_CAPACITY); // nowhere to run, nothing missing
         Expect(log.result.message == "no node can run this batch: no node is online that may run it", log.result.message);
     }
     // A peer without the program: its reason is reported, and the kind says "software".
@@ -350,6 +350,34 @@ TEST(PlacerFailsABatchLargerThanEveryDonorsLimit) {
     Expect(log.result.message.find("no node can run this batch: node-sma: ") == 0 &&
                log.result.message.find("donor policy allows only 2") != std::string::npos,
            log.result.message);
+    ASSERT_TRUE(log.result.failure == v1::FAILURE_NO_CAPACITY); // the node's size, not missing software
+}
+
+TEST(PlacerHoldsReservationsToThePeersAnnouncedBudget) {
+    // A peer with 8 GiB of RAM that lets work use 1 GiB: a batch known to need 2 GiB fits its RAM but
+    // never its budget, so it fails at once with why, instead of waiting for memory forever.
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    auto pb = b.AsPeer();
+    pb.memory_bytes = 8ull << 30;
+    pb.mem_available = 8ull << 30;
+    pb.work_memory_bytes = 1ull << 30;
+    a.peers->Upsert(pb);
+    AttemptLog log;
+    auto placer = PlacerFor(a);
+    auto spec = ShBatch({{"x", "true"}});
+    spec.set_where(v1::REMOTE_ONLY);
+    spec.set_mem_need(2ll << 30);
+    spec.mutable_resources()->set_mem_bytes(2560ll << 20);
+    placer->Execute("run/b1", spec, {}, log.Callbacks());
+    ASSERT_TRUE(log.Wait(std::chrono::seconds(10)));
+    ASSERT_TRUE(log.result.failure == v1::FAILURE_NO_CAPACITY);
+    Expect(log.result.message.find("node-b: lets work use 1024 MiB of memory, the batch needs 2048 MiB") !=
+               std::string::npos,
+           log.result.message);
 }
 
 TEST(PlacerCountsSlotsForTheRunEngine) {
@@ -404,12 +432,50 @@ TEST(PlacerSaysWhenNoDonorHasEnoughMemoryAtAll) {
     a.Admit(b);
     a.peers->Upsert(b.AsPeer()); // 8 GiB
     auto spec = ShBatch({{"x", "true"}});
-    spec.mutable_resources()->set_mem_bytes(16ll << 30);
+    spec.set_mem_need(16ll << 30); // known to need it: no node can take it
+    spec.mutable_resources()->set_mem_bytes(20ll << 30);
     AttemptLog log;
     auto placer = PlacerFor(a);
     placer->Execute("run/b1", spec, {}, log.Callbacks());
     ASSERT_TRUE(log.Wait());
-    ASSERT_TRUE(log.result.failure == v1::FAILURE_ENV_UNAVAILABLE);
-    Expect(log.result.message.find("node-b: has 8192 MiB of memory, the batch needs 16384 MiB") != std::string::npos,
+    ASSERT_TRUE(log.result.failure == v1::FAILURE_NO_CAPACITY);
+    Expect(log.result.message.find("node-b: lets work use 8192 MiB of memory, the batch needs 16384 MiB") !=
+               std::string::npos,
            log.result.message);
+}
+
+TEST(ExecutorHoldsTheWholeBudgetForALargeReservationAndRefusesALargerNeed) {
+    // Reserving more than all work here may use is an estimate: the batch runs alone. Needing more
+    // never fits: it fails at once as "no capacity", holding nothing, and the batch behind it runs.
+    struct Restore {
+        ~Restore() { zeromesh::exec::cgroup::SetUpWork(0); }
+    } restore;
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key);
+    auto runner = std::make_shared<zeromesh::exec::BatchRunner>(a.cas, a.merkle, a.dir / "scratch-budget",
+                                                                 zeromesh::exec::cgroup::SetUpWork(64ull << 20));
+    if (!runner->unavailable().empty()) return; // no sandbox or containment here
+    zeromesh::node::LocalExecutor executor(runner, a.registry, "node-a", 2, a.dir / "state-budget", a.cas, {});
+    ASSERT_EQ(executor.MemoryBudget(), 64ll << 20);
+
+    auto large = ShBatch({{"large", "sleep 0.5"}});
+    large.mutable_resources()->set_mem_bytes(128ll << 20);
+    auto huge = ShBatch({{"huge", "true"}});
+    huge.set_mem_need(128ll << 20);
+    auto small = ShBatch({{"small", "true"}});
+    small.mutable_resources()->set_mem_bytes(1ll << 20);
+    AttemptLog large_log, huge_log, small_log;
+    executor.Execute("run/large", large, {}, large_log.Callbacks());
+    ASSERT_EQ(executor.MemReserved(), 64ll << 20); // all of the budget, not more
+    executor.Execute("run/huge", huge, {}, huge_log.Callbacks());
+    executor.Execute("run/small", small, {}, small_log.Callbacks());
+    ASSERT_TRUE(large_log.Wait());
+    Expect(large_log.result.failure == v1::FAILURE_NONE, large_log.result.message);
+    ASSERT_TRUE(huge_log.Wait());
+    ASSERT_TRUE(huge_log.result.failure == v1::FAILURE_NO_CAPACITY);
+    Expect(huge_log.result.message.find("needs 128 MiB of memory; work on this node may use 64 MiB") != std::string::npos,
+           huge_log.result.message);
+    ASSERT_TRUE(small_log.Wait());
+    Expect(small_log.result.failure == v1::FAILURE_NONE, small_log.result.message);
+    ASSERT_EQ(executor.MemReserved(), 0);
 }

@@ -46,6 +46,15 @@ systemctl --user status zmd
 zm status
 ```
 
+### Containment
+
+`zmd` runs every item inside a cgroup v2 subtree delegated to it (`Delegate=cpu memory pids io` in the
+unit). All work shares one ceiling: `max_memory_pct` of RAM (75% by default, set in
+`~/.config/zeromesh/donor.toml`, always leaving 512 MiB for the system), enforced by the kernel, so an item that needs more than estimated is
+OOM-killed and retried with more memory instead of exhausting the machine. A `zmd` started outside the
+unit asks the user's systemd for a delegated scope (`systemd-run --user --scope -p Delegate=yes`)
+before it starts; `zm doctor` reports where work runs and its budget.
+
 ### Donating While Logged Out (Linger)
 
 To allow `zmd` to start on boot and keep donating compute when you are not logged in:

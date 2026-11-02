@@ -63,6 +63,9 @@ sched::Need NeedOf(const v1::BatchSpec& spec) {
     sched::Need n;
     n.cores = std::max(spec.resources().cores(), 1);
     n.mem_bytes = spec.resources().mem_bytes();
+    n.mem_need = spec.mem_need();
+    n.mem_limit = spec.mem_limit();
+    n.alone = spec.alone();
     n.gpus = spec.resources().gpus();
     n.arch = spec.resources().arch();
     n.may_local = spec.where() != v1::REMOTE_ONLY;
@@ -166,7 +169,7 @@ Placer::Placer(std::shared_ptr<node::LocalExecutor> local, std::shared_ptr<net::
 int Placer::SlotsFor(const v1::Resources& resources, v1::Where where) const {
     const int cores = std::max(resources.cores(), 1);
     int slots = 0;
-    if (local_ && where != v1::REMOTE_ONLY) slots += local_->CoreCapacity() / cores;
+    if (local_ && local_->Unavailable().empty() && where != v1::REMOTE_ONLY) slots += local_->CoreCapacity() / cores;
     if (where != v1::LOCAL_ONLY) {
         for (const auto& p : peers_->ListActive()) {
             if (p.id == local_id_) continue;
@@ -482,8 +485,8 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
     const net::Telemetry self = telemetry_ ? telemetry_() : net::Telemetry{};
     if (spec.resources().arch().empty() && !self.arch.empty()) spec.mutable_resources()->set_arch(self.arch);
     const sched::Need need = NeedOf(spec);
-    const int64_t mem = std::max<int64_t>(need.mem_bytes, 0);
     const int gpus = std::max(need.gpus, 0);
+    int64_t booked_mem = 0; // what this attempt holds of its node's memory for work (HeldOn)
     const std::string input_root_hash = spec.input_root().hash();
     const int64_t input_tree_bytes = InputTreeBytes(spec);
     const double batch_s = BatchSeconds(spec);
@@ -500,13 +503,16 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
 
     auto candidates = [&](bool for_reservation) {
         std::vector<Candidate> out;
-        if (local_ && !(for_reservation ? blocked(local_id_) : skip.contains(local_id_))) {
+        // This node, unless it cannot run work. Its memory is the budget its executor admits against.
+        if (local_ && local_->Unavailable().empty() &&
+            !(for_reservation ? blocked(local_id_) : skip.contains(local_id_))) {
+            const int64_t budget = local_->MemoryBudget();
             Candidate c{.node_id = local_id_,
                         .is_local = true,
                         .cores_total = local_->CoreCapacity(),
                         .cores_free = self.cores_free,
-                        .mem_available = self.mem_available,
-                        .mem_total = self.mem_total,
+                        .mem_available = budget > 0 ? static_cast<uint64_t>(budget) : self.mem_available,
+                        .mem_total = budget > 0 ? static_cast<uint64_t>(budget) : self.mem_total,
                         .cpu_load_pct = self.cpu_load_pct,
                         .on_ac = self.on_ac,
                         .arch = self.arch,
@@ -524,12 +530,15 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
         const bool use_hazard = hazard && hazard->HasHistory();
         for (const auto& p : peers_->ListActive()) {
             if (p.id == local_id_ || (for_reservation ? blocked(p.id) : skip.contains(p.id))) continue;
+            // A peer's memory is the budget it holds work to, as announced; its own offer decision
+            // has the rest (what other requesters hold there).
+            const uint64_t budget = p.work_memory_bytes;
             Candidate c{.node_id = p.id,
                         .is_local = false,
                         .cores_total = p.cores,
                         .cores_free = p.cores_free,
-                        .mem_available = p.mem_available,
-                        .mem_total = p.memory_bytes,
+                        .mem_available = budget > 0 ? budget : p.mem_available,
+                        .mem_total = budget > 0 ? budget : p.memory_bytes,
                         .core_limit = CoreLimitOf(p.id),
                         .cpu_load_pct = p.cpu_load_pct,
                         .on_ac = p.is_charging,
@@ -558,7 +567,8 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
     auto reserve_next = [&]() -> std::optional<Candidate> {
         std::lock_guard lock(shared_->mu);
         for (const Candidate& c : Rank(need, candidates(true), input_tree_bytes, batch_s)) {
-            shared_->AddLocked(c.node_id, 1, mem, gpus);
+            booked_mem = sched::HeldOn(c, need);
+            shared_->AddLocked(c.node_id, 1, booked_mem, gpus);
             std::lock_guard block(batch->mu);
             batch->assigned_node = c.node_id;
             batch->is_local = c.is_local;
@@ -568,7 +578,7 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
     };
     auto release = [&](const std::string& node_id) {
         std::lock_guard lock(shared_->mu);
-        shared_->AddLocked(node_id, -1, mem, gpus);
+        shared_->AddLocked(node_id, -1, booked_mem, gpus);
         {
             std::lock_guard block(batch->mu);
             if (batch->assigned_node == node_id) batch->assigned_node.clear();
@@ -612,8 +622,9 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             for (const auto& c : all) {
                 if (c.is_local ? !need.may_local : !need.may_remote) continue;
                 std::string why;
-                if (mem > 0 && c.mem_total > 0 && static_cast<int64_t>(c.mem_total) < mem) {
-                    why = "has " + mib(static_cast<int64_t>(c.mem_total)) + " of memory, the batch needs " + mib(mem);
+                const int64_t needs = std::max(need.mem_need, need.mem_limit);
+                if (needs > 0 && c.mem_total > 0 && static_cast<int64_t>(c.mem_total) < needs) {
+                    why = "lets work use " + mib(static_cast<int64_t>(c.mem_total)) + " of memory, the batch needs " + mib(needs);
                 } else if (gpus > 0 && c.gpus < gpus) {
                     why = "has " + std::to_string(c.gpus) + " GPU(s), the batch needs " + std::to_string(gpus);
                 } else if (!need.arch.empty() && c.arch != need.arch) {
@@ -623,9 +634,15 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
                 }
                 if (!why.empty()) reasons += (reasons.empty() ? "" : "; ") + c.node_id.substr(0, 8) + ": " + why;
             }
+            if (local_ && need.may_local && !local_->Unavailable().empty()) {
+                reasons += (reasons.empty() ? "" : "; ") + local_id_.substr(0, 8) + ": " + local_->Unavailable();
+            }
             if (reasons.empty()) reasons = "no node is online that may run it";
         }
-        v1::FailureKind kind = v1::FAILURE_ENV_UNAVAILABLE;
+        // What kept it off every node: the software, the exact toolchain, nodes gone, or else the
+        // nodes' size (memory, cores, GPUs, arch) or policy.
+        v1::FailureKind kind = v1::FAILURE_NO_CAPACITY;
+        if (env) kind = v1::FAILURE_ENV_UNAVAILABLE;
         if (toolchain && !env) kind = v1::FAILURE_TOOLCHAIN_MISMATCH;
         if ((!refused.empty() || left) && !reachable) kind = v1::FAILURE_DONOR_LEFT;
         return Done(local_id_, kind, "no node can run this batch" + (reasons.empty() ? std::string() : ": " + reasons));

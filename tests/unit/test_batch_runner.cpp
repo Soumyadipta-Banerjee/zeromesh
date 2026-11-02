@@ -29,10 +29,13 @@ using zeromesh::testing::TempDir;
 using zeromesh::testing::WriteFile;
 
 struct Fixture {
+    // `budget`: the memory all work on this node may use (the process-wide work cgroup's memory.max).
+    explicit Fixture(uint64_t budget = 0) : runner{cas, merkle, dir / "scratch", zeromesh::exec::cgroup::SetUpWork(budget)} {}
+
     TempDir dir;
     std::shared_ptr<zeromesh::store::CasStore> cas = std::make_shared<zeromesh::store::CasStore>(dir / "cas");
     std::shared_ptr<zeromesh::store::MerkleBuilder> merkle = std::make_shared<zeromesh::store::MerkleBuilder>(cas);
-    BatchRunner runner{cas, merkle, dir / "scratch"};
+    BatchRunner runner;
 
     std::mutex mu;
     std::map<std::string, ItemRunResult> results;
@@ -371,15 +374,34 @@ TEST(BatchProcessThatClosesItsPipesStillTimesOut) {
 TEST(BatchReportsOomAsItsOwnKind) {
     Fixture f;
     if (!f.Usable()) return;
-    if (!zeromesh::exec::cgroup::Probe().memory) {
-        std::cout << "[SKIP] no delegated memory controller\n";
-        return;
-    }
     auto spec = f.Spec();
     spec.mem_bytes = 64ull << 20;
     spec.items = {Fixture::Sh("hog", "python3 -c 'b = bytearray(512 * 1024 * 1024); print(len(b))'")};
     f.Run(spec);
     ASSERT_TRUE(f.results["hog"].failure == ItemFailure::Oom);
+    ASSERT_TRUE(f.results["hog"].message.find("the batch's limit is 64 MiB") != std::string::npos);
+    ASSERT_TRUE(f.results["hog"].oom_at_limit); // its own limit: it needs more than that
+}
+
+TEST(BatchWorkBudgetHoldsWorkThatDeclaresNoLimit) {
+    // However wrong an estimate, work cannot take more than the node's budget: an item past it is
+    // OOM-killed inside the work cgroup and said to be, though its batch declared no limit.
+    struct Restore {
+        ~Restore() { zeromesh::exec::cgroup::SetUpWork(0); }
+    } restore;
+    Fixture f(96ull << 20);
+    if (!f.Usable()) return;
+    ASSERT_EQ(f.runner.work().budget, 96ull << 20);
+    auto spec = f.Spec();
+    spec.items = {Fixture::Sh("hog", "python3 -c 'b = bytearray(512 * 1024 * 1024); b[::4096] = b\"x\" * len(b[::4096])'"),
+                  Fixture::Sh("small", "echo fits")};
+    f.Run(spec);
+    ASSERT_TRUE(f.results["hog"].failure == ItemFailure::Oom);
+    ASSERT_TRUE(f.results["hog"].message.find("work on this node may use 96 MiB") != std::string::npos);
+    ASSERT_FALSE(f.results["hog"].oom_at_limit); // the node's budget: what it held is a lower bound
+    ASSERT_TRUE(f.results["hog"].peak_mem >= (80ll << 20));
+    // The kill took that item only: the next one in the batch ran.
+    ASSERT_TRUE(f.results["small"].failure == ItemFailure::None);
 }
 
 TEST(BatchMeasuresTheItemsMemoryNotTheSandboxes) {
@@ -391,7 +413,13 @@ TEST(BatchMeasuresTheItemsMemoryNotTheSandboxes) {
     f.Run(spec);
     ASSERT_TRUE(f.results["big"].failure == ItemFailure::None);
     // wait4 on bwrap saw about 2 MiB; the items' processes held over 200 MiB.
-    ASSERT_TRUE(f.results["big"].peak_rss >= (190ll << 20));
+    ASSERT_TRUE(f.results["big"].peak_mem >= (190ll << 20));
+
+    // A short item is measured as exactly as a long one: its cgroup's peak, not a sample.
+    spec.items = {Fixture::Sh("quick", "python3 -c 'b = bytearray(100 << 20); b[::4096] = b\"x\" * len(b[::4096])'")};
+    f.Run(spec);
+    if (f.results["quick"].peak_mem < (90ll << 20))
+        throw std::runtime_error("quick item measured at " + std::to_string(f.results["quick"].peak_mem >> 20) + " MiB");
 
     // Its CPU is counted too (wait4 on bwrap reports none of it).
     spec.items = {Fixture::Sh("busy", "python3 -c 'sum(range(60_000_000))'")};
@@ -402,6 +430,29 @@ TEST(BatchMeasuresTheItemsMemoryNotTheSandboxes) {
     // A small item is small: nothing outside its own processes is counted.
     spec.items = {Fixture::Sh("small", "sleep 1")};
     f.Run(spec);
-    if (f.results["small"].peak_rss >= (64ll << 20))
-        throw std::runtime_error("sleep measured at " + std::to_string(f.results["small"].peak_rss >> 20) + " MiB");
+    if (f.results["small"].peak_mem >= (64ll << 20))
+        throw std::runtime_error("sleep measured at " + std::to_string(f.results["small"].peak_mem >> 20) + " MiB");
+}
+
+TEST(BatchItemStoppedForMemoryIsAnOomOfTheBudget) {
+    // When work is stalled on memory the watcher stops the item that started last: it is reported
+    // as out of the node's memory (not its own limit), with the budget, so it is retried alone.
+    struct Restore {
+        ~Restore() { zeromesh::exec::cgroup::SetUpWork(0); }
+    } restore;
+    Fixture f(512ull << 20);
+    if (!f.Usable()) return;
+    ASSERT_FALSE(f.runner.StopYoungestForMemory()); // nothing runs
+    auto spec = f.Spec();
+    spec.items = {Fixture::Sh("long", "sleep 30")};
+    std::jthread stopper([&] {
+        for (int i = 0; i < 200 && !f.runner.StopYoungestForMemory(); ++i) std::this_thread::sleep_for(20ms);
+    });
+    const auto start = std::chrono::steady_clock::now();
+    f.Run(spec);
+    ASSERT_TRUE(std::chrono::steady_clock::now() - start < 10s);
+    ASSERT_TRUE(f.results["long"].failure == ItemFailure::Oom);
+    ASSERT_FALSE(f.results["long"].oom_at_limit);
+    ASSERT_EQ(f.results["long"].budget, 512ll << 20);
+    ASSERT_TRUE(f.results["long"].message.find("stalled on memory") != std::string::npos);
 }

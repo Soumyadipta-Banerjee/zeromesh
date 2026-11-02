@@ -48,6 +48,7 @@ message PeerInfo {
   bool admitted = 14;      // true when this peer's cert is pinned (team member)
   int64 mem_total = 15;
   int32 gpus = 16;
+  int64 work_mem = 17;     // bytes all work there may use together (its donor policy's budget); 0: none
 }
 
 message Empty {}

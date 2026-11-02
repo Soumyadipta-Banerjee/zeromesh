@@ -16,6 +16,7 @@
 #include "node/departure.hpp"
 #include "node/doctor.hpp"
 #include "node/donor_policy.hpp"
+#include "node/work_pressure.hpp"
 #include "node/env_capture.hpp"
 #include "node/local_executor.hpp"
 #include "node/node_client.hpp"
@@ -220,6 +221,7 @@ int Daemon::Run() {
     std::shared_ptr<store::CasStore> cas;
     std::shared_ptr<run::ItemCache> cache;
     std::shared_ptr<exec::BatchRunner> runner;
+    std::unique_ptr<WorkPressure> work_pressure; // stops the youngest item when work is stalled on memory
     std::shared_ptr<net::Discovery> discovery;
     std::shared_ptr<TeamState> team;
     std::shared_ptr<net::PinStore> pins;
@@ -241,9 +243,12 @@ int Daemon::Run() {
 
     std::mutex telemetry_mu;
     net::TelemetrySampler telemetry_sampler;
+    std::atomic<uint64_t> work_mem{0}; // the memory budget of contained work, once it is set up
     auto telemetry_fn = [&]() {
         std::lock_guard lock(telemetry_mu);
-        return telemetry_sampler.Sample();
+        net::Telemetry t = telemetry_sampler.Sample();
+        t.work_mem = work_mem.load();
+        return t;
     };
     DrainController drain_controller;
     std::unique_ptr<ComfortGovernor> comfort; // outlives the runner whose observer points at it
@@ -320,8 +325,13 @@ int Daemon::Run() {
         }
         cas = std::make_shared<store::CasStore>(config_.state_dir / "cas", cas_limits);
         auto merkle = std::make_shared<store::MerkleBuilder>(cas);
-        runner = std::make_shared<exec::BatchRunner>(cas, merkle, config_.state_dir / "scratch");
-        if (!runner->unavailable().empty()) std::cerr << "zmd: cannot run batches here: " << runner->unavailable() << "\n";
+        // All work runs contained, in one cgroup the kernel holds to the donor policy's share of memory.
+        const DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
+        const exec::cgroup::Work work = exec::cgroup::SetUpWork(policy.MemoryBudget(telemetry_fn().mem_total));
+        runner = std::make_shared<exec::BatchRunner>(cas, merkle, config_.state_dir / "scratch", work);
+        work_mem = work.budget; // announced: requesters hold their reservations to it
+        work_pressure = std::make_unique<WorkPressure>(work.root, [r = runner] { return r->StopYoungestForMemory(); });
+        if (!runner->unavailable().empty()) std::cerr << "zmd: this node runs no work: " << runner->unavailable() << "\n";
         registry = std::make_shared<plugin::Registry>();
         registry->RegisterEnv(envhost::Make());
         registry->RegisterEnv(tree::MakeTreeEnv());
@@ -416,15 +426,16 @@ int Daemon::Run() {
         parts.capture = [capturer](const v1::CaptureRequest& req, v1::CaptureReply* reply) {
             return capturer->Capture(req, reply);
         };
-        parts.doctor = [runner, team, pins, peers, discovery, cas, node_port = config_.node_port,
+        parts.doctor = [runner, team, pins, peers, discovery, cas, memory_pct = policy.max_memory_pct,
+                        node_port = config_.node_port,
                         discovery_port = config_.discovery_port, group = disc_cfg.multicast_group] {
             DoctorFacts f;
-            f.sandbox_problem = runner->unavailable();
+            f.sandbox_problem = runner->sandbox_problem();
             f.overlay = runner->overlay();
-            if (auto parent = exec::cgroup::TaskParent()) {
-                f.cgroup = parent->string();
-                f.cgroup_memory = exec::cgroup::Probe().memory;
-            }
+            f.work_cgroup = runner->work().root.string();
+            f.containment_problem = runner->work().problem;
+            f.memory_budget = runner->work().budget;
+            f.memory_pct = memory_pct;
             f.in_team = team->Get().has_value();
             f.node_port = node_port;
             f.discovery_port = discovery_port;
@@ -439,7 +450,6 @@ int Daemon::Run() {
         };
         client_service = std::make_unique<ClientService>(cas, merkle, peers, opts, std::move(parts), team);
 
-        DonorPolicy policy = DonorPolicy::Load(config_.config_dir);
         drain_controller.SetPolicy(policy);
         comfort = std::make_unique<ComfortGovernor>(ComfortConfig::FromPolicy(policy));
         runner->SetCgroupObserver([g = comfort.get()](const std::filesystem::path& dir, bool added) {

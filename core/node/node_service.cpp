@@ -111,10 +111,11 @@ void NodeService::PurgeExpiredLocked() {
 }
 
 int NodeService::CoresInUseLocked() const {
-    // Running batches hold their cores in the executor; local runs of this node's own requests do too.
+    // Offers not yet run, and every batch the executor accepted (queued or running, this node's own
+    // included): what is promised, not what happens to be busy this second.
     int n = 0;
     for (const auto& [key, r] : reserved_) n += std::max(r.spec.resources().cores(), 1);
-    if (executor_) n += executor_->CoresInUse();
+    if (executor_) n += executor_->CoresReserved();
     return n;
 }
 
@@ -138,8 +139,9 @@ int NodeService::GpusInUseLocked() const {
 
 int64_t NodeService::MemPromisedLocked() const {
     int64_t n = 0;
-    for (const auto& [key, r] : reserved_) n += std::max<int64_t>(r.spec.resources().mem_bytes(), 0);
-    if (executor_) n += executor_->MemInUse();
+    const int64_t budget = executor_ ? executor_->MemoryBudget() : 0;
+    for (const auto& [key, r] : reserved_) n += HeldMemory(r.spec.resources().mem_bytes(), r.spec.alone(), budget);
+    if (executor_) n += executor_->MemReserved();
     return n;
 }
 
@@ -463,6 +465,9 @@ grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* 
         return grpc::Status::OK;
     };
 
+    // A node that cannot sandbox and contain work runs none.
+    if (!executor_->Unavailable().empty()) return reject(executor_->Unavailable(), v1::REJECT_UNSUPPORTED);
+
     // The environment: provider first, then what the batch asks of it.
     const bool tree = spec.env().has_tree();
     plugin::IEnvProvider* env = registry_->Env(tree ? "tree" : "host");
@@ -511,6 +516,9 @@ grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* 
     Demand demand;
     demand.cores = std::max(spec.resources().cores(), 1);
     demand.mem_bytes = spec.resources().mem_bytes();
+    demand.mem_need = spec.mem_need();
+    demand.mem_limit = spec.mem_limit();
+    demand.alone = spec.alone();
     demand.gpus = spec.resources().gpus();
     demand.network = spec.network();
     demand.arch = spec.resources().arch();

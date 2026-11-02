@@ -37,8 +37,9 @@ const v1::Finding* Find(const std::vector<v1::Finding>& fs, const std::string& c
 DoctorFacts Healthy() {
     DoctorFacts f;
     f.overlay = true;
-    f.cgroup = "/sys/fs/cgroup/user.slice/zmd";
-    f.cgroup_memory = true;
+    f.work_cgroup = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/zmd.service/zm-work";
+    f.memory_budget = 12ull << 30;
+    f.memory_pct = 75;
     f.dev_fuse = true;
     f.fusermount = true;
     f.strace = true;
@@ -198,7 +199,8 @@ TEST(DoctorNamesTheFixForEachProblem) {
     auto f = Healthy();
     f.sandbox_problem = "bubblewrap cannot create a sandbox here: bwrap: loopback: Failed RTM_NEWADDR";
     f.apparmor_restricts_userns = 1;
-    f.cgroup_memory = false;
+    f.work_cgroup.clear();
+    f.containment_problem = "/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope is not delegated to this user";
     f.dev_fuse = false;
     f.strace = false;
     f.clock_skew_ms["abcdef0123456789"] = 95'000;
@@ -209,7 +211,10 @@ TEST(DoctorNamesTheFixForEachProblem) {
     ASSERT_TRUE(sandbox && sandbox->severity() == v1::SEVERITY_ERROR);
     ASSERT_TRUE(sandbox->fix().find("apparmor_restrict_unprivileged_userns=0") != std::string::npos);
     ASSERT_TRUE(Find(out, "overlay") == nullptr); // meaningless without a sandbox
-    ASSERT_TRUE(Find(out, "cgroup")->severity() == v1::SEVERITY_WARN);
+    const auto* cgroup = Find(out, "cgroup");
+    ASSERT_TRUE(cgroup && cgroup->severity() == v1::SEVERITY_ERROR); // a node that cannot contain work runs none
+    ASSERT_TRUE(cgroup->message().find("session-3.scope is not delegated") != std::string::npos);
+    ASSERT_TRUE(cgroup->fix().find("systemctl --user start zmd") != std::string::npos);
     ASSERT_TRUE(Find(out, "fuse")->severity() == v1::SEVERITY_WARN);
     ASSERT_TRUE(Find(out, "strace")->severity() == v1::SEVERITY_WARN);
     const auto* clock = Find(out, "clock");

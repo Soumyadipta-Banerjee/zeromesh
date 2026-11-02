@@ -2,7 +2,8 @@
 
 // Donor policy (spec §12): when this node accepts work from team peers. The
 // defaults are safe: donate on AC, or on battery above 50%; use at most
-// cores_total - 1 cores; no network for tasks; drain below 20% battery.
+// cores_total - 1 cores and 75% of memory (leaving 512 MiB); no network for tasks; drain below
+// 20% battery.
 // Sticky drain (M4): once a drain condition trips, stay drained until it has
 // been clear for drain_hold_s (default 300).
 
@@ -32,15 +33,29 @@ struct Refusal {
 // What a batch asks of a donor while it runs.
 struct Demand {
     int cores{1};
-    int64_t mem_bytes{0};
+    int64_t mem_bytes{0}; // reserved, to pack it beside other batches (at most the whole budget)
+    int64_t mem_need{0};  // known to need at least
+    int64_t mem_limit{0}; // a hard limit it may use up to
+    bool alone{false};    // must have the node's memory to itself
     int gpus{0};
     bool network{false};
     std::string arch;
 };
 
+// What a batch holds of a node's memory budget: its reservation, but never more than the whole
+// budget (a batch reserving more simply runs alone), and all of it when it must run alone. With no
+// budget (0), what it reserved.
+int64_t HeldMemory(int64_t reserved, bool alone, int64_t budget);
+
 struct DonorPolicy {
     int allow_on_battery_above{50}; // percent; on battery, accept only above this
     int max_cores{-1};              // -1 = cores_total - 1
+    // The share of this machine's memory all work run here may use together, the owner's own runs
+    // included; at least kMemoryKept stays for the system, zmd and the owner. The kernel holds work
+    // to it (exec/cgroup.hpp): an estimate that is too small ends in an OOM kill of that batch,
+    // never in a machine out of memory.
+    int max_memory_pct{75};
+    static constexpr uint64_t kMemoryKept = 512ull << 20;
     bool allow_network{false};      // batches may ask for network only if this is true
     bool allow_gpu{true};           // batches may use this node's GPUs
     int drain_below_battery{20};    // percent; on battery below this, refuse and drain
@@ -74,6 +89,9 @@ struct DonorPolicy {
 
     // The number of cores this node donates in total.
     [[nodiscard]] int CoreLimit(int cores_total) const;
+    // max_memory_pct of mem_total, leaving kMemoryKept (half of a tiny machine), in bytes; 0 when
+    // mem_total is unknown.
+    [[nodiscard]] uint64_t MemoryBudget(uint64_t mem_total) const;
 
     // True when a drain condition is active right now (battery and/or user activity).
     // Does not apply hysteresis; see DrainController for sticky drain.

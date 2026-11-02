@@ -83,6 +83,7 @@ v1::PeerInfo FromPeer(const net::Peer& p) {
     info.set_battery_pct(p.battery_pct);
     info.set_on_ac(p.is_charging);
     info.set_mem_total(static_cast<int64_t>(p.memory_bytes));
+    info.set_work_mem(static_cast<int64_t>(p.work_memory_bytes));
     info.set_gpus(p.gpus);
     switch (p.state) {
     case net::PeerState::Active:
@@ -458,6 +459,7 @@ v1::PeerInfo ClientService::SelfInfo() {
     self.set_battery_pct(t.battery_pct);
     self.set_on_ac(t.on_ac);
     self.set_mem_total(static_cast<int64_t>(t.mem_total));
+    self.set_work_mem(static_cast<int64_t>(t.work_mem));
     self.set_gpus(t.gpus);
     self.set_state("active");
     self.set_is_self(true);

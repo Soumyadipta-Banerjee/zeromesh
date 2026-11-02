@@ -61,6 +61,8 @@ public:
         std::string output_text = "out";
         int64_t peak_mem{0};
         int64_t wall_ms{10};
+        bool oom_at_limit{false}; // FAILURE_OOM: the batch's own limit, not the node's budget
+        int64_t budget{0};        // FAILURE_OOM not at the limit: what work on that node may use
     };
     // Answers for an item id, used one per attempt; the last repeats.
     std::map<std::string, std::deque<Answer>> script;
@@ -108,6 +110,8 @@ public:
                 o.set_message(a.item_failure == v1::FAILURE_NONE ? "" : "scripted failure");
                 o.set_wall_ms(a.wall_ms);
                 o.set_peak_mem(a.peak_mem);
+                o.set_oom_at_limit(a.oom_at_limit);
+                o.set_budget(a.budget);
                 for (const auto& f : a.footprint) o.add_footprint(f);
                 if (a.item_failure == v1::FAILURE_NONE) {
                     for (const auto& path : bi.outputs()) {
@@ -300,13 +304,15 @@ TEST(ResourceModelLearnsPerKindAndSizeAndRisesAfterOom) {
         m.Record("cc", 1e7, 30000, 800ll << 20); // a big one
         ASSERT_TRUE(*m.Seconds("cc", 1000) < 5.0);
         ASSERT_TRUE(*m.Seconds("cc", 1e7) > 20.0);
-        ASSERT_TRUE(*m.Memory("cc", 1000) < (200ll << 20));
-        ASSERT_TRUE(*m.Memory("cc", 1e7) >= (800ll << 20));
-        m.RaiseMemory("cc", 1000, 128 << 20);
-        ASSERT_TRUE(*m.Memory("cc", 1000) >= (256ll << 20));
+        // The largest peak seen, with the margin.
+        ASSERT_EQ(*m.Memory("cc", 1000), 125ll << 20);
+        ASSERT_EQ(*m.Memory("cc", 1e7), 1000ll << 20);
+        // A small unit killed for memory holding 300 MiB needs at least that: reserved with the margin.
+        m.NeedsAtLeast("cc", 1000, 300ll << 20);
+        ASSERT_EQ(*m.Memory("cc", 1000), 375ll << 20);
     }
     run::ResourceModel reloaded(d / "resources.tsv");
-    ASSERT_TRUE(*reloaded.Memory("cc", 1000) >= (256ll << 20));
+    ASSERT_EQ(*reloaded.Memory("cc", 1000), 375ll << 20);
     ASSERT_TRUE(*reloaded.Seconds("cc", 1e7) > 20.0);
 }
 
@@ -506,7 +512,8 @@ TEST(EngineFailureKindsAndRetriesFollowPolicy) {
     using A = ScriptedExecutor::Answer;
     e.exec->script["exit"] = {A{.item_failure = v1::FAILURE_EXIT, .exit_code = 3}};
     e.exec->script["flaky-exit"] = {A{.item_failure = v1::FAILURE_EXIT, .exit_code = 1}, A{}};
-    e.exec->script["oom"] = {A{.item_failure = v1::FAILURE_OOM}, A{}};
+    // Killed when the node's budget ran out, holding 400 MiB.
+    e.exec->script["oom"] = {A{.item_failure = v1::FAILURE_OOM, .peak_mem = 400ll << 20}, A{}};
     e.exec->script["hung"] = {A{.item_failure = v1::FAILURE_HUNG}};
     auto spec = e.Spec(ws.path());
     spec.mutable_policy()->set_keep_going(true);
@@ -516,13 +523,49 @@ TEST(EngineFailureKindsAndRetriesFollowPolicy) {
     ASSERT_TRUE(Result(rep, "exit").failure().kind() == v1::FAILURE_EXIT);
     ASSERT_EQ(Result(rep, "exit").failure().exit_code(), 3);
     ASSERT_TRUE(Result(rep, "hung").failure().kind() == v1::FAILURE_HUNG);
-    // OOM retried with more memory, and it succeeded.
+    // Killed beside other work: retried with a node's memory to itself, known to need at least what it
+    // held (reserving that plus the margin), with no hard limit since none was declared; it succeeded.
     ASSERT_TRUE(Result(rep, "oom").state() == v1::ITEM_SUCCEEDED);
-    int64_t retried_with = 0;
+    const v1::BatchSpec* retry = nullptr;
     for (const auto& b : e.exec->batches) {
-        if (b.items(0).id() == "oom") retried_with = std::max(retried_with, b.resources().mem_bytes());
+        if (b.items(0).id() == "oom" && b.alone()) retry = &b;
     }
-    ASSERT_TRUE(retried_with >= (512ll << 20));
+    ASSERT_TRUE(retry != nullptr);
+    ASSERT_EQ(retry->mem_need(), 400ll << 20);
+    ASSERT_EQ(retry->resources().mem_bytes(), 500ll << 20);
+    ASSERT_EQ(retry->mem_limit(), 0);
+
+    // Killed again while alone on a node whose work may use 512 MiB: it needs more than that node
+    // allows, which the next attempt says, so only a node allowing more can run it.
+    auto spec4 = e.Spec(ws.path());
+    spec4.mutable_stages(0)->set_kind("big"); // its own kind: nothing learned from the items above
+    e.exec->script["big"] = {A{.item_failure = v1::FAILURE_OOM, .peak_mem = 300ll << 20, .budget = 512ll << 20},
+                             A{.item_failure = v1::FAILURE_OOM, .peak_mem = 511ll << 20, .budget = 512ll << 20}, A{}};
+    *spec4.add_items() = MakeItem("big", {"t", "big"});
+    auto rep4 = e.Wait(e.engine->Submit(spec4));
+    ASSERT_TRUE(Result(rep4, "big").state() == v1::ITEM_SUCCEEDED);
+    std::vector<v1::BatchSpec> big;
+    for (const auto& b : e.exec->batches) {
+        if (b.items(0).id() == "big") big.push_back(b);
+    }
+    ASSERT_EQ(big.size(), static_cast<size_t>(3));
+    ASSERT_FALSE(big[0].alone());
+    ASSERT_TRUE(big[1].alone());
+    ASSERT_EQ(big[1].mem_need(), 300ll << 20);
+    ASSERT_EQ(big[2].mem_need(), (512ll << 20) + 1);
+
+    // Past a declared limit of 256 MiB: the limit (and reservation) go up by half.
+    auto spec3 = e.Spec(ws.path());
+    spec3.mutable_stages(0)->mutable_resources()->set_mem_bytes(256ll << 20);
+    e.exec->script["oom-limit"] = {A{.item_failure = v1::FAILURE_OOM, .peak_mem = 256ll << 20, .oom_at_limit = true}, A{}};
+    *spec3.add_items() = MakeItem("oom-limit", {"t", "oom-limit"});
+    auto rep3 = e.Wait(e.engine->Submit(spec3));
+    ASSERT_TRUE(Result(rep3, "oom-limit").state() == v1::ITEM_SUCCEEDED);
+    int64_t limit_after = 0;
+    for (const auto& b : e.exec->batches) {
+        if (b.items(0).id() == "oom-limit") limit_after = std::max(limit_after, b.mem_limit());
+    }
+    ASSERT_EQ(limit_after, 384ll << 20);
 
     auto spec2 = e.Spec(ws.path());
     spec2.mutable_policy()->set_exit_retries(1);

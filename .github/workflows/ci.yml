@@ -48,6 +48,13 @@ jobs:
           sudo ip link set lo multicast on || true
           sudo ip route add 224.0.0.0/4 dev lo || true
 
+      - name: Give the runner a systemd user manager (work runs in a delegated cgroup)
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          for i in $(seq 50); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 0.2; done
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --scope --quiet -p Delegate=yes true
+
       - name: Configure build
         env:
           CC: ${{ matrix.cc }}
@@ -88,6 +95,13 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo ip link set lo multicast on || true
           sudo ip route add 224.0.0.0/4 dev lo || true
+
+      - name: Give the runner a systemd user manager (work runs in a delegated cgroup)
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          for i in $(seq 50); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 0.2; done
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --scope --quiet -p Delegate=yes true
 
       - name: Configure build with sanitizers
         run: meson setup -Db_sanitize=address,undefined build
@@ -131,8 +145,16 @@ jobs:
       - name: Compile
         run: ninja -C build
 
-      - name: Run unit tests
-        run: meson test -C build all_unit_tests --print-errorlogs
+      - name: Run unit tests (each alone in a cgroup; a container has no systemd to ask for one)
+        run: |
+          mkdir -p /sys/fs/cgroup/init
+          for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true; done
+          echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
+          status=0
+          meson test -C build all_unit_tests --print-errorlogs --wrapper "$PWD/tests/ci/own-cgroup.sh" || status=$?
+          # Later steps join the container's root cgroup, which must not have controllers on.
+          echo "-cpu -memory -pids" > /sys/fs/cgroup/cgroup.subtree_control || true
+          exit $status
 
   python-sdk:
     name: Python SDK (Install & Test)

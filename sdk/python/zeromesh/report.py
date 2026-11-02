@@ -21,6 +21,7 @@ KIND_WORDS = {
     run_pb2.FAILURE_DONOR_LEFT: "donor left",
     run_pb2.FAILURE_CANCELLED: "cancelled",
     run_pb2.FAILURE_DEPENDENCY: "dependency failed",
+    run_pb2.FAILURE_NO_CAPACITY: "no node can take it",
 }
 
 

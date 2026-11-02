@@ -64,6 +64,11 @@ DonorPolicy DonorPolicy::Parse(std::string_view text, std::ostream& warn, std::s
                 p.max_cores = *v;
             else
                 bad();
+        } else if (key == "max_memory_pct") {
+            if (auto v = ParseInt(value, 1, 100))
+                p.max_memory_pct = *v;
+            else
+                bad();
         } else if (key == "allow_network") {
             if (auto v = ParseBool(value))
                 p.allow_network = *v;
@@ -145,6 +150,20 @@ DonorPolicy DonorPolicy::Load(const std::filesystem::path& config_dir) {
     return Parse(ss.str(), std::cerr, path.string());
 }
 
+int64_t HeldMemory(int64_t reserved, bool alone, int64_t budget) {
+    reserved = std::max<int64_t>(reserved, 0);
+    if (budget <= 0) return reserved;
+    return alone ? budget : std::min(reserved, budget);
+}
+
+uint64_t DonorPolicy::MemoryBudget(uint64_t mem_total) const {
+    const auto pct = static_cast<uint64_t>(std::clamp(max_memory_pct, 1, 100));
+    const uint64_t share = mem_total / 100 * pct + mem_total % 100 * pct / 100; // exact, and no overflow
+    // What the system, zmd and the owner need is mostly a fixed amount, not a share: a small machine
+    // keeps kMemoryKept (half of a tiny one) whatever the share says.
+    return std::min(share, mem_total - std::min(kMemoryKept, mem_total / 2));
+}
+
 int DonorPolicy::CoreLimit(int cores_total) const {
     if (max_cores >= 0) return max_cores;
     // Same idea as LocalExecutor slots: keep a spare core only when the machine has cores to spare.
@@ -209,13 +228,33 @@ std::optional<Refusal> DonorPolicy::Evaluate(const net::Telemetry& t, const Dema
                            " and " + std::to_string(cores_in_use) + " are in use",
                        kRetryCoresBusyMs};
     }
-    const int64_t mem = demand.mem_bytes;
-    if (mem > 0 && static_cast<uint64_t>(mem + std::max<int64_t>(mem_promised, 0)) > t.mem_available) {
-        return Refusal{RefusalKind::Busy,
-                       "the batch needs " + std::to_string(mem) + " bytes of memory, " + std::to_string(t.mem_available) +
-                           " are available and " + std::to_string(std::max<int64_t>(mem_promised, 0)) +
-                           " are promised to other batches",
-                       kRetryMemoryMs};
+    // Memory against the budget the kernel holds all work to, never what is free this second: what
+    // the batch needs (or may use, under a hard limit) must fit the budget at all, and what it holds
+    // must fit beside what other batches were promised.
+    const int64_t budget = static_cast<int64_t>(MemoryBudget(t.mem_total));
+    if (budget > 0) {
+        auto mib = [](int64_t b) { return std::to_string(b >> 20) + " MiB"; };
+        if (demand.mem_limit > budget) {
+            return Refusal{RefusalKind::Unsupported,
+                           "the batch may use up to " + mib(demand.mem_limit) + " of memory; work on this node may use " +
+                               mib(budget),
+                           0};
+        }
+        if (demand.mem_need > budget) {
+            return Refusal{RefusalKind::Unsupported,
+                           "the batch needs at least " + mib(demand.mem_need) + " of memory; work on this node may use " +
+                               mib(budget),
+                           0};
+        }
+        const int64_t held = HeldMemory(demand.mem_bytes, demand.alone, budget);
+        const int64_t promised = std::max<int64_t>(mem_promised, 0);
+        if (held > 0 && held + promised > budget) {
+            return Refusal{RefusalKind::Busy,
+                           (demand.alone ? "the batch must have the " + mib(budget) + " work may use to itself; "
+                                         : "the batch reserves " + mib(held) + " of memory; ") +
+                               mib(promised) + " of the " + mib(budget) + " work may use are promised to other batches",
+                           kRetryMemoryMs};
+        }
     }
     if (demand.gpus > 0) {
         if (!allow_gpu || t.gpus <= 0) {

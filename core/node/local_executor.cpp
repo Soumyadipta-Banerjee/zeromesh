@@ -1,42 +1,16 @@
 #include "node/local_executor.hpp"
 
 #include "node/convert.hpp"
+#include "node/donor_policy.hpp"
 #include "node/env_check.hpp"
 #include "node/requester_blob_source.hpp"
 
 #include <algorithm>
 #include <exception>
-#include <fstream>
 
 namespace zeromesh::node {
 
 namespace {
-
-constexpr std::chrono::milliseconds kMemoryPoll{100};
-// Free memory left after a batch starts. A process's footprint grows over its first seconds, so a
-// burst of starts that each fit the free memory *now* can still add up to more than the node has.
-// The headroom is a share of RAM (earlyoom-style), within a floor and a ceiling.
-constexpr uint64_t kMemoryHeadroomFloor = 128ull << 20;
-constexpr uint64_t kMemoryHeadroomCeil = 768ull << 20;
-constexpr double kMemoryHeadroomShare = 0.15;
-constexpr std::chrono::milliseconds kStartSpacing{50};
-
-struct MemInfo {
-    uint64_t total{UINT64_MAX};
-    uint64_t available{UINT64_MAX};
-};
-
-MemInfo ReadMemInfo() {
-    std::ifstream in("/proc/meminfo");
-    std::string key, unit;
-    uint64_t kb = 0;
-    MemInfo m;
-    while (in >> key >> kb >> unit) {
-        if (key == "MemTotal:") m.total = kb * 1024;
-        if (key == "MemAvailable:") m.available = kb * 1024;
-    }
-    return m; // unreadable fields stay at UINT64_MAX: do not hold work back
-}
 
 BatchDone Done(const std::string& node, v1::FailureKind kind, std::string message, bool cancelled = false) {
     BatchDone d;
@@ -53,8 +27,9 @@ LocalExecutor::LocalExecutor(std::shared_ptr<exec::BatchRunner> runner, std::sha
                              std::string node_id, int core_capacity, std::filesystem::path state_dir,
                              std::shared_ptr<store::CasStore> cas, NodeClientFactory client_factory)
     : runner_(std::move(runner)), registry_(std::move(registry)), node_id_(std::move(node_id)),
-      core_capacity_(std::max(1, core_capacity)), state_dir_(std::move(state_dir)), cas_(std::move(cas)),
-      client_factory_(std::move(client_factory)) {
+      core_capacity_(std::max(1, core_capacity)),
+      mem_budget_(runner_ ? static_cast<int64_t>(runner_->work().budget) : 0), state_dir_(std::move(state_dir)),
+      cas_(std::move(cas)), client_factory_(std::move(client_factory)) {
     workers_.reserve(static_cast<size_t>(core_capacity_));
     for (int i = 0; i < core_capacity_; ++i) {
         workers_.emplace_back([this](std::stop_token st) { Worker(st); });
@@ -88,7 +63,8 @@ void LocalExecutor::Execute(const std::string& batch_id, const v1::BatchSpec& sp
     item->spec = spec;
     item->cb = std::move(cb);
     item->cores = std::clamp(spec.resources().cores(), 1, core_capacity_);
-    item->mem = std::max<int64_t>(spec.resources().mem_bytes(), 0);
+    item->mem = HeldMemory(spec.resources().mem_bytes(), spec.alone(), mem_budget_);
+    item->never_fits = mem_budget_ > 0 && (spec.mem_need() > mem_budget_ || spec.mem_limit() > mem_budget_);
     {
         std::lock_guard lock(mu_);
         items_[batch_id] = item;
@@ -112,17 +88,27 @@ void LocalExecutor::Cancel(const std::string& batch_id) {
         items_.erase(it);
         dequeued = std::move(item);
     }
+    cv_.notify_all(); // the queue's head may have changed
     if (dequeued->cb.on_done) dequeued->cb.on_done(Done(node_id_, v1::FAILURE_CANCELLED, "cancelled", true));
 }
 
-int LocalExecutor::CoresInUse() const {
+int LocalExecutor::CoresReserved() const {
     std::lock_guard lock(mu_);
-    return cores_in_use_;
+    int n = 0;
+    for (const auto& [id, item] : items_) n += item->cores;
+    return n;
 }
 
-int64_t LocalExecutor::MemInUse() const {
+int64_t LocalExecutor::MemReserved() const {
     std::lock_guard lock(mu_);
-    return mem_in_use_;
+    int64_t n = 0;
+    for (const auto& [id, item] : items_) n += item->mem;
+    return n;
+}
+
+const std::string& LocalExecutor::Unavailable() const {
+    static const std::string none;
+    return runner_ ? runner_->unavailable() : none;
 }
 
 std::vector<LocalExecutor::Active> LocalExecutor::ListActive() const {
@@ -132,49 +118,48 @@ std::vector<LocalExecutor::Active> LocalExecutor::ListActive() const {
     return out;
 }
 
-// A batch that reserves memory starts only when that much is free, plus headroom, plus what the
-// running batches have yet to grow into (their reservation minus what they use now: a compiler
-// that just started looks small and will not stay so). No sooner than kStartSpacing after the
-// previous start. The first batch always runs, so an undersized node still makes progress.
-bool LocalExecutor::MemoryAllowsLocked(const Item& item) const {
-    if (item.mem <= 0 || mem_in_use_ == 0) return true;
-    if (std::chrono::steady_clock::now() - last_start_ < kStartSpacing) return false;
-    const MemInfo m = ReadMemInfo();
-    if (m.available == UINT64_MAX) return true;
-    const uint64_t headroom = std::clamp(static_cast<uint64_t>(static_cast<double>(m.total) * kMemoryHeadroomShare),
-                                         kMemoryHeadroomFloor, kMemoryHeadroomCeil);
-    uint64_t growth = 0;
-    for (const auto& [id, running] : items_) {
-        if (!running->started) continue;
-        growth += static_cast<uint64_t>(std::max<int64_t>(running->mem - running->memory_now->load(), 0));
-    }
-    return m.available >= static_cast<uint64_t>(item.mem) + headroom + growth;
+// A batch starts when its cores and its memory reservation fit beside the running batches'.
+bool LocalExecutor::FitsLocked(const Item& item) const {
+    if (cores_in_use_ + item.cores > core_capacity_) return false;
+    return mem_budget_ <= 0 || mem_in_use_ + item.mem <= mem_budget_;
 }
 
 void LocalExecutor::Worker(std::stop_token st) {
     for (;;) {
         std::shared_ptr<Item> item;
+        bool never_fits = false;
         {
             std::unique_lock lock(mu_);
-            // Polled, not only notified: free memory changes without anyone calling notify.
-            while (!cv_.wait_for(lock, st, kMemoryPoll, [this] {
-                return !queue_.empty() && cores_in_use_ + queue_.front()->cores <= core_capacity_ &&
-                       MemoryAllowsLocked(*queue_.front());
-            })) {
-                if (st.stop_requested()) return;
+            // Reservations change only when a batch is queued, starts, ends or is cancelled, and each
+            // of those notifies.
+            if (!cv_.wait(lock, st, [this] {
+                    return !queue_.empty() && (queue_.front()->never_fits || FitsLocked(*queue_.front()));
+                })) {
+                return;
             }
             item = queue_.front();
             queue_.pop_front();
-            cores_in_use_ += item->cores;
-            mem_in_use_ += item->mem;
-            last_start_ = std::chrono::steady_clock::now();
+            never_fits = item->never_fits;
+            if (!never_fits) {
+                cores_in_use_ += item->cores;
+                mem_in_use_ += item->mem;
+            }
             item->started = true;
         }
-        BatchDone done = Run(*item);
+        // A batch that needs (or may use) more than the whole budget never fits: it fails at once,
+        // holding nothing.
+        BatchDone done = never_fits ? Done(node_id_, v1::FAILURE_NO_CAPACITY,
+                                           "the batch needs " +
+                                               std::to_string(std::max(item->spec.mem_need(), item->spec.mem_limit()) >> 20) +
+                                               " MiB of memory; work on this node may use " +
+                                               std::to_string(mem_budget_ >> 20) + " MiB")
+                                    : Run(*item);
         {
             std::lock_guard lock(mu_);
-            cores_in_use_ -= item->cores;
-            mem_in_use_ -= item->mem;
+            if (!never_fits) {
+                cores_in_use_ -= item->cores;
+                mem_in_use_ -= item->mem;
+            }
             auto it = items_.find(item->batch_id);
             if (it != items_.end() && it->second == item) items_.erase(it);
         }
@@ -186,6 +171,7 @@ void LocalExecutor::Worker(std::stop_token st) {
 BatchDone LocalExecutor::Run(Item& item) {
     const v1::BatchSpec& spec = item.spec;
     if (item.stop.stop_requested()) return Done(node_id_, v1::FAILURE_CANCELLED, "cancelled", true);
+    if (!Unavailable().empty()) return Done(node_id_, v1::FAILURE_SANDBOX, Unavailable());
     if (item.cb.on_placed) item.cb.on_placed(node_id_);
 
     const bool tree = spec.env().has_tree();
@@ -265,7 +251,6 @@ BatchDone LocalExecutor::Run(Item& item) {
         }
         rs.node_id = node_id_;
         rs.tag = item.batch_id;
-        rs.memory_now = item.memory_now;
         rs.stream_logs = spec.stream_logs();
 
         exec::BatchCallbacks cb;

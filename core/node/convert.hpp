@@ -63,7 +63,9 @@ inline v1::ItemOutcome ToProto(const exec::ItemRunResult& r) {
     o.set_stderr_tail(r.stderr_tail);
     o.set_wall_ms(r.wall_ms);
     o.set_cpu_ms(r.cpu_ms);
-    o.set_peak_mem(r.peak_rss);
+    o.set_peak_mem(r.peak_mem);
+    o.set_oom_at_limit(r.oom_at_limit);
+    o.set_budget(r.budget);
     for (const auto& p : r.footprint) o.add_footprint(p);
     return o;
 }

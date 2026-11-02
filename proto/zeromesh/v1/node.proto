@@ -36,7 +36,9 @@ message BatchSpec {
   string name = 1;           // "<run>/<batch>", for logs and the monitor
   Digest input_root = 2;
   Env env = 3;               // exact programs carry the requester's digest
-  Resources resources = 4;   // per item process; mem_bytes is a reservation (admission, placement)
+  // Per item process. mem_bytes is the memory reserved to pack batches onto a node: mem_need plus a
+  // margin, never more than the node's budget (a batch reserving more runs alone).
+  Resources resources = 4;
   repeated BatchItem items = 5;
   Combine combine = 6;       // set: one process runs every item
   string kind = 7;
@@ -49,6 +51,8 @@ message BatchSpec {
   string requester = 14;     // node id of the requester; a tree environment is fetched from it
   Where where = 15;          // for the requester's placer
   int64 mem_limit = 16;      // hard memory cap per process (cgroup memory.max); 0 = none
+  int64 mem_need = 17;       // memory its items are known to need at least; a node that lets work use less cannot run it
+  bool alone = 18;           // no other batch beside it on the node: an item ran out of memory sharing one
 }
 
 message Offer {
@@ -95,8 +99,12 @@ message ItemOutcome {
   bytes stderr_tail = 9;
   int64 wall_ms = 10;
   int64 cpu_ms = 11;
-  int64 peak_mem = 12;
+  int64 peak_mem = 12;             // the most its processes held together, from its cgroup
   repeated string footprint = 13;  // workspace-relative paths its depfile names
+  // FAILURE_OOM: the batch's own memory limit was hit. Otherwise the node's budget for all work ran
+  // out with other work beside it, and peak_mem is a lower bound of what the item needs.
+  bool oom_at_limit = 14;
+  int64 budget = 15;  // FAILURE_OOM not at the limit: what all work on that node may use together
 }
 
 message CheckpointSaved {

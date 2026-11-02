@@ -23,6 +23,10 @@ export ZM_VM_KEY=~/Desktop/zm-qemu/id_zm             # the key cloud-init instal
 tests/vm/node.sh 192.168.122.254 setup
 ```
 
+`setup` also enables lingering for the VM user: zmd started over SSH moves itself into a systemd user
+scope (to contain work in a delegated cgroup), and without lingering systemd would stop that scope
+when the SSH session ends.
+
 ## Each change: stage, deploy, form the team
 
 ```bash
@@ -58,9 +62,17 @@ traffic both ways and this machine↔VM traffic one way.
   - memory: wait4 on bwrap reports bwrap's own 2 MB, never the compiler's, so every learned
     reservation was ~5x too small; two 470-760 MB compiles started on a 1.5 GB VM, which thrashed
     (5 MB available, no swap) and froze for ~37 s, past the 10 s keepalive, and the requester gave
-    both donors up. Memory is now measured from the cgroup or the process tree, and a start counts
-    what running batches have yet to grow into. Two consecutive cold rebuilds then compiled 24/24
-    with at least 228 MB left and no stall;
+    both donors up. The root cause was that zmd, started from an SSH session, had no cgroup to
+    contain work in, so nothing bounded it. Work is now always contained: zmd asks systemd for a
+    delegated scope, all work shares one cgroup whose memory.max is 75% of RAM (leaving at least
+    512 MiB), and each item's memory and CPU come from its own cgroup;
+  - inside that budget two compiles that did not fit together (2026-11-03, `core/`'s daemon.cpp
+    and client_service.cpp on one VM) took 330 s instead of 7 s each: at memory.max the kernel
+    reclaims and refaults for minutes before it kills. zmd now stops the item that started last once
+    all work was stalled for a quarter of the last ten seconds (the work cgroup's full avg10), and
+    the engine retries it with a node's memory to itself: four heavy units on one VM, 487 s -> 55 s.
+    Six 600 MB items two per node, nothing learned: each killed once beside another, retried
+    alone, 6/6 in 11 s, SSH to the VMs never above 355 ms;
   - a batch whose only donors were busy *this second* was failed as "no node can run this batch":
     eligibility compared against free memory instead of total; it now waits. Nodes excluded after a
     loss are tried again when nothing else can run the batch, and an unplaceable batch says why.

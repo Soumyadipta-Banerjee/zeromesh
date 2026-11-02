@@ -57,6 +57,11 @@ std::optional<PsiSample> ParsePsi(std::string_view text) {
             saw_some = true;
         } else if (line.rfind("full ", 0) == 0) {
             if (auto t = FieldAfter(line, "total=")) out.full_total_us = *t;
+            if (const size_t pos = line.find("avg10="); pos != std::string_view::npos) {
+                double v = 0.0;
+                const char* b = line.data() + pos + 6;
+                if (auto [ptr, ec] = std::from_chars(b, line.data() + line.size(), v); ec == std::errc{}) out.full_avg10 = v;
+            }
         }
     }
     if (!saw_some) return std::nullopt;

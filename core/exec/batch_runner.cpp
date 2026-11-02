@@ -24,7 +24,6 @@
 #include <fstream>
 #include <set>
 #include <sstream>
-#include <unordered_map>
 #include <unordered_set>
 
 namespace zeromesh::exec {
@@ -36,6 +35,10 @@ using Clock = std::chrono::steady_clock;
 
 constexpr auto kTick = std::chrono::milliseconds(200);
 constexpr size_t kMaxIdBytes = 200;
+// A forked child that cannot enter its cgroup exits with this, saying so, instead of running
+// uncontained.
+constexpr int kUncontainedExit = 125;
+constexpr std::string_view kUncontainedMessage = "zmd: cannot enter the item's cgroup";
 
 std::string RandomHex(size_t bytes) {
     std::string raw(bytes, '\0');
@@ -141,65 +144,6 @@ std::string ReplaceAll(std::string s, const std::string& from, const std::string
     return s;
 }
 
-// Every process descended from `root` (inclusive), from /proc.
-std::vector<pid_t> Descendants(pid_t root) {
-    std::unordered_map<pid_t, std::vector<pid_t>> children;
-    std::error_code ec;
-    for (fs::directory_iterator it("/proc", ec), end; !ec && it != end; it.increment(ec)) {
-        const std::string name = it->path().filename().string();
-        if (name.empty() || !std::all_of(name.begin(), name.end(), ::isdigit)) continue;
-        std::ifstream stat(it->path() / "stat");
-        std::string line;
-        if (!std::getline(stat, line)) continue;
-        const size_t close = line.rfind(')');
-        if (close == std::string::npos) continue;
-        std::istringstream rest(line.substr(close + 2));
-        char state = 0;
-        pid_t ppid = 0;
-        rest >> state >> ppid;
-        children[ppid].push_back(static_cast<pid_t>(std::stol(name)));
-    }
-    std::vector<pid_t> out{root};
-    for (size_t i = 0; i < out.size(); ++i) {
-        for (pid_t c : children[out[i]]) out.push_back(c);
-    }
-    return out;
-}
-
-// Resident memory of the processes in `pids` together, in bytes.
-int64_t RssOf(const std::vector<pid_t>& pids) {
-    static const long page = sysconf(_SC_PAGESIZE);
-    int64_t total = 0;
-    for (pid_t p : pids) {
-        std::ifstream statm("/proc/" + std::to_string(p) + "/statm");
-        int64_t size = 0, resident = 0;
-        if (statm >> size >> resident) total += resident * page;
-    }
-    return total;
-}
-
-// User+system CPU of the processes in `pids`, in milliseconds.
-int64_t CpuMsOf(const std::vector<pid_t>& pids) {
-    const long ticks = sysconf(_SC_CLK_TCK);
-    int64_t total = 0;
-    for (pid_t p : pids) {
-        std::ifstream stat("/proc/" + std::to_string(p) + "/stat");
-        std::string line;
-        if (!std::getline(stat, line)) continue;
-        const size_t close = line.rfind(')');
-        if (close == std::string::npos) continue;
-        std::istringstream rest(line.substr(close + 2));
-        std::string field;
-        int64_t utime = 0, stime = 0;
-        for (int i = 3; i <= 15 && rest >> field; ++i) {
-            if (i == 14) utime = std::stoll(field);
-            if (i == 15) stime = std::stoll(field);
-        }
-        total += utime + stime;
-    }
-    return ticks > 0 ? total * 1000 / ticks : 0;
-}
-
 std::string Exe(pid_t p) {
     std::error_code ec;
     return fs::read_symlink("/proc/" + std::to_string(p) + "/exe", ec).string();
@@ -234,9 +178,9 @@ struct BatchRunner::Group {
 };
 
 BatchRunner::BatchRunner(std::shared_ptr<store::CasStore> store, std::shared_ptr<store::MerkleBuilder> merkle,
-                         fs::path scratch_base)
+                         fs::path scratch_base, cgroup::Work work)
     : store_(std::move(store)), merkle_(std::move(merkle)), scratch_base_(std::move(scratch_base)),
-      inputs_(scratch_base_ / "inputs", merkle_) {
+      inputs_(scratch_base_ / "inputs", merkle_), work_(std::move(work)) {
     if (sodium_init() < 0) throw std::runtime_error("libsodium init failed");
     fs::create_directories(scratch_base_);
     bwrap_path_ = FindOnPath("bwrap");
@@ -247,6 +191,10 @@ BatchRunner::BatchRunner(std::shared_ptr<store::CasStore> store, std::shared_ptr
     }
     if (bwrap_error_.empty()) overlay_ = ProbeOverlay();
     if (!bwrap_error_.empty()) bwrap_path_.clear();
+    if (!bwrap_error_.empty())
+        unavailable_ = bwrap_error_;
+    else if (work_.root.empty())
+        unavailable_ = "work cannot be contained here: " + work_.problem;
 }
 
 // Runs bwrap twice: once plain (does it work at all here? AppArmor's userns restriction breaks
@@ -296,10 +244,22 @@ void BatchRunner::PruneInputs(std::chrono::seconds idle) {
     inputs_.Prune(idle);
 }
 
+bool BatchRunner::StopYoungestForMemory() {
+    std::lock_guard lock(live_mu_);
+    const Live* youngest = nullptr;
+    for (const auto& [id, live] : live_) {
+        if (!live.stopped_for_memory->load() && (!youngest || live.started > youngest->started)) youngest = &live;
+    }
+    if (!youngest) return false;
+    youngest->stopped_for_memory->store(true);
+    cgroup::KillAll(youngest->cgroup);
+    return true;
+}
+
 BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& cb, std::stop_token stop) {
     BatchRunResult result;
-    if (!bwrap_error_.empty()) {
-        result.error = bwrap_error_;
+    if (!unavailable_.empty()) {
+        result.error = unavailable_;
         return result;
     }
     if (spec.items.empty()) {
@@ -340,20 +300,19 @@ BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& 
         return result;
     }
 
+    std::string cg_error;
+    const auto batch_cg = cgroup::CreateBatch(work_.root, spec.cores, spec.mem_bytes, &cg_error);
+    if (!batch_cg) {
+        result.error = "cannot create the batch's cgroup: " + cg_error;
+        return result;
+    }
+    if (cgroup_observer_) cgroup_observer_(*batch_cg, true);
+    if (!spec.tag.empty()) {
+        std::lock_guard lock(tagged_mu_);
+        tagged_[spec.tag] = *batch_cg;
+    }
     const fs::path scratch = scratch_base_ / ("b-" + RandomHex(8));
     fs::create_directories(scratch);
-
-    std::optional<cgroup::Group> group_cg;
-    if (auto parent = cgroup::TaskParent()) group_cg = cgroup::Create(*parent, spec.cores, spec.mem_bytes);
-    if (group_cg) {
-        if (cgroup_observer_) cgroup_observer_(group_cg->dir, true);
-        if (!spec.tag.empty()) {
-            std::lock_guard lock(tagged_mu_);
-            tagged_[spec.tag] = group_cg->dir;
-        }
-        result.memory_enforced = group_cg->memory;
-        result.cpu_enforced = group_cg->cpu;
-    }
 
     std::vector<Group> groups;
     if (!spec.combine_argv.empty()) {
@@ -376,24 +335,22 @@ BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& 
             break;
         }
         groups[i].dir = scratch / ("g" + std::to_string(i));
-        RunGroup(spec, groups[i], lease->path(), group_cg ? group_cg->dir : fs::path(), cb, stop, cancelled);
+        RunGroup(spec, groups[i], lease->path(), *batch_cg, cb, stop, cancelled);
         ForceRemove(groups[i].dir);
     }
     result.cancelled = cancelled;
 
-    if (group_cg) {
-        if (!spec.tag.empty()) {
-            std::lock_guard lock(tagged_mu_);
-            tagged_.erase(spec.tag);
-        }
-        if (cgroup_observer_) cgroup_observer_(group_cg->dir, false);
-        cgroup::Remove(group_cg->dir);
+    if (!spec.tag.empty()) {
+        std::lock_guard lock(tagged_mu_);
+        tagged_.erase(spec.tag);
     }
+    if (cgroup_observer_) cgroup_observer_(*batch_cg, false);
+    cgroup::Remove(*batch_cg);
     ForceRemove(scratch);
     return result;
 }
 
-void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& lower, const fs::path& cg,
+void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& lower, const fs::path& batch_cg,
                            const BatchCallbacks& cb, std::stop_token stop, bool& cancelled) {
     const ItemSpec& first = *g.items.front();
     const std::string cwd = JoinRel(first.cwd.empty() ? "." : first.cwd, ".");
@@ -505,30 +462,48 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     auto args = b.Build(command);
 
     // ---- start ----
+    // The process and everything it starts live in their own cgroup under the batch's: the kernel
+    // counts their memory and CPU exactly, and an OOM kill is told apart from a crash.
+    std::string cg_error;
+    const auto made_cg = cgroup::CreateChild(batch_cg, g.dir.filename().string(), &cg_error);
+    if (!made_cg) {
+        fail_all(ItemFailure::Sandbox, "cannot create the item's cgroup: " + cg_error);
+        return;
+    }
+    const fs::path cg = *made_cg;
+    struct RemoveCgroup {
+        fs::path dir;
+        ~RemoveCgroup() { cgroup::Remove(dir); }
+    } remove_cg{cg};
+    const int procs_fd = cgroup::OpenProcs(cg);
+    if (procs_fd < 0) {
+        fail_all(ItemFailure::Sandbox, "cannot open " + (cg / "cgroup.procs").string() + ": " + std::strerror(errno));
+        return;
+    }
     int out_pipe[2], err_pipe[2];
     if (pipe2(out_pipe, O_CLOEXEC) != 0) {
+        close(procs_fd);
         fail_all(ItemFailure::Sandbox, "pipe failed");
         return;
     }
     if (pipe2(err_pipe, O_CLOEXEC) != 0) {
-        close(out_pipe[0]);
-        close(out_pipe[1]);
+        for (int fd : {procs_fd, out_pipe[0], out_pipe[1]}) close(fd);
         fail_all(ItemFailure::Sandbox, "pipe failed");
         return;
     }
     std::vector<char*> cargv;
     for (auto& a : args) cargv.push_back(a.data());
     cargv.push_back(nullptr);
-    const uint64_t oom_before = cg.empty() ? 0 : cgroup::OomKills(cg);
+    const uint64_t limit_ooms_before = cgroup::LimitOoms(batch_cg);
     const auto start = Clock::now();
     pid_t pid = fork();
     if (pid < 0) {
-        for (int fd : {out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) close(fd);
+        for (int fd : {procs_fd, out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) close(fd);
         fail_all(ItemFailure::Sandbox, "fork failed");
         return;
     }
     if (pid == 0) {
-        if (!cg.empty()) cgroup::Join(cg);
+        // Only async-signal-safe calls until exec: this process was forked from a threaded one.
         rlimit core{};
         setrlimit(RLIMIT_CORE, &core);
         setpgid(0, 0);
@@ -537,12 +512,35 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         if (devnull >= 0) dup2(devnull, STDIN_FILENO);
         dup2(out_pipe[1], STDOUT_FILENO);
         dup2(err_pipe[1], STDERR_FILENO);
+        // "0" moves the writing process. Nothing of the item runs outside its cgroup.
+        if (write(procs_fd, "0", 1) != 1) {
+            (void)!write(STDERR_FILENO, kUncontainedMessage.data(), kUncontainedMessage.size());
+            (void)!write(STDERR_FILENO, "\n", 1);
+            _exit(kUncontainedExit);
+        }
         execv(cargv[0], cargv.data());
         _exit(127);
     }
     setpgid(pid, pid);
+    close(procs_fd);
     close(out_pipe[1]);
     close(err_pipe[1]);
+    // Known to StopYoungestForMemory while it runs.
+    const auto stopped_for_memory = std::make_shared<std::atomic<bool>>(false);
+    uint64_t live_id = 0;
+    {
+        std::lock_guard lock(live_mu_);
+        live_id = ++live_seq_;
+        live_[live_id] = Live{cg, start, stopped_for_memory};
+    }
+    struct Forget {
+        BatchRunner* runner;
+        uint64_t id;
+        ~Forget() {
+            std::lock_guard lock(runner->live_mu_);
+            runner->live_.erase(id);
+        }
+    } forget{this, live_id};
     for (const ItemSpec* it : g.items) {
         if (cb.on_started) cb.on_started(it->id);
     }
@@ -561,8 +559,6 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     uint64_t last_output_bytes = 0;
     int64_t last_cpu = -1;
     auto last_tick = start;
-    int64_t peak_mem = 0;
-    int64_t cpu_seen = 0;
     bool exited = false;
     auto exited_at = start;
     bool timed_out = false, hung = false, terminating = false, killed = false;
@@ -598,27 +594,14 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         }
     };
 
+    // The item's processes, bwrap's own excepted: a SIGTERM to bwrap would end the sandbox at once.
     auto task_pids = [&] {
-        std::vector<pid_t> pids = cg.empty() ? Descendants(pid) : cgroup::Procs(cg);
+        std::vector<pid_t> pids = cgroup::Procs(cg);
         std::erase_if(pids, [&](pid_t p) { return Exe(p) == bwrap_path_; });
         return pids;
     };
-    auto cpu_ms_now = [&]() -> int64_t {
-        if (!cg.empty()) {
-            if (auto u = cgroup::CpuUsageUsec(cg)) return static_cast<int64_t>(*u / 1000);
-        }
-        return CpuMsOf(Descendants(pid));
-    };
-    // The items' memory, sampled every tick (an item shorter than a tick reports 0): wait4 on bwrap
-    // reports only bwrap's own, never the sandboxed processes'. The cgroup's own figure when its memory controller is on (memory.peak
-    // replaces the samples at the end), else the resident memory of the processes together.
-    auto sample_memory = [&] {
-        std::optional<uint64_t> c = cg.empty() ? std::nullopt : cgroup::MemoryCurrent(cg);
-        const int64_t now_bytes = c ? static_cast<int64_t>(*c) : RssOf(task_pids());
-        peak_mem = std::max(peak_mem, now_bytes);
-        cpu_seen = std::max(cpu_seen, cpu_ms_now());
-        if (spec.memory_now) spec.memory_now->store(now_bytes);
-    };
+    // CPU time from the cgroup: wait4 on bwrap would report none of the sandboxed processes'.
+    auto cpu_ms_now = [&]() -> int64_t { return static_cast<int64_t>(cgroup::CpuUsageUsec(cg).value_or(0) / 1000); };
     auto begin_termination = [&] {
         if (terminating) return;
         terminating = true;
@@ -628,7 +611,7 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     auto hard_kill = [&] {
         if (killed) return;
         killed = true;
-        if (!cg.empty()) cgroup::KillAll(cg);
+        cgroup::KillAll(cg);
         kill(-pid, SIGKILL);
     };
 
@@ -841,12 +824,11 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         if (now - last_tick < kTick) continue;
 
         // Frozen time is not running time: it counts neither against the timeout nor as a hang.
-        if (!cg.empty() && cgroup::Frozen(cg)) {
+        if (cgroup::Frozen(batch_cg)) {
             deadline += now - last_tick;
             last_progress += now - last_tick;
         }
         last_tick = now;
-        sample_memory();
         scan_checkpoint();
         if (watch) {
             for (auto& p : watch->Poll(std::chrono::milliseconds(0)))
@@ -879,9 +861,6 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     }
     int status = 0;
     waitpid(pid, &status, 0);
-    if (!cg.empty()) {
-        if (auto p = cgroup::MemoryPeak(cg)) peak_mem = std::max(peak_mem, static_cast<int64_t>(*p));
-    }
     const auto end = Clock::now();
     out_file.close();
     err_file.close();
@@ -899,18 +878,18 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         exit_code = 128 + WTERMSIG(status);
     const bool not_found = exit_code == 1 && err_tail.find("bwrap: execvp ") != std::string::npos;
     if (not_found) exit_code = 127;
-    const bool sandbox_failed = !not_found && exit_code == 1 && err_tail.rfind("bwrap: ", 0) == 0;
-    const bool oom = !cg.empty() && cgroup::OomKills(cg) > oom_before;
+    const bool uncontained = exit_code == kUncontainedExit && err_tail.rfind(kUncontainedMessage, 0) == 0;
+    const bool sandbox_failed = uncontained || (!not_found && exit_code == 1 && err_tail.rfind("bwrap: ", 0) == 0);
+    const bool stopped = stopped_for_memory->load();
+    const bool oom = stopped || cgroup::OomKills(cg) > 0;
+    const bool oom_at_limit = oom && !stopped && cgroup::LimitOoms(batch_cg) > limit_ooms_before;
 
     const store::Digest out_digest = store_->PutBlobFile(g.dir / "stdout");
     const store::Digest err_digest = store_->PutBlobFile(g.dir / "stderr");
     const int64_t wall = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    // Like memory, CPU time is not in wait4's rusage of bwrap: the cgroup's counter outlives the
-    // processes; without one, the last sample of the process tree.
-    int64_t cpu = cpu_seen;
-    if (!cg.empty()) {
-        if (auto u = cgroup::CpuUsageUsec(cg)) cpu = std::max(cpu, static_cast<int64_t>(*u / 1000));
-    }
+    // The cgroup's counters outlive its processes: exact, however short the item was.
+    const int64_t cpu = cpu_ms_now();
+    const int64_t peak_mem = static_cast<int64_t>(cgroup::MemoryPeak(cg).value_or(0));
 
     // Items whose outputs were all closed before the process ended are done, however it ended (a crash,
     // an OOM kill, a timeout at a later item): it loses only the items still in flight.
@@ -929,7 +908,16 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         } else if (oom) {
             r.id = it->id;
             r.failure = ItemFailure::Oom;
-            r.message = "killed: out of memory (limit " + std::to_string(spec.mem_bytes / (1024 * 1024)) + " MiB)";
+            r.oom_at_limit = oom_at_limit;
+            if (!oom_at_limit) r.budget = static_cast<int64_t>(work_.budget);
+            if (stopped)
+                r.message = "stopped: the work on this node was stalled on memory, and this item started last";
+            else if (oom_at_limit)
+                r.message = "killed: out of memory (the batch's limit is " + std::to_string(spec.mem_bytes >> 20) + " MiB)";
+            else if (work_.budget > 0)
+                r.message = "killed: out of memory (work on this node may use " + std::to_string(work_.budget >> 20) + " MiB)";
+            else
+                r.message = "killed: out of memory";
         } else if (sandbox_failed) {
             r.id = it->id;
             r.failure = ItemFailure::Sandbox;
@@ -948,9 +936,7 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         r.stderr_tail = err_tail;
         r.wall_ms = wall;
         r.cpu_ms = g.combined ? std::max<int64_t>(0, cpu - cpu_at_last_commit) : cpu;
-        // Never ru_maxrss of bwrap: it is bwrap's own, or, as a high-water mark taken just after
-        // fork() and before exec(), the size of the whole daemon the child was copied from.
-        r.peak_rss = peak_mem;
+        r.peak_mem = peak_mem;
         if (r.failure != ItemFailure::None && r.message.empty()) r.message = FailureWord(r.failure);
         if (cb.on_item) cb.on_item(std::move(r));
     }

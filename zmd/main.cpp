@@ -1,6 +1,7 @@
 // zmd: the ZeroMesh daemon. Serves zeromesh.v1.ClientApi on $XDG_RUNTIME_DIR/zeromesh/zmd.sock
 // and runs tasks locally. Stop it with SIGINT or SIGTERM.
 
+#include "exec/cgroup.hpp"
 #include "net/tls.hpp"
 #include "node/daemon.hpp"
 
@@ -22,6 +23,9 @@ int main(int argc, char** argv) {
                   << "  ZM_CONFIG_DIR   configuration          default ~/.config/zeromesh\n";
         return (a == "--help" || a == "-h") ? 0 : 1;
     }
+    // Work is contained in a cgroup delegated to zmd; a zmd started outside its systemd unit asks
+    // the user's systemd for one, by re-executing itself in a scope (before any thread exists).
+    zeromesh::exec::cgroup::EnsureDelegatedScope(argv);
     zeromesh::net::PrepareGrpcRuntime();
     try {
         zeromesh::node::Daemon daemon(zeromesh::node::DaemonConfig::FromEnv());

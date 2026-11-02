@@ -12,7 +12,10 @@ namespace zeromesh::sched {
 // What a batch needs of the node it runs on.
 struct Need {
     int cores{1};
-    int64_t mem_bytes{0};
+    int64_t mem_bytes{0}; // reserved, to pack it beside other batches
+    int64_t mem_need{0};  // known to need at least: a node that lets work use less cannot run it
+    int64_t mem_limit{0}; // a hard limit it may use up to: likewise
+    bool alone{false};    // must have the node's memory for work to itself
     int gpus{0};
     std::string arch; // "" = the local candidate's
     bool may_local{true};
@@ -42,6 +45,10 @@ struct Candidate {
     int gpus_in_flight{0};   // GPUs our batches there hold
 };
 
+// What a batch with `need` holds of the candidate's memory for work (mem_total): its reservation,
+// at most all of it, and all of it when it must run alone. Unknown mem_total: the reservation.
+int64_t HeldOn(const Candidate& c, const Need& need);
+
 // Assumed task length when the caller has no estimate.
 inline constexpr double kDefaultTaskSeconds = 60.0;
 
@@ -58,9 +65,9 @@ double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes);
 //     cores_total so a busy Cycles job does not shrink capacity to zero mid-job; core_limit
 //     (what the donor's policy lets it donate, once it has told us) caps it, since a donor
 //     refuses what its limit does not cover however big the machine is.
-//   - mem_available >= mem_bytes, and mem_total - mem_committed >= mem_bytes when mem_total is
-//     known: the tasks we already placed there have not necessarily touched their memory yet,
-//     so mem_available alone lets several of them pile onto one donor
+//   - mem_need and mem_limit at most mem_total (the memory the node lets work use), and what the
+//     batch holds there (HeldOn) at most mem_available and mem_total - mem_committed: the batches
+//     we already placed there have not necessarily touched their memory yet
 //   - need.gpus free GPUs
 //   - need.may_local / may_remote
 // Order: expected committed work descending, then transfer time (missing_bytes / measured bandwidth), cpu_load_pct, AC, latency,

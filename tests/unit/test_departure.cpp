@@ -521,7 +521,7 @@ TEST(DrainNoticeCarriesReasonCodeAndTtlToThePeerTable) {
 // ---- real kernel freezer through the sandbox runner -----------------------------------------
 
 TEST(DepartureFreezesARealSandboxCgroupAndItResumes) {
-    if (!zeromesh::exec::cgroup::DelegatedParent()) return; // no delegated cgroup v2 subtree here
+    if (zeromesh::exec::cgroup::SetUpWork(0).root.empty()) return; // work cannot be contained here
     auto key = zeromesh::net::GenerateTeamKey();
     TestNodeFull a("node-a", key), b("node-b", key);
     a.Start();

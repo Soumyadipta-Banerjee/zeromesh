@@ -31,6 +31,7 @@ namespace zeromesh::node {
 struct PsiSample {
     uint64_t some_total_us{0};
     uint64_t full_total_us{0};
+    double full_avg10{0.0}; // percent of the last ten seconds all tasks were stalled (the kernel's average)
 };
 
 // Parses the text of a /proc/pressure/<resource> file.

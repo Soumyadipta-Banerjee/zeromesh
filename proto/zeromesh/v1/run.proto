@@ -127,6 +127,7 @@ enum FailureKind {
   FAILURE_DONOR_LEFT = 9;         // retries ran out while donors kept leaving
   FAILURE_CANCELLED = 10;
   FAILURE_DEPENDENCY = 11;        // an item it comes after failed
+  FAILURE_NO_CAPACITY = 12;       // no node has, or lets work use, the memory, cores, GPUs or arch it needs
 }
 
 message Failure {

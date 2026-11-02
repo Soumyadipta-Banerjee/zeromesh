@@ -28,7 +28,8 @@ constexpr size_t kMaxItemsPerBatch = 2000;
 constexpr double kMinBatchSeconds = 2.0;
 constexpr double kMaxBatchSeconds = 120.0;
 constexpr double kDefaultItemSeconds = 1.0;
-constexpr int kMaxOomRetries = 2;
+// Past a limit, beside other work, alone on too small a node: each kill is retried differently.
+constexpr int kMaxOomRetries = 3;
 constexpr int64_t kMiB = 1024 * 1024;
 constexpr size_t kFinishedRunsKept = 32;
 constexpr auto kTeamTimeout = std::chrono::milliseconds(2000);
@@ -121,7 +122,11 @@ struct RunEngine::Item {
     bool local_only{false};
     bool fallback_tried{false};
     std::set<std::string> exclude;
-    int64_t mem_override{0};
+    // Memory, from its own kills: what it is known to need at least, its hard limit raised past a
+    // declared one, and whether it must have a node's memory to itself.
+    int64_t need_override{0};
+    int64_t limit_override{0};
+    bool alone{false};
     v1::Digest checkpoint;
     std::string batch; // the batch it is queued or running in
     std::string node;
@@ -810,6 +815,7 @@ void RunEngine::Dispatch(const RunPtr& run) {
         struct Key {
             size_t stage;
             bool local_only;
+            bool alone; // a batch of items that must have a node's memory to themselves
             std::set<std::string> exclude;
             std::string root;
             auto operator<=>(const Key&) const = default;
@@ -818,7 +824,7 @@ void RunEngine::Dispatch(const RunPtr& run) {
         for (size_t i = 0; i < run->items.size(); ++i) {
             const Item& it = run->items[i];
             if (it.state != v1::ITEM_QUEUED || !it.looked_up || it.in_lookup || !it.batch.empty()) continue;
-            groups[Key{it.stage, it.local_only, it.exclude, it.root.hash}].push_back(i);
+            groups[Key{it.stage, it.local_only, it.alone, it.exclude, it.root.hash}].push_back(i);
         }
         if (groups.empty()) return;
 
@@ -827,11 +833,15 @@ void RunEngine::Dispatch(const RunPtr& run) {
             if (auto s = deps_.resources->Seconds(st.kind(), it.spec.cost())) return std::max(*s, 0.01);
             return kDefaultItemSeconds;
         };
-        auto memory = [&](const Item& it) -> int64_t {
+        // Memory per item: the hard limit (declared, raised past an OOM kill; a learned figure never
+        // is one) and what it is known to need (learned for its kind and size, or from its own kills).
+        auto limit_of = [&](const Item& it) -> int64_t {
+            const int64_t declared = run->stages[it.stage].resources().mem_bytes();
+            return declared > 0 ? std::max(declared, it.limit_override) : 0;
+        };
+        auto need_of = [&](const Item& it) -> int64_t {
             const v1::Stage& st = run->stages[it.stage];
-            int64_t m = st.resources().mem_bytes();
-            if (m <= 0) m = deps_.resources->Memory(st.kind(), it.spec.cost()).value_or(0);
-            return std::max(m, it.mem_override);
+            return std::max(deps_.resources->Need(st.kind(), it.spec.cost()).value_or(0), it.need_override);
         };
 
         int limit = 1;
@@ -906,17 +916,17 @@ void RunEngine::Dispatch(const RunPtr& run) {
                 *b.mutable_env() = st.env();
                 *b.mutable_resources() = st.resources();
                 b.mutable_resources()->set_cores(std::max(st.resources().cores(), 1));
-                // Reserve what the items are expected to use; cap only what the adapter declared
-                // (raised after an OOM kill). A learned figure is never a hard limit.
-                int64_t mem = 0, limit = 0;
+                // Its items' known need decides which nodes can run it at all; the need with a margin
+                // (at least the limit) packs it beside other batches.
+                int64_t need = 0, mem_limit = 0;
                 for (size_t i : chunk) {
-                    mem = std::max(mem, memory(run->items[i]));
-                    if (st.resources().mem_bytes() > 0) {
-                        limit = std::max({limit, st.resources().mem_bytes(), run->items[i].mem_override});
-                    }
+                    need = std::max(need, need_of(run->items[i]));
+                    mem_limit = std::max(mem_limit, limit_of(run->items[i]));
                 }
-                b.mutable_resources()->set_mem_bytes(mem);
-                b.set_mem_limit(limit);
+                b.mutable_resources()->set_mem_bytes(std::max(Reserve(need), mem_limit));
+                b.set_mem_limit(mem_limit);
+                b.set_mem_need(need);
+                b.set_alone(key.alone);
                 b.set_kind(st.kind());
                 b.set_warm(st.warm());
                 b.set_network(st.network());
@@ -1159,18 +1169,40 @@ void RunEngine::OnItem(const RunPtr& run, const std::string& batch, const v1::It
                 Fail(*run, i, v1::FAILURE_EXIT, o.message(), o.exit_code(), o.stdout_tail(), o.stderr_tail());
             }
             break;
-        case v1::FAILURE_OOM:
-            if (it.oom_retries < kMaxOomRetries) {
-                ++it.oom_retries;
-                int64_t had = std::max<int64_t>(stage.resources().mem_bytes(), it.mem_override);
-                if (had <= 0) had = deps_.resources->Memory(stage.kind(), spec.cost()).value_or(256 * kMiB);
-                deps_.resources->RaiseMemory(stage.kind(), spec.cost(), had);
-                it.mem_override = std::max<int64_t>(had + had / 2, 512 * kMiB);
-                Requeue(*run, i, "out of memory, retrying with " + std::to_string(it.mem_override / kMiB) + " MiB");
-            } else {
+        case v1::FAILURE_OOM: {
+            if (it.oom_retries >= kMaxOomRetries) {
                 Fail(*run, i, v1::FAILURE_OOM, o.message(), o.exit_code(), o.stdout_tail(), o.stderr_tail());
+                break;
             }
+            ++it.oom_retries;
+            const int64_t peak = std::max<int64_t>(o.peak_mem(), 0);
+            auto mib = [](int64_t b) { return std::to_string(b / kMiB) + " MiB"; };
+            if (o.oom_at_limit()) {
+                // Past its batch's own limit: it needs more than that; half as much again next.
+                const int64_t declared = std::max<int64_t>(stage.resources().mem_bytes(), 0);
+                const int64_t limit = std::max(declared, it.limit_override);
+                it.limit_override = limit + limit / 2;
+                it.need_override = std::max({it.need_override, limit, peak});
+                Requeue(*run, i, "past its memory limit of " + mib(limit) + ", retrying with " + mib(it.limit_override));
+            } else if (!it.alone) {
+                // The node's memory for work ran out with other work beside it. What it held then is
+                // only a lower bound, squeezed as it was: next it has a node's memory to itself, which
+                // either is enough (and its real peak is learned) or shows that node is too small.
+                it.need_override = std::max(it.need_override, peak);
+                it.alone = true;
+                Requeue(*run, i, "out of memory at " + mib(peak) + " beside other work on " + share.hostname() +
+                                     ", retrying with a node's memory to itself");
+            } else {
+                // It had that node's memory to itself and ran out: it needs more than that node lets
+                // work use, and only a node that lets work use more can run it.
+                it.need_override = std::max({it.need_override, peak, o.budget() + 1});
+                Requeue(*run, i, "out of memory alone on " + share.hostname() + " (work there may use " +
+                                     mib(o.budget()) + "), retrying on a node that lets work use more");
+            }
+            // Its kind learns what was seen; "more than that node allows" stays with this item.
+            deps_.resources->NeedsAtLeast(stage.kind(), spec.cost(), o.oom_at_limit() ? it.need_override : peak);
             break;
+        }
         case v1::FAILURE_SANDBOX:
             ++it.infra_failures;
             it.exclude.insert(node);
@@ -1216,7 +1248,8 @@ void RunEngine::OnBatchDone(const RunPtr& run, const std::string& batch, node::B
             Terminal(*run, i, v1::ITEM_CANCELLED, std::move(f));
             continue;
         }
-        const bool unplaceable = d.failure == v1::FAILURE_ENV_UNAVAILABLE || d.failure == v1::FAILURE_TOOLCHAIN_MISMATCH;
+        const bool unplaceable = d.failure == v1::FAILURE_ENV_UNAVAILABLE || d.failure == v1::FAILURE_TOOLCHAIN_MISMATCH ||
+                                 d.failure == v1::FAILURE_NO_CAPACITY;
         const bool can_fallback = run->policy.local_fallback() && !it.fallback_tried && !it.local_only &&
                                   run->stages[it.stage].where() != v1::REMOTE_ONLY;
         if (d.failure == v1::FAILURE_CANCELLED) {

@@ -78,7 +78,7 @@ struct TestNodeFull {
           cas(std::make_shared<store::CasStore>(dir / "cas")), merkle(std::make_shared<store::MerkleBuilder>(cas)),
           registry(std::make_shared<plugin::Registry>()) {
         registry->RegisterEnv(envhost::Make());
-        runner = std::make_shared<exec::BatchRunner>(cas, merkle, dir / "scratch");
+        runner = std::make_shared<exec::BatchRunner>(cas, merkle, dir / "scratch", exec::cgroup::SetUpWork(0));
         executor = std::make_shared<node::LocalExecutor>(runner, registry, node_id, 2, dir / "state", cas,
                                                          node::NodeClientFactory{});
     }

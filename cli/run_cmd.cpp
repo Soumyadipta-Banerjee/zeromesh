@@ -164,6 +164,8 @@ const char* KindWord(v1::FailureKind k) {
         return "cancelled";
     case v1::FAILURE_DEPENDENCY:
         return "dependency";
+    case v1::FAILURE_NO_CAPACITY:
+        return "no node can take it";
     default:
         return "failed";
     }

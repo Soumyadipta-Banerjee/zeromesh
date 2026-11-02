@@ -2,6 +2,7 @@
 
 #include "node/comfort_governor.hpp"
 #include "node/donor_policy.hpp"
+#include "node/work_pressure.hpp"
 #include "tests/unit/node_fixture.hpp"
 
 #include <atomic>
@@ -341,13 +342,12 @@ TEST(PlacerRoutesAroundASqueezedDonor) {
 }
 
 TEST(BatchRunnerReportsBatchCgroupsToObserver) {
-    // A batch gets a cgroup whenever delegation exists, even when no limit can be applied there.
-    if (!zeromesh::exec::cgroup::DelegatedParent()) return; // no delegated cgroup on this host
+    // Every batch gets its own cgroup under the node's work cgroup.
     TempDir tmp;
     auto cas = std::make_shared<zeromesh::store::CasStore>(tmp / "cas");
     auto merkle = std::make_shared<zeromesh::store::MerkleBuilder>(cas);
-    zeromesh::exec::BatchRunner runner(cas, merkle, tmp / "scratch");
-    if (!runner.unavailable().empty()) return; // sandbox unavailable here
+    zeromesh::exec::BatchRunner runner(cas, merkle, tmp / "scratch", zeromesh::exec::cgroup::SetUpWork(0));
+    if (!runner.unavailable().empty()) return; // no sandbox or no containment here
     std::vector<std::pair<std::filesystem::path, bool>> events;
     runner.SetCgroupObserver([&](const std::filesystem::path& dir, bool added) { events.emplace_back(dir, added); });
     zeromesh::exec::BatchRunSpec spec;
@@ -363,13 +363,14 @@ TEST(BatchRunnerReportsBatchCgroupsToObserver) {
     ASSERT_TRUE(events[0].second);
     ASSERT_TRUE(!events[1].second);
     ASSERT_EQ(events[0].first, events[1].first);
+    ASSERT_EQ(events[0].first.parent_path(), runner.work().root);
 }
 
 TEST(GovernorFreezesARealCgroupAndThawsIt) {
-    // Needs a delegated cgroup v2 subtree with the cpu controller (a systemd user session has one).
-    auto self = zeromesh::exec::cgroup::DelegatedParent();
-    if (!self) return;
-    const auto dir = *self / ("zm-comfort-test-" + std::to_string(::getpid()));
+    // A real cgroup under the work cgroup (needs containment: a delegated scope).
+    const auto work = zeromesh::exec::cgroup::SetUpWork(0);
+    if (work.root.empty()) return;
+    const auto dir = work.root / ("zm-comfort-test-" + std::to_string(::getpid()));
     std::error_code ec;
     std::filesystem::create_directory(dir, ec);
     if (ec) return;
@@ -412,4 +413,34 @@ TEST(GovernorFreezesARealCgroupAndThawsIt) {
     ASSERT_TRUE(act.Capabilities().freeze);
     ASSERT_TRUE(did_freeze);
     ASSERT_TRUE(did_thaw);
+}
+
+TEST(WorkPressureStopsOneItemAtATimeWhileWorkIsStalled) {
+    int stopped = 0;
+    bool running = true;
+    zeromesh::node::WorkPressure watch({}, [&] { return running && (++stopped, true); });
+    const auto t0 = zeromesh::node::WorkPressure::Clock::now();
+    // Below a quarter of the last ten seconds stalled it never acts.
+    ASSERT_FALSE(watch.Observe(24.9, t0));
+    ASSERT_EQ(stopped, 0);
+    // At it, the youngest item is stopped; then the average must show that stop's effect first.
+    ASSERT_TRUE(watch.Observe(34.7, t0));
+    ASSERT_EQ(stopped, 1);
+    ASSERT_FALSE(watch.Observe(40.0, t0 + std::chrono::seconds(5)));
+    ASSERT_TRUE(watch.Observe(40.0, t0 + std::chrono::seconds(10)));
+    ASSERT_EQ(stopped, 2);
+    // Nothing running: nothing stopped, and the next stall is acted on at once.
+    running = false;
+    ASSERT_FALSE(watch.Observe(50.0, t0 + std::chrono::seconds(30)));
+    running = true;
+    ASSERT_TRUE(watch.Observe(50.0, t0 + std::chrono::seconds(31)));
+    ASSERT_EQ(stopped, 3);
+}
+
+TEST(PsiParsesTheTenSecondAverageOfFullStall) {
+    const auto s = zeromesh::node::ParsePsi("some avg10=41.02 avg60=30.00 avg300=9.10 total=900\n"
+                                            "full avg10=34.68 avg60=20.00 avg300=5.00 total=700\n");
+    ASSERT_TRUE(s.has_value());
+    ASSERT_EQ(s->full_total_us, 700u);
+    ASSERT_TRUE(s->full_avg10 > 34.67 && s->full_avg10 < 34.69);
 }

@@ -21,6 +21,9 @@ env_line='source ~/zeromesh-stage/env.sh'
 case $cmd in
 setup)
   remote 'sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync strace python3-venv >/dev/null && python3 -m venv ~/venv && ~/venv/bin/pip install -q setuptools wheel "grpcio>=1.84" "protobuf>=4.21" pytest'
+  # zmd started over SSH moves itself into a systemd user scope; lingering keeps that scope alive
+  # after the SSH session ends.
+  remote 'sudo loginctl enable-linger "$USER"'
   ;;
 deploy|update)
   stage=${1:-$(cd "$(dirname "$0")/../.." && pwd)/build/vm-stage}

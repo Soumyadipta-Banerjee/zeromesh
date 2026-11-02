@@ -40,6 +40,7 @@ struct Peer {
     int cores{1};
     int cores_free{0};
     uint64_t memory_bytes{0};
+    uint64_t work_memory_bytes{0}; // what all work there may use together (its budget); 0: none
     uint64_t mem_available{0};
     int gpus{0};
     double cpu_load_pct{0.0}; // 0.0 to 100.0%

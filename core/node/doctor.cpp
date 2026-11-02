@@ -87,19 +87,18 @@ std::vector<v1::Finding> Diagnose(const DoctorFacts& f) {
                                        "use Linux 5.11 or newer"));
     }
 
-    if (!f.cgroup) {
-        out.push_back(Make("cgroup", v1::SEVERITY_WARN,
-                           "no delegated cgroup v2: memory limits are not enforced and OOM kills are reported as "
-                           "plain failures",
-                           "run zmd as the systemd user service (packaging/systemd/zmd.service, Delegate=)"));
-    } else if (!f.cgroup_memory) {
-        out.push_back(Make("cgroup", v1::SEVERITY_WARN,
-                           "cgroup " + *f.cgroup + " is delegated without the memory controller: declared memory "
-                                                   "limits are not enforced",
-                           "add memory to Delegate= in zmd.service"));
+    if (!f.containment_problem.empty()) {
+        out.push_back(Make("cgroup", v1::SEVERITY_ERROR,
+                           "work cannot be contained (" + f.containment_problem + "): this node runs no items",
+                           "start zmd with its systemd user unit (systemctl --user start zmd), or from a login with "
+                           "a systemd user manager: zmd then asks it for a delegated scope itself"));
     } else {
-        out.push_back(Make("cgroup", v1::SEVERITY_OK,
-                           "delegated cgroup " + *f.cgroup + ": memory limits, OOM detection and CPU accounting work"));
+        std::string budget = "no memory budget";
+        if (f.memory_budget > 0) {
+            budget = "work may use " + std::to_string(f.memory_budget >> 20) + " MiB of memory";
+            if (f.memory_pct > 0) budget += " (max_memory_pct = " + std::to_string(f.memory_pct) + " in donor.toml)";
+        }
+        out.push_back(Make("cgroup", v1::SEVERITY_OK, "work is contained in " + f.work_cgroup + "; " + budget));
     }
 
     if (f.dev_fuse && f.fusermount) {

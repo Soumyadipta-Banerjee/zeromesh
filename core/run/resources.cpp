@@ -11,8 +11,6 @@ namespace {
 
 constexpr size_t kRecentPeaks = 16;
 constexpr double kAlpha = 0.3;          // weight of a new duration
-constexpr double kMemoryMargin = 1.25;  // reserve this much above the largest recent peak
-constexpr int64_t kMiB = 1024 * 1024;
 
 std::string Clean(std::string s) {
     std::replace(s.begin(), s.end(), '\t', ' ');
@@ -84,12 +82,12 @@ void ResourceModel::Record(const std::string& kind, double cost, int64_t wall_ms
     Append(kind, b, wall_ms, peak_mem, 0);
 }
 
-void ResourceModel::RaiseMemory(const std::string& kind, double cost, int64_t limit) {
+void ResourceModel::NeedsAtLeast(const std::string& kind, double cost, int64_t bytes) {
+    if (bytes <= 0) return;
     const int b = Bucket(cost);
-    const int64_t floor = std::max<int64_t>(limit + limit / 2, 256 * kMiB);
     std::lock_guard lock(mu_);
-    ApplyLocked(kind, b, -1, 0, floor);
-    Append(kind, b, -1, 0, floor);
+    ApplyLocked(kind, b, -1, 0, bytes);
+    Append(kind, b, -1, 0, bytes);
 }
 
 const ResourceModel::Class* ResourceModel::NearestLocked(const std::string& kind, int bucket) const {
@@ -114,14 +112,18 @@ std::optional<double> ResourceModel::Seconds(const std::string& kind, double cos
     return c->ewma_ms / 1000.0;
 }
 
-std::optional<int64_t> ResourceModel::Memory(const std::string& kind, double cost) const {
+std::optional<int64_t> ResourceModel::Need(const std::string& kind, double cost) const {
     std::lock_guard lock(mu_);
     const Class* c = NearestLocked(kind, Bucket(cost));
     if (!c || (c->mem.empty() && c->floor == 0)) return std::nullopt;
-    int64_t peak = c->mem.empty() ? 0 : *std::max_element(c->mem.begin(), c->mem.end());
-    int64_t want = static_cast<int64_t>(static_cast<double>(peak) * kMemoryMargin);
-    want = std::max(want, c->floor);
-    return (want + kMiB - 1) / kMiB * kMiB;
+    const int64_t peak = c->mem.empty() ? 0 : *std::max_element(c->mem.begin(), c->mem.end());
+    return std::max(peak, c->floor);
+}
+
+std::optional<int64_t> ResourceModel::Memory(const std::string& kind, double cost) const {
+    const auto need = Need(kind, cost);
+    if (!need) return std::nullopt;
+    return Reserve(*need);
 }
 
 } // namespace zeromesh::run
