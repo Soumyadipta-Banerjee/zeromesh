@@ -4,6 +4,7 @@
 #include "exec/cgroup.hpp"
 #include "exec/depfile.hpp"
 #include "exec/priority.hpp"
+#include "exec/subprocess.hpp"
 #include "exec/tree_watch.hpp"
 
 #include <fcntl.h>
@@ -45,17 +46,6 @@ std::string RandomHex(size_t bytes) {
         out.push_back("0123456789abcdef"[c & 15]);
     }
     return out;
-}
-
-std::string FindOnPath(const std::string& name) {
-    const char* path = std::getenv("PATH");
-    std::stringstream ss(path ? path : "/usr/bin:/bin");
-    std::string dir;
-    while (std::getline(ss, dir, ':')) {
-        fs::path candidate = fs::path(dir) / name;
-        if (access(candidate.c_str(), X_OK) == 0) return candidate.string();
-    }
-    return {};
 }
 
 // Relative, no "..", no leading '/'.
@@ -250,35 +240,12 @@ BatchRunner::BatchRunner(std::shared_ptr<store::CasStore> store, std::shared_ptr
 // Runs bwrap twice: once plain (does it work at all here? AppArmor's userns restriction breaks
 // it), once with an overlay at a tmpfs path (are unprivileged overlays allowed?).
 bool BatchRunner::ProbeOverlay() {
-    auto run = [&](const std::vector<std::string>& args, std::string* err) {
-        int errpipe[2];
-        if (pipe2(errpipe, O_CLOEXEC) != 0) return false;
-        std::vector<char*> cargv;
-        std::vector<std::string> copy = args;
-        for (auto& a : copy) cargv.push_back(a.data());
-        cargv.push_back(nullptr);
-        pid_t pid = fork();
-        if (pid == 0) {
-            int devnull = open("/dev/null", O_RDWR);
-            if (devnull >= 0) {
-                dup2(devnull, STDIN_FILENO);
-                dup2(devnull, STDOUT_FILENO);
-            }
-            dup2(errpipe[1], STDERR_FILENO);
-            execv(cargv[0], cargv.data());
-            _exit(127);
-        }
-        close(errpipe[1]);
-        std::string out;
-        char buf[512];
-        ssize_t n;
-        while ((n = read(errpipe[0], buf, sizeof(buf))) > 0) out.append(buf, static_cast<size_t>(n));
-        close(errpipe[0]);
-        int status = 0;
-        if (pid > 0) waitpid(pid, &status, 0);
+    auto run = [](const std::vector<std::string>& args, std::string* err) {
+        CommandResult r = RunCommand(args, {.cwd = {}, .timeout = std::chrono::seconds(30), .max_output = 4096});
+        std::string out = r.error.empty() ? r.output : r.error;
         while (!out.empty() && out.back() == '\n') out.pop_back();
         if (err) *err = out;
-        return pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        return r.ok();
     };
     const std::string t = fs::exists("/bin/true") ? "/bin/true" : "/usr/bin/true";
     std::string err;

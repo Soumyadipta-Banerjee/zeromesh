@@ -33,18 +33,6 @@ grpc::Status Invalid(const std::string& msg) {
     return {grpc::StatusCode::INVALID_ARGUMENT, msg};
 }
 
-std::string RandomHex(size_t bytes) {
-    std::vector<unsigned char> buf(bytes);
-    randombytes_buf(buf.data(), buf.size());
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string out;
-    for (unsigned char b : buf) {
-        out.push_back(kHex[b >> 4]);
-        out.push_back(kHex[b & 0xf]);
-    }
-    return out;
-}
-
 std::string HumanBytes(uint64_t n) {
     static constexpr const char* kUnits[] = {"B", "KiB", "MiB", "GiB", "TiB"};
     double v = static_cast<double>(n);

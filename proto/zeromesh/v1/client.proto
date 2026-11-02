@@ -32,6 +32,7 @@ message Probe {
 message CaptureRequest {
   repeated Probe probes = 1;   // commands that exercise the software; what they open is captured
   repeated string paths = 2;   // absolute files or directories to include whole
+  string cwd = 3;              // where probes run (absolute); nothing under it is captured. "" = a scratch dir
 }
 message CaptureReply {
   Digest tree = 1;

@@ -1,5 +1,7 @@
 #include "exec/bwrap.hpp"
 
+#include "exec/subprocess.hpp"
+
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -12,31 +14,10 @@ namespace zeromesh::exec {
 
 namespace {
 
-// stdout of `binary --version`, or "" if it cannot be run.
+// What `binary --version` prints, or "" if it cannot be run or fails.
 std::string VersionBanner(const std::string& binary) {
-    int fds[2];
-    if (pipe(fds) != 0) return "";
-    const pid_t pid = fork();
-    if (pid < 0) {
-        close(fds[0]);
-        close(fds[1]);
-        return "";
-    }
-    if (pid == 0) {
-        dup2(fds[1], STDOUT_FILENO);
-        close(fds[0]);
-        close(fds[1]);
-        execl(binary.c_str(), binary.c_str(), "--version", static_cast<char*>(nullptr));
-        _exit(127);
-    }
-    close(fds[1]);
-    std::string out;
-    char buf[256];
-    for (ssize_t n; (n = read(fds[0], buf, sizeof(buf))) > 0;) out.append(buf, static_cast<size_t>(n));
-    close(fds[0]);
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? out : "";
+    CommandResult r = RunCommand({binary, "--version"}, {.cwd = {}, .timeout = std::chrono::seconds(10), .max_output = 4096});
+    return r.ok() ? r.output : "";
 }
 
 } // namespace

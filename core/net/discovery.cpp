@@ -282,6 +282,12 @@ void ReplayTracker::Clear() {
     std::lock_guard<std::mutex> lock(mu_);
     nodes_.clear();
     skew_log_last_.clear();
+    skew_ms_.clear();
+}
+
+std::map<std::string, int64_t> ReplayTracker::ClockSkews() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return skew_ms_;
 }
 
 bool ReplayTracker::Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq, int64_t timestamp_ms) {
@@ -290,11 +296,12 @@ bool ReplayTracker::Accept(std::string_view node_id, std::string_view boot_id, u
         std::lock_guard<std::mutex> lock(mu_);
         const auto now = std::chrono::steady_clock::now();
         const std::string key(node_id);
+        const int64_t wall_now = UnixMsNow();
+        const int64_t skew_ms = timestamp_ms - wall_now;
+        skew_ms_[key] = skew_ms;
         auto it = skew_log_last_.find(key);
         if (it == skew_log_last_.end() || now - it->second >= std::chrono::seconds(5)) {
             skew_log_last_[key] = now;
-            const int64_t wall_now = UnixMsNow();
-            const int64_t skew_ms = timestamp_ms - wall_now;
             std::fprintf(stderr,
                          "zeromesh discovery: rejecting packet from peer %s: clock skew %lld ms "
                          "(timestamp %lld, local %lld)\n",
@@ -304,6 +311,7 @@ bool ReplayTracker::Accept(std::string_view node_id, std::string_view boot_id, u
         return false;
     }
     std::lock_guard<std::mutex> lock(mu_);
+    skew_ms_.erase(std::string(node_id)); // its clock is fine again
     auto& st = nodes_[std::string(node_id)];
     if (st.boot_id.empty() || st.boot_id != boot_id) {
         st.boot_id = std::string(boot_id);

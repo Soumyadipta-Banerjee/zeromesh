@@ -4,6 +4,7 @@
 #include "plugins/env-tree/env_profile.hpp"
 #include "plugins/env-tree/mirror_cache.hpp"
 #include "plugins/env-tree/mirror_fuse.hpp"
+#include "node/env_capture.hpp"
 #include "plugins/env-tree/mirror_prefetch.hpp"
 #include "store/merkle.hpp"
 #include "store/store.hpp"
@@ -37,15 +38,6 @@ std::string Param(const plugin::EnvParams& p, const char* key) {
     return it == p.params.end() ? std::string() : it->second;
 }
 
-// Top-level directories of a tree that are mounted where they are on the requester. The rest of a
-// host's layout (/etc, /proc, /dev, /tmp, ...) is never taken from an environment.
-bool MountedAtItsPath(const std::string& name) {
-    static const char* kSkip[] = {"etc", "proc", "sys", "dev", "tmp", "run", "var", "boot", "root", "lost+found"};
-    for (const char* s : kSkip) {
-        if (name == s) return false;
-    }
-    return true;
-}
 
 // Writes the tree `hash` under `dest`, reading every manifest and blob through `src`.
 bool FetchTree(plugin::IBlobSource& src, const std::string& hash, const fs::path& dest) {
@@ -157,7 +149,7 @@ public:
         bool has_usr = false;
         for (fs::directory_iterator it(view, ec), end; !ec && it != end; it.increment(ec)) {
             const std::string name = it->path().filename().string();
-            if (!MountedAtItsPath(name) || !it->is_directory(ec) || it->is_symlink(ec)) continue;
+            if (!node::EnvTreeMounts(name) || !it->is_directory(ec) || it->is_symlink(ec)) continue;
             if (name == "usr") has_usr = true;
             env.binds.push_back({.host = it->path().string(), .sandbox = "/" + name, .read_only = true});
         }
@@ -173,7 +165,7 @@ public:
             }
         }
         // The loader cache and certificates: the environment's own when it carries them.
-        for (const char* p : {"/etc/ld.so.cache", "/etc/alternatives", "/etc/ssl"}) {
+        for (const char* p : node::kEnvTreeEtcPaths) {
             const fs::path mine = view / (p + 1);
             if (fs::exists(mine, ec))
                 env.binds.push_back({mine.string(), p, true});

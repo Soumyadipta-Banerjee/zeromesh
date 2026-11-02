@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -83,15 +84,19 @@ class ReplayTracker {
 public:
     [[nodiscard]] bool Accept(std::string_view node_id, std::string_view boot_id, uint64_t seq, int64_t timestamp_ms);
     void Clear();
+    // Node id -> how far ahead (+) or behind (-) of our clock, in ms, the last packet it sent was,
+    // for every node whose packets are being refused for clock skew right now.
+    [[nodiscard]] std::map<std::string, int64_t> ClockSkews() const;
 
 private:
     struct State {
         std::string boot_id;
         uint64_t last_seq{0};
     };
-    std::mutex mu_;
+    mutable std::mutex mu_;
     std::unordered_map<std::string, State> nodes_;
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> skew_log_last_;
+    std::map<std::string, int64_t> skew_ms_;
 };
 
 struct DiscoveryConfig {
@@ -128,6 +133,9 @@ public:
     void BroadcastNodeDraining(const std::string& reason);
 
     [[nodiscard]] const std::string& node_id() const { return config_.node_id; }
+
+    // Team members whose announcements are refused because their clock is too far from ours.
+    [[nodiscard]] std::map<std::string, int64_t> ClockSkews() const { return replay_.ClockSkews(); }
 
 private:
     void AdvertiserLoop();

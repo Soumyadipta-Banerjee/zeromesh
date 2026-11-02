@@ -3,6 +3,7 @@
 #include "plugins/env-host/env_host.hpp"
 #include "plugins/env-tree/env_tree.hpp"
 #include "exec/batch_runner.hpp"
+#include "exec/cgroup.hpp"
 #include "net/discovery.hpp"
 #include "net/identity.hpp"
 #include "net/peer_table.hpp"
@@ -13,7 +14,9 @@
 #include "node/client_service.hpp"
 #include "node/comfort_governor.hpp"
 #include "node/departure.hpp"
+#include "node/doctor.hpp"
 #include "node/donor_policy.hpp"
+#include "node/env_capture.hpp"
 #include "node/local_executor.hpp"
 #include "node/node_client.hpp"
 #include "node/node_service.hpp"
@@ -409,6 +412,31 @@ int Daemon::Run() {
         parts.cache = cache;
         parts.team_cache = team_cache;
         parts.local_executor = local_executor;
+        auto capturer = std::make_shared<EnvCapturer>(merkle, config_.state_dir);
+        parts.capture = [capturer](const v1::CaptureRequest& req, v1::CaptureReply* reply) {
+            return capturer->Capture(req, reply);
+        };
+        parts.doctor = [runner, team, pins, peers, discovery, cas, node_port = config_.node_port,
+                        discovery_port = config_.discovery_port, group = disc_cfg.multicast_group] {
+            DoctorFacts f;
+            f.sandbox_problem = runner->unavailable();
+            f.overlay = runner->overlay();
+            if (auto parent = exec::cgroup::TaskParent()) {
+                f.cgroup = parent->string();
+                f.cgroup_memory = exec::cgroup::Probe().memory;
+            }
+            f.in_team = team->Get().has_value();
+            f.node_port = node_port;
+            f.discovery_port = discovery_port;
+            f.multicast_group = group;
+            f.peers_seen = peers->ListPresent().size();
+            f.peers_pinned = pins->Count();
+            f.clock_skew_ms = discovery->ClockSkews();
+            f.store_bytes = cas->BlobBytes();
+            f.store_limit = cas->MaxBlobBytes();
+            GatherSystemFacts(cas->GetBasePath(), &f);
+            return Diagnose(f);
+        };
         client_service = std::make_unique<ClientService>(cas, merkle, peers, opts, std::move(parts), team);
 
         DonorPolicy policy = DonorPolicy::Load(config_.config_dir);

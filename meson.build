@@ -51,6 +51,7 @@ core_sources = files(
   'core/net/discovery.cpp',
   'core/net/telemetry.cpp',
   'core/node/state.cpp',
+  'core/exec/subprocess.cpp',
   'core/exec/bwrap.cpp',
   'core/exec/landlock.cpp',
   'core/exec/priority.cpp',
@@ -75,6 +76,8 @@ core_sources = files(
   'core/node/blob_transfer.cpp',
   'core/node/requester_blob_source.cpp',
   'core/node/env_check.cpp',
+  'core/node/env_capture.cpp',
+  'core/node/doctor.cpp',
   'core/node/peer_team.cpp',
   'core/node/version_probe.cpp',
   'core/run/item_key.cpp',
@@ -164,6 +167,7 @@ test_bin = executable('unit_tests',
     'tests/unit/test_hazard.cpp',
     'tests/unit/test_departure.cpp',
     'tests/unit/test_env_tree.cpp',
+    'tests/unit/test_env_capture.cpp',
     'tests/unit/test_env_profile.cpp',
     'tests/unit/test_bandwidth.cpp',
     'tests/unit/test_reapi_heuristics.cpp',
@@ -183,9 +187,9 @@ env_host_module = shared_module('zm_env_host',
   files('plugins/env-host/env_host.cpp', 'plugins/env-host/entry.cpp'),
   include_directories: inc, name_prefix: 'lib')
 
-# Optional loadable .so (daemon also registers mirror statically). Avoid linking
+# Optional loadable .so (the daemon also registers env-tree statically). Avoid linking
 # static abseil from common_deps into a shared object (needs -fPIC).
-env_mirror_module = shared_module('zm_env_tree',
+env_tree_module = shared_module('zm_env_tree',
   files('plugins/env-tree/mirror_cache.cpp',
         'plugins/env-tree/env_profile.cpp',
         'plugins/env-tree/mirror_reader.cpp',
@@ -298,8 +302,8 @@ test('sdk_python', python3,
   is_parallel: false,
 )
 
-test('integration_mirror', python3,
-  args: [files('tests/integration/test_mirror.py')],
+test('integration_tree_env', python3,
+  args: [files('tests/integration/test_tree_env.py')],
   env: {
     'ZM_BUILD_DIR': meson.current_build_dir(),
     'PYTHONPATH': meson.current_build_dir() / 'proto',

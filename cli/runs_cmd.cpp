@@ -254,7 +254,7 @@ int EnvCommand(Client& client, const std::vector<std::string>& args) {
         std::cerr << "usage: zm env capture [--path P]... -- CMD [ARGS...]\n";
         return 1;
     }
-    v1::CaptureRequest req;
+    std::vector<std::string> paths, probe;
     size_t i = 1;
     for (; i < args.size(); ++i) {
         if (args[i] == "--") {
@@ -262,23 +262,25 @@ int EnvCommand(Client& client, const std::vector<std::string>& args) {
             break;
         }
         if (args[i] == "--path" && i + 1 < args.size()) {
-            std::error_code ec;
-            req.add_paths(std::filesystem::absolute(args[++i], ec).string());
+            paths.push_back(args[++i]);
         } else {
             break;
         }
     }
-    if (i < args.size()) {
-        auto* probe = req.add_probes();
-        for (; i < args.size(); ++i) probe->add_argv(args[i]);
-    }
-    if (req.probes_size() == 0 && req.paths_size() == 0) {
+    probe.assign(args.begin() + static_cast<std::ptrdiff_t>(i), args.end());
+    if (probe.empty() && paths.empty()) {
         std::cerr << "zm env capture: give a command to trace, --path, or both\n";
+        return 1;
+    }
+    std::string error;
+    auto req = CaptureRequestFor(probe, paths, &error);
+    if (!req) {
+        std::cerr << "zm env capture: " << error << "\n";
         return 1;
     }
     grpc::ClientContext ctx;
     v1::CaptureReply reply;
-    grpc::Status s = client.stub().CaptureEnv(&ctx, req, &reply);
+    grpc::Status s = client.stub().CaptureEnv(&ctx, *req, &reply);
     if (!s.ok()) return ReportRpcError("capture failed", s);
     if (!reply.note().empty()) std::cerr << "zm: " << reply.note() << "\n";
     for (const auto& d : reply.denied()) std::cerr << "zm: kept out (secret): /" << d << "\n";

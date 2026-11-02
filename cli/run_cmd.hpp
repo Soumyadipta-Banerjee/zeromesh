@@ -45,6 +45,12 @@ bool ExpandEachGlob(const std::string& pattern, const std::filesystem::path& cwd
 // Replaces every "{}" in `s` with `replacement`.
 std::string ReplaceBraces(std::string_view s, std::string_view replacement);
 
+// A capture of `probe` (empty: none) and `paths`, as zmd needs it: the program found with this
+// shell's PATH, paths made absolute, and the current directory as the probe's working directory.
+// nullopt with *error when the program cannot be found.
+std::optional<v1::CaptureRequest> CaptureRequestFor(const std::vector<std::string>& probe,
+                                                    const std::vector<std::string>& paths, std::string* error);
+
 // zm run: snapshot the current directory, run one item (or one per --each match), stream its
 // output, write its outputs back, and return the command's exit code (non-zero if any item failed).
 int RunCommand(Client& client, const RunOptions& opts);

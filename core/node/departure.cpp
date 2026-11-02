@@ -1,5 +1,6 @@
 #include "node/departure.hpp"
 
+#include "exec/subprocess.hpp"
 #include "store/store.hpp"
 
 #include <fcntl.h>
@@ -61,17 +62,6 @@ void KillGroup(pid_t pid, int sig) {
     waitpid(pid, nullptr, 0);
 }
 
-bool OnPath(const char* tool) {
-    const char* path = std::getenv("PATH");
-    if (!path) return false;
-    std::stringstream ss(path);
-    std::string dir;
-    while (std::getline(ss, dir, ':')) {
-        if (dir.empty()) continue;
-        if (access((dir + "/" + tool).c_str(), X_OK) == 0) return true;
-    }
-    return false;
-}
 
 } // namespace
 
@@ -261,8 +251,8 @@ std::optional<bool> ParsePrepareForSleep(std::string_view line) {
 
 LogindMonitor::Config LogindMonitor::DefaultConfig() {
     Config c;
-    if (OnPath("busctl")) c.monitor_cmd = "exec busctl --system --json=short monitor org.freedesktop.login1";
-    if (OnPath("systemd-inhibit")) {
+    if (!exec::FindOnPath("busctl").empty()) c.monitor_cmd = "exec busctl --system --json=short monitor org.freedesktop.login1";
+    if (!exec::FindOnPath("systemd-inhibit").empty()) {
         c.inhibit_cmd =
             "exec systemd-inhibit --what=sleep --mode=delay --who=zmd "
             "--why='Freezing donated work before sleep' sleep infinity";
@@ -271,7 +261,7 @@ LogindMonitor::Config LogindMonitor::DefaultConfig() {
 }
 
 bool LogindMonitor::Available() {
-    return OnPath("busctl");
+    return !exec::FindOnPath("busctl").empty();
 }
 
 LogindMonitor::LogindMonitor(Config cfg, Callback cb) : cfg_(std::move(cfg)), cb_(std::move(cb)) {}

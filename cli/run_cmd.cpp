@@ -1,5 +1,7 @@
 #include "cli/run_cmd.hpp"
 
+#include "exec/subprocess.hpp"
+
 #include <google/protobuf/util/json_util.h>
 
 #include <fcntl.h>
@@ -492,6 +494,28 @@ int RunFromFile(Client& client, const RunOptions& opts) {
 
 } // namespace
 
+std::optional<v1::CaptureRequest> CaptureRequestFor(const std::vector<std::string>& probe,
+                                                    const std::vector<std::string>& paths, std::string* error) {
+    std::error_code ec;
+    const std::filesystem::path cwd = std::filesystem::current_path(ec);
+    v1::CaptureRequest req;
+    req.set_cwd(cwd.string());
+    for (const auto& p : paths) req.add_paths(std::filesystem::absolute(p, ec).lexically_normal().string());
+    if (!probe.empty()) {
+        std::string program = probe.front();
+        if (program.find('/') != std::string::npos) program = std::filesystem::absolute(program, ec).string();
+        const std::string found = exec::FindOnPath(program);
+        if (found.empty()) {
+            *error = "'" + probe.front() + "' is not an executable program on PATH";
+            return std::nullopt;
+        }
+        auto* pr = req.add_probes();
+        pr->add_argv(found);
+        for (size_t i = 1; i < probe.size(); ++i) pr->add_argv(probe[i]);
+    }
+    return req;
+}
+
 int RunCommand(Client& client, const RunOptions& opts) {
     if (opts.from) return RunFromFile(client, opts);
     std::error_code ec;
@@ -538,14 +562,15 @@ int RunCommand(Client& client, const RunOptions& opts) {
     stage->set_where(opts.remote_only ? v1::REMOTE_ONLY : opts.local_only ? v1::LOCAL_ONLY : v1::ANYWHERE);
     stage->set_kind(std::filesystem::path(opts.argv.front()).filename().string());
     if (opts.env == "capture") {
-        v1::CaptureRequest req;
-        auto* probe = req.add_probes();
-        probe->add_argv(opts.argv.front());
-        probe->add_argv("--version");
-        for (const auto& p : opts.capture) req.add_paths(p);
+        std::string error;
+        auto req = CaptureRequestFor({opts.argv.front(), "--version"}, opts.capture, &error);
+        if (!req) {
+            std::cerr << "zm: " << error << "\n";
+            return 1;
+        }
         grpc::ClientContext ctx;
         v1::CaptureReply cap;
-        grpc::Status s = client.stub().CaptureEnv(&ctx, req, &cap);
+        grpc::Status s = client.stub().CaptureEnv(&ctx, *req, &cap);
         if (!s.ok()) return ReportRpcError("capturing the environment failed", s);
         if (!cap.note().empty()) std::cerr << "zm: " << cap.note() << "\n";
         *stage->mutable_env()->mutable_tree() = cap.tree();
