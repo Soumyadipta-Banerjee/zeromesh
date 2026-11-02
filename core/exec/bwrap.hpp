@@ -39,6 +39,12 @@ public:
     BwrapBuilder& AddReadWriteBind(const std::string& host, const std::string& sandbox);
     BwrapBuilder& AddSymlink(const std::string& target, const std::string& link);
     BwrapBuilder& AddTmpfs(const std::string& sandbox);
+    // An overlay at `sandbox`: `lower` read-only underneath, writes land in `upper` (`workdir` is
+    // overlayfs scratch on the same filesystem as `upper`).
+    BwrapBuilder& AddOverlay(const std::string& lower, const std::string& upper, const std::string& workdir,
+                             const std::string& sandbox);
+    // A device node or directory of device nodes, usable inside (GPUs).
+    BwrapBuilder& AddDevBind(const std::string& host, const std::string& sandbox);
     // Applies to the next AddDir (bwrap --perms OCTAL).
     BwrapBuilder& AddPerms(unsigned mode);
     BwrapBuilder& AddDir(const std::string& sandbox);

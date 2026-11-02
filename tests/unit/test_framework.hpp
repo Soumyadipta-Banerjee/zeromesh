@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -32,7 +33,10 @@ public:
         std::cout << "       ZeroMesh C++20 Test Suite         \n";
         std::cout << "=========================================\n";
 
+        // ZM_TEST_FILTER=substring runs only the tests whose name contains it.
+        const char* filter = std::getenv("ZM_TEST_FILTER");
         for (const auto& test : tests_) {
+            if (filter != nullptr && *filter != '\0' && test.name.find(filter) == std::string::npos) continue;
             std::cout << "[ RUN      ] " << test.name << std::flush;
             auto start = std::chrono::steady_clock::now();
             try {
@@ -68,7 +72,9 @@ private:
 #define TEST(test_name)                                                                                                \
     void test_name();                                                                                                  \
     struct test_name##_registrar {                                                                                     \
-        test_name##_registrar() { ::zeromesh::testing::TestRegistry::Instance().Add(#test_name, test_name); }          \
+        test_name##_registrar() {                                                                                      \
+            ::zeromesh::testing::TestRegistry::Instance().Add(#test_name, test_name);                                  \
+        }                                                                                                              \
     } test_name##_instance;                                                                                            \
     void test_name()
 

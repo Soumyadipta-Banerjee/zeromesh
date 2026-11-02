@@ -104,6 +104,17 @@ BwrapBuilder& BwrapBuilder::AddTmpfs(const std::string& sandbox) {
     return *this;
 }
 
+BwrapBuilder& BwrapBuilder::AddOverlay(const std::string& lower, const std::string& upper, const std::string& workdir,
+                                       const std::string& sandbox) {
+    mounts_.push_back({"--overlay-src", lower, "--overlay", upper, workdir, sandbox});
+    return *this;
+}
+
+BwrapBuilder& BwrapBuilder::AddDevBind(const std::string& host, const std::string& sandbox) {
+    mounts_.push_back({"--dev-bind", host, sandbox});
+    return *this;
+}
+
 BwrapBuilder& BwrapBuilder::AddPerms(unsigned mode) {
     pending_perms_ = mode;
     return *this;
