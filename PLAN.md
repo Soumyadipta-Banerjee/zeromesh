@@ -3,7 +3,8 @@
 > **For developers and AI agents:** keep this file true. A box is ticked only when the
 > milestone's acceptance test has passed. Never tick work that is stubbed or simulated.
 
-**Design:** [`docs/design/architecture.md`](docs/design/architecture.md)
+**Design:** [`docs/design/architecture.md`](docs/design/architecture.md) (the Task core) and
+[`docs/design/adapter-platform.md`](docs/design/adapter-platform.md) (the layer adapters use; M7 onward).
 
 ---
 
@@ -15,10 +16,12 @@ small core, with features attached through narrow plugin interfaces.
 
 ```
    ┌──────────────────────── apps (out-of-process, any language) ────────────────────────┐
-   │  zm CLI (run, run --each, status, monitor)   zm-render   (future: zm-sweep, zm-sim)  │
+   │  zm CLI (run, run --each, status, monitor)   zm-render · zm-cfd · zm-cc              │
    └───────────────────────────────┬──────────────────────────────────────────────────────┘
                                    │ zeromesh.v1.ClientApi  (gRPC over a unix socket, owner-only)
+                                   │ zeromesh.v1.RunApi     (planned, M7: items, runs, sessions)
    ┌───────────────────────────────▼─────────── zmd (daemon) ────────────────────────────┐
+   │  run/       run engine: items → batches, per-item commit, report   (planned, M7)     │
    │  node/      ClientApi service · NodeApi service · job manager                        │
    │  sched/     task graph · placement · retries · re-dispatch on drain/loss             │
    │  exec/      sandbox runner (bwrap + SCHED_IDLE)       ◄── IEnvProvider plugins       │
@@ -42,6 +45,8 @@ small core, with features attached through narrow plugin interfaces.
 | NodeApi, placement, team security | Real (`core/node`, `core/sched`); wired in `zmd` (Task 17); see M3 below |
 | FUSE filesystem | Real (`plugins/env-mirror`, registered by `zmd`; needs `/dev/fuse`; integration test skipped without it) |
 | REAPI front-end | Plugin `plugins/frontend-reapi` (enable with `ZM_ENABLE_REAPI=1`); `integration_reapi` passes with `recc`. Partial: in-memory action cache, `WaitExecution` stub. |
+| Python SDK + apps | Real (`sdk/python`, `apps/zm-render`, `apps/zm-cfd`, `apps/zm-cc`). Each app re-implements chunking, event handling, output placement and failure parsing on the raw Task API; see `docs/design/adapter-platform.md` §1.1. |
+| Run engine, `RunApi`, adapter SDK | Designed, not built (`docs/design/adapter-platform.md`); M7–M11 below |
 | DHT, DSM, GPU, Byzantine/TPM, torrent GUI | Frozen; see [`frozen/README.md`](frozen/README.md) |
 
 ## 3. Milestones
@@ -63,12 +68,41 @@ Each milestone is done **only** when its acceptance test passes.
 - [x] **M6: REAPI front-end plugin.** *(`integration_reapi` passes with `recc`, asserting a compile action ran on the donor; both daemons run on one host.)*
   *Acceptance:* a CMake project builds through `recc` against `zmd`, with compile actions observed running on a peer. (`integration_reapi` automates this once recc is installed.)
 
+The milestones below come from [`docs/design/adapter-platform.md`](docs/design/adapter-platform.md) §15.
+
+- [ ] **M7: Items and outputs.** Run engine over Job/Task: items, batching by cost, the batch runner with per-item commit, outputs with destinations streamed per item, structured failure kinds, run policy, item-level events, the standard report, `zm doctor`.
+  *Acceptance:* `zm-cfd` ported under 60 lines of adapter code; on three machines, killing a donor mid-batch loses at most one case and the report shows every other case's outputs committed before the loss.
+- [ ] **M8: Adapter SDK.** `Adapter` base, shared CLI, `FakeMesh`, `run.json`. `zm-render` and `zm-cc` ported; `zm-cc` has one mode.
+  *Acceptance:* each adapter's churn, OOM and missing-output behaviour is covered by a test against `FakeMesh` with no daemon; `zm-render` is under 150 lines of adapter code; the M5 240-frame four-machine render passes through the new adapter.
+- [ ] **M9: Environments and requirements.** Capability in discovery, Requirement matching at Offer, `zm env capture`, fetch by digest. `mkroot.py` deleted.
+  *Acceptance:* a donor without Blender renders through a captured environment; a donor with the wrong Blender version is excluded and named in the report.
+- [ ] **M10: Incremental and shared.** Incremental snapshots, footprints, team-wide cache, cache explain/forget, run journal and `--resume`, Sessions.
+  *Acceptance:* a second `zm-cc` run after a one-header edit recompiles only the units that include it, with hits served by another team member's node; a `zm-render` run resumed after its process is killed finishes without re-rendering committed frames.
+- [ ] **M11: Learning and archetypes.** Resource learning from cgroups, GPU resources and mounts, warm dirs, the checkpoint contract, SharedPath, fair-share.
+  *Acceptance:* with no declared resources, the third run of each adapter places tasks without an OOM on a 4 GB donor; two requesters submitting at once each get at least 40% of the pool.
+
 ## 4. Architectural Decision Records
 
 ### ADR-011: Core + plugin architecture (2026-10-26)
 - **Context:** The audit found the central piece (running a task on another machine) missing, while the leaf modules worked. Every domain tool (Flamenco, distcc, CFD sweeps) rebuilds the same plumbing.
 - **Decision:** Build a small general core (Tasks, Objects, static DAGs) with in-process core plugins (`IEnvProvider`, `IFrontend`) and out-of-process apps on a public `ClientApi`. REAPI becomes one optional front-end plugin.
 - **Consequence:** Domain logic stays out of `core/`. Apps can't reach internals. Several people can work in parallel against stable contracts.
+
+### ADR-013: the Item is the adapter's unit; a Run engine sits over Task/Job (2026-11-02)
+- **Context:** The three apps (`zm-render`, `zm-cfd`, `zm-cc`) each re-implement chunking, proto
+  building, event loops, output placement, failure parsing, memory guesses, upload pruning and
+  environment building on the raw Task API: roughly 560 of zm-render's 744 lines and 1 400 of
+  zm-cc's 2 350. Partial commit, hedging, seeding, DAGs and `.zmignore` exist in the core but no app
+  can reach them. The ClientApi's unit (a sandbox run) is not the app's unit (a frame, a TU, a case).
+- **Decision:** Add a Run engine inside `zmd`, on top of Job/Task, with a `RunApi` beside `ClientApi`.
+  Adapters describe Workspace, Environment and Items; the engine owns batching, per-item commit and
+  retry, output placement, structured failures, the report, requirement matching, footprint-keyed
+  team-wide caching and resource learning. The SDK becomes an adapter framework (`Adapter` base,
+  `FakeMesh`, shared CLI, one report schema). Task/Job stay as the low-level contract for `zm run`,
+  REAPI and the engine itself. Design: `docs/design/adapter-platform.md`.
+- **Consequence:** Adapters shrink to their domain code and become testable without a mesh. The core
+  grows a layer but no domain knowledge (`kind` is an opaque label). Inputs stop sharing writable
+  inodes with the store. `zm-cc` loses its two-mode split and `mkroot.py`.
 
 ### ADR-012: bwrap mount layout instead of stacked Landlock (2026-10-26)
 - **Context:** The old design stacked Landlock with bubblewrap. The Linux kernel docs (v7.3.0) state: *"Threads sandboxed with filesystem restrictions cannot modify filesystem topology, whether via mount(2) or pivot_root(2)."* bwrap needs mount(2).

@@ -1,12 +1,17 @@
-# Handoff (updated 2026-10-29)
+# Handoff (updated 2026-11-02)
 
 For the next person or agent continuing this work. Read this first, then the
-[design](design/architecture.md), [PLAN.md](../PLAN.md) and the
-[v2 blueprint](../ZeroMesh%20v2%20Blueprint.md).
+[design](design/architecture.md), [PLAN.md](../PLAN.md), the
+[v2 blueprint](../ZeroMesh%20v2%20Blueprint.md) and the
+[adapter platform design](design/adapter-platform.md).
 
 ## Where things are
 
-- **Branch:** `demo/m5-all` holds the v1 code through M6. `main` is the old architecture.
+- **Branch:** `zm_perf_cc` holds everything: v1 through M6, the v2 mechanisms (byte counters, seeding,
+  comfort governor, hazard model, hedging, freeze-first drain, partial commit) and the `zm-cc` app.
+  It is 98 commits ahead of `main` and 71 behind; `main` is still the old architecture.
+- **Direction:** the adapter platform (`docs/design/adapter-platform.md`, PLAN.md M7–M11). Nothing of
+  it is built yet. Start with M7 and port `zm-cfd` first; it is the smallest proof.
 - **Build and test:**
 
   ```bash

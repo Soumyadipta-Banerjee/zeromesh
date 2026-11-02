@@ -3,6 +3,12 @@
 - **Date:** 2026-10-26
 - **Status:** Draft for team review
 - **Supersedes:** the "REAPI compile mesh" architecture in `PLAN.md` §1–§2 and its Phase 1–10 checklist
+- **Extended by:** [`adapter-platform.md`](adapter-platform.md) (2026-11-02). This document describes the
+  Task core: Objects, Tasks, Jobs, the sandbox, placement, security and the plugin ABI. All of it stays.
+  The adapter platform adds the layer adapter developers use (Workspace, Environment, Item, Run,
+  Session, Batch, Footprint) on top of Task/Job, redefines the SDK as an adapter framework, and turns
+  the "apps only write split/run/merge" intent of §1 into the actual API. Where the two documents
+  differ on what an app sees, `adapter-platform.md` wins; where they differ on the core, this one does.
 
 ---
 
@@ -329,3 +335,7 @@ Integration tests for M2–M4 run **multiple `zmd` instances on one machine** (s
 ## 14. Open questions
 
 None blocking v1. Revisit before v2: team-wide ActionCache, dynamic tasks, Services/Channels, relay across subnets, macOS donors, `env-oci`.
+
+Of these, the team-wide cache (as a footprint-keyed cache) and dynamic tasks (as Sessions) are now
+designed in [`adapter-platform.md`](adapter-platform.md) §3 and §10. `env-oci` is listed there as an
+environment source (§3, "image"). Services/Channels, relays and macOS donors stay open.

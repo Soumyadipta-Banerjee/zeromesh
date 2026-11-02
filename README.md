@@ -12,7 +12,10 @@ ZeroMesh uses a **core + plugin architecture**. See the
 [design](docs/design/architecture.md) and
 [PLAN.md](PLAN.md) for milestones and what is ticked. Continuing the work? Start with [docs/HANDOFF.md](docs/HANDOFF.md).
 The v2 plan (data moved once, owner comfort, churn-proof completion) is in
-[ZeroMesh v2 Blueprint.md](ZeroMesh%20v2%20Blueprint.md).
+[ZeroMesh v2 Blueprint.md](ZeroMesh%20v2%20Blueprint.md). The next step is the
+[adapter platform](docs/design/adapter-platform.md): adapters describe items (a frame, a translation
+unit, a case) and the daemon owns batching, environments, retries, caching, progress and reports.
+It is designed, not built; PLAN.md M7–M11 track it.
 
 **What works today:**
 - A local content-addressed store (SHA-256) and directory tree hashing.
@@ -27,7 +30,8 @@ The v2 plan (data moved once, owner comfort, churn-proof completion) is in
   task on another donor when one is lost. Covered by automated tests on one host.
 - The `env-mirror` plugin (FUSE lazy fetch of the requester's binaries; needs `/dev/fuse`) and the
   `frontend-reapi` plugin (CMake builds through `recc`; enable with `ZM_ENABLE_REAPI=1`).
-- A Python SDK (`sdk/python`) and two apps built on it: `zm-render` (Blender) and `zm-cfd` (OpenFOAM sweeps).
+- A Python SDK (`sdk/python`) and three apps built on it: `zm-render` (Blender), `zm-cfd` (OpenFOAM
+  sweeps) and `zm-cc` (C/C++/Fortran compilation from a compilation database).
 - The action-cache key includes a digest of the host toolchain, and a donor whose toolchain differs
   refuses the task, so a different compiler can't return a wrong cache hit.
 
@@ -39,6 +43,8 @@ The v2 plan (data moved once, owner comfort, churn-proof completion) is in
 - A departing donor (low battery, owner back, lid closed, suspend) freezes its tasks with `cgroup.freeze` for
   `freeze_ttl_s` instead of killing them, and tasks can save finished units with `commit_unit` so a retry runs
   only the rest. Both are covered by unit tests on one host only; no two-machine or measured result yet.
+- The apps still build on the raw Task API, so each one carries its own chunking, event handling,
+  output placement and failure parsing. The adapter platform that removes this is designed, not built.
 
 Earlier DHT, distributed-shared-memory, GPU and torrent code is parked in [`frozen/`](frozen/README.md). None of it is built.
 
