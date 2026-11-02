@@ -55,3 +55,13 @@ TEST(IgnoreQuestionMark) {
     ASSERT_TRUE(r.Ignored("f1.txt", false));
     ASSERT_FALSE(r.Ignored("f12.txt", false));
 }
+
+TEST(IgnoreExtraPatternsComeBeforeTheRootsFile) {
+    TempDir dir;
+    WriteFile(dir / ".zmignore", "!keep.o\n");
+    auto r = IgnoreRules::ForRoot(dir.path(), {"*.o", "build/"});
+    ASSERT_TRUE(r.Ignored("src/a.o", false));
+    ASSERT_TRUE(r.Ignored("build", true));
+    ASSERT_FALSE(r.Ignored("src/a.c", false));
+    ASSERT_FALSE(r.Ignored("keep.o", false)); // the user's file re-includes it
+}

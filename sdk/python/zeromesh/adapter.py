@@ -247,9 +247,11 @@ class Item:
 
 @dataclass(frozen=True)
 class Workspace:
-    """The directory items see as /work. Files matching .zmignore and the secrets deny list stay out."""
+    """The directory items see as /work. Files matching `exclude` (.zmignore-style patterns, e.g.
+    build products), the directory's .zmignore and the secrets deny list stay out."""
     dir: str
     force_large: bool = False
+    exclude: Sequence[str] = ()
 
 
 # ---- the result an adapter's finish() gets -----------------------------------------------------
@@ -316,8 +318,15 @@ class Adapter:
         """Stages besides the default one ("", built from the class attributes)."""
         return []
 
-    def finish(self, a: argparse.Namespace, run: Run) -> None:
-        """Runs here after the run ended, with every result in hand (also when items failed)."""
+    def finish(self, a: argparse.Namespace, run: Run) -> Optional[int]:
+        """Runs here after the run ended, with every result in hand (also when items failed, and
+        with an empty run when items() yielded none). A non-zero return becomes the exit status
+        when the run itself succeeded (a local merge or link step failed)."""
+        return None
+
+    def plan(self, a: argparse.Namespace) -> str:
+        """What --dry-run prints; "" lists the stages and items."""
+        return ""
 
     # Building the run (also used by --dry-run).
     def default_stage(self, a: argparse.Namespace) -> Stage:
@@ -363,16 +372,13 @@ def follow(client: Client, run_id: str, prog: str) -> Optional[run_pb2.RunStatus
     return status
 
 
-def _build(adapter: Adapter, a: argparse.Namespace, client: Optional[Client], ws_dir: str):
+def _build(adapter: Adapter, a: argparse.Namespace, client: Optional[Client], ws_dir: str, items: List[Item]):
     """(stages, items, policy) as protos; environments are resolved only with a client."""
     stages = [adapter.default_stage(a)] + list(adapter.stages(a))
     stages = [cli.apply_to_stage(a, s) for s in stages]
     names = [s.name for s in stages]
     if len(set(names)) != len(names):
         raise AdapterError("two stages share a name")
-    items = list(adapter.items(a))
-    if not items:
-        raise AdapterError("nothing to do: no items")
     ids = set()
     for it in items:
         if it.id in ids:
@@ -388,6 +394,10 @@ def _build(adapter: Adapter, a: argparse.Namespace, client: Optional[Client], ws
 
 
 def _dry_run(adapter: Adapter, a: argparse.Namespace, stages, items) -> None:
+    text = adapter.plan(a)
+    if text:
+        print(text)
+        return
     for s in stages:
         print(f"stage {s.name or '(default)'}: kind={s.kind} cores={s.resources.cores or 1}"
               f"{' combine=' + ' '.join(s.combine.argv) if s.combine.argv else ''}")
@@ -405,14 +415,19 @@ def run_adapter(adapter: Adapter, argv: Optional[Sequence[str]] = None) -> int:
     client = None
     try:
         adapter.check(a)
+        items = list(adapter.items(a))
+        out_dir = os.path.abspath(a.out)
         if a.dry_run and not a.show_upload:
             ws = adapter.workspace(a)
             ws_dir = ws.dir if isinstance(ws, Workspace) else ws
-            stages, items, _ = _build(adapter, a, None, os.path.abspath(ws_dir))
-            _dry_run(adapter, a, stages, items)
+            stages, item_protos, _ = _build(adapter, a, None, os.path.abspath(ws_dir), items)
+            _dry_run(adapter, a, stages, item_protos)
             return 0
+        if not items and not a.resume:
+            os.makedirs(out_dir, exist_ok=True)
+            print(f"{prog}: nothing to run on the mesh", file=sys.stderr)
+            return adapter.finish(a, Run("", run_pb2.RunStatus(), run_pb2.Report(), out_dir)) or 0
         client = connect(a.socket)
-        out_dir = os.path.abspath(a.out)
         os.makedirs(out_dir, exist_ok=True)
         if a.resume:
             run_id = client.resume(a.resume)
@@ -422,7 +437,8 @@ def run_adapter(adapter: Adapter, argv: Optional[Sequence[str]] = None) -> int:
             if not isinstance(ws, Workspace):
                 ws = Workspace(ws)
             ws_dir = os.path.abspath(ws.dir)
-            snap = client.snapshot(ws_dir, force_large=ws.force_large or a.force_large, list_largest=a.show_upload)
+            snap = client.snapshot(ws_dir, force_large=ws.force_large or a.force_large, list_largest=a.show_upload,
+                                   exclude=ws.exclude)
             for d in snap.denied:
                 print(f"{prog}: kept out (secret): {d}", file=sys.stderr)
             if snap.warning:
@@ -431,15 +447,15 @@ def run_adapter(adapter: Adapter, argv: Optional[Sequence[str]] = None) -> int:
                 print(f"{ws_dir}: {snap.files} files, {snap.total_bytes} bytes")
                 for f in snap.largest:
                     print(f"  {f.bytes:>14}  {f.path}")
-            stages, items, policy = _build(adapter, a, client, ws_dir)
+            stages, item_protos, policy = _build(adapter, a, client, ws_dir, items)
             if a.dry_run:
-                _dry_run(adapter, a, stages, items)
+                _dry_run(adapter, a, stages, item_protos)
                 return 0
-            spec = run_pb2.RunSpec(name=prog, workspace=snap.root, workspace_path=ws_dir, stages=stages, items=items,
-                                   policy=policy, report_path=os.path.join(out_dir, "report.json"),
-                                   stream_logs=a.verbose)
+            spec = run_pb2.RunSpec(name=prog, workspace=snap.root, workspace_path=ws_dir, stages=stages,
+                                   items=item_protos, policy=policy,
+                                   report_path=os.path.join(out_dir, "report.json"), stream_logs=a.verbose)
             run_id = client.submit(spec)
-            print(f"{prog}: run {run_id}: {len(items)} item(s)", file=sys.stderr)
+            print(f"{prog}: run {run_id}: {len(item_protos)} item(s)", file=sys.stderr)
         try:
             status = follow(client, run_id, prog)
         except KeyboardInterrupt:
@@ -448,8 +464,9 @@ def run_adapter(adapter: Adapter, argv: Optional[Sequence[str]] = None) -> int:
             print(f"{prog}: lost the run (zm attach {run_id})", file=sys.stderr)
             return 1
         print(f"{prog}: {report.summary(status)}", file=sys.stderr)
-        adapter.finish(a, Run(run_id, status, client.get_report(run_id), out_dir))
-        return 0 if status.failed == 0 and status.cancelled == 0 else 1
+        rc = 0 if status.failed == 0 and status.cancelled == 0 else 1
+        local = adapter.finish(a, Run(run_id, status, client.get_report(run_id), out_dir))
+        return rc or local or 0
     except AdapterError as e:
         print(f"{prog}: {e}", file=sys.stderr)
         return 2

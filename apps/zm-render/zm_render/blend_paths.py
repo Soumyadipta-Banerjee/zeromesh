@@ -13,8 +13,8 @@ _ABS_PATH_RE = re.compile(rb"(/(?:home|usr|opt|var|tmp|mnt|media)/[^\x00\r\n]{2,
 def find_external_absolute_paths(blend_path: str | os.PathLike) -> list[str]:
     """Return absolute path strings found in the .blend that fall outside its parent dir.
 
-    This is a best-effort binary scan (no Blender required). Mirror mode can still
-    resolve host paths; host mode donors will not have them.
+    This is a best-effort binary scan (no Blender required). Donors only see the scene
+    directory, plus what --env capture traced while rendering a probe frame.
     """
     path = Path(blend_path).resolve()
     root = path.parent
@@ -64,7 +64,7 @@ def warn_external_paths(blend_path: str | os.PathLike, file=None) -> list[str]:
     out = file
     print(
         "warning: .blend references absolute paths outside the scene directory;\n"
-        "  donors will not see them unless --env mirror is used.\n"
+        "  donors will not see them (--env capture takes the ones a test frame reads).\n"
         "  Prefer File → External Data → Make Paths Relative, or pack resources.",
         file=out,
     )

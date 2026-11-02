@@ -335,6 +335,29 @@ test('app_zm_render', python3,
   is_parallel: false,
 )
 
+test('app_zm_cc', python3,
+  args: ['-m', 'pytest', '-v', '-m', 'not capture', meson.project_source_root() / 'apps/zm-cc/tests'],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.project_source_root() / 'apps/zm-cc' + ':' + meson.project_source_root() / 'sdk/python' + ':' + meson.project_source_root() / 'tests/integration',
+  },
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 180,
+  is_parallel: false,
+)
+
+# The first capture of a compiler hashes its whole header search list (/usr/include): minutes.
+test('app_zm_cc_capture', python3,
+  args: ['-m', 'pytest', '-v', '-m', 'capture', meson.project_source_root() / 'apps/zm-cc/tests'],
+  env: {
+    'ZM_BUILD_DIR': meson.current_build_dir(),
+    'PYTHONPATH': meson.project_source_root() / 'apps/zm-cc' + ':' + meson.project_source_root() / 'sdk/python' + ':' + meson.project_source_root() / 'tests/integration',
+  },
+  depends: [zmd_bin, zm_bin] + zm_proto_py,
+  timeout: 900,
+  is_parallel: false,
+)
+
 test('app_zm_cfd', python3,
   args: [files('apps/zm-cfd/tests/test_cases.py')],
   env: {

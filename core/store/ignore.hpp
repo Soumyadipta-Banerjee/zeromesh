@@ -13,7 +13,9 @@ namespace zeromesh::store {
 // A path inside an ignored directory is ignored.
 class IgnoreRules {
 public:
-    static IgnoreRules ForRoot(const std::filesystem::path& root);
+    // `extra` lines (an adapter's excludes) come before <root>/.zmignore, so the user's file can
+    // still re-include ("!pattern") what they exclude.
+    static IgnoreRules ForRoot(const std::filesystem::path& root, const std::vector<std::string>& extra = {});
     static IgnoreRules None();
     static IgnoreRules FromLines(const std::vector<std::string>& lines);
 

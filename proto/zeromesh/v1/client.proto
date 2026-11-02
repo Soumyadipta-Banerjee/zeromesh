@@ -11,6 +11,7 @@ message SnapshotRequest {
   string path = 1;          // absolute directory on this machine
   bool force_large = 2;     // allow more than the upload limit
   bool list = 3;            // fill `largest`
+  repeated string exclude = 4;  // .zmignore-style patterns to leave out too (before the root's .zmignore)
 }
 message FileSize {
   string path = 1;

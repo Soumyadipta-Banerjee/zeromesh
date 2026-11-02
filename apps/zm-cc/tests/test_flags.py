@@ -75,16 +75,9 @@ def test_codegen_kept_preproc_split_and_shapes():
     assert src.text == "src/a.cpp" and src.lang is not None and src.lang.family == "c++"
     assert cmd.blockers == () and cmd.produces_object and cmd.output == "a.o"
 
-    pre = cmd.preprocess_argv(src, "g++", "/stage/a.ii")
-    assert pre == [
-        "g++", "-O2", "-std=c++20", "-Iinclude", "-I", "sys", "-DFOO=1", "-D", "BAR",
-        "src/a.cpp", "-E", "-o", "/stage/a.ii",
-    ]
-
-    remote = cmd.remote_argv(src, "/usr/bin/g++", "a.abc.ii", "a.abc.o")
-    assert remote == [
-        "/usr/bin/g++", "-O2", "-std=c++20", "-x", "c++-cpp-output",
-        "-c", "a.abc.ii", "-o", "out/a.abc.o",
+    assert cmd.compile_argv(src, "/usr/bin/g++", "a.abc.o", depfile="a.abc.d") == [
+        "/usr/bin/g++", "-O2", "-std=c++20", "-Iinclude", "-I", "sys", "-DFOO=1", "-D", "BAR",
+        "-MD", "-MF", "a.abc.d", "-c", "src/a.cpp", "-o", "a.abc.o",
     ]
 
 
@@ -111,36 +104,28 @@ def test_command_blockers(argv, blocker):
 
 
 @pytest.mark.parametrize(
-    "argv, family, ext, remote_x",
+    "argv, family",
     [
-        (["cc", "-c", "a.c"], "c", ".i", "cpp-output"),
-        (["c++", "-c", "a.cc"], "c++", ".ii", "c++-cpp-output"),
-        (["c++", "-c", "a.cpp"], "c++", ".ii", "c++-cpp-output"),
-        (["c++", "-c", "a.cxx"], "c++", ".ii", "c++-cpp-output"),
-        (["c++", "-c", "a.C"], "c++", ".ii", "c++-cpp-output"),
-        (["gfortran", "-c", "k.f90"], "fortran", ".f90", None),
-        (["gfortran", "-c", "k.F90"], "fortran", ".f90", None),
-        (["gfortran", "-c", "k.f"], "fortran", ".f", None),
-        (["gfortran", "-c", "k.FOR"], "fortran", ".f", None),
-        (["cc", "-c", "a.i"], "c", ".i", "cpp-output"),
-        (["c++", "-c", "a.ii"], "c++", ".ii", "c++-cpp-output"),
-        (["cc", "-x", "c++", "-c", "a.c"], "c++", ".ii", "c++-cpp-output"),
-        (["cc", "-x", "none", "-c", "a.cc"], "c++", ".ii", "c++-cpp-output"),
-        (["cc", "-xc++", "-c", "a.c"], "c++", ".ii", "c++-cpp-output"),
+        (["cc", "-c", "a.c"], "c"),
+        (["c++", "-c", "a.cc"], "c++"),
+        (["c++", "-c", "a.cpp"], "c++"),
+        (["c++", "-c", "a.cxx"], "c++"),
+        (["c++", "-c", "a.C"], "c++"),
+        (["gfortran", "-c", "k.f90"], "fortran"),
+        (["gfortran", "-c", "k.F90"], "fortran"),
+        (["gfortran", "-c", "k.f"], "fortran"),
+        (["gfortran", "-c", "k.FOR"], "fortran"),
+        (["cc", "-c", "a.i"], "c"),
+        (["c++", "-c", "a.ii"], "c++"),
+        (["cc", "-x", "c++", "-c", "a.c"], "c++"),
+        (["cc", "-x", "none", "-c", "a.cc"], "c++"),
+        (["cc", "-xc++", "-c", "a.c"], "c++"),
     ],
 )
-def test_language_from_extension_or_x(argv, family, ext, remote_x):
-    cmd = parse(argv)
-    src = cmd.sources[0]
+def test_language_from_extension_or_x(argv, family):
+    src = parse(argv).sources[0]
     assert src.reason == "", src.reason
     assert src.lang.family == family
-    assert src.lang.ext == ext
-    assert src.lang.remote_x == remote_x
-
-
-def test_already_preprocessed_input_is_flagged():
-    assert parse(["cc", "-c", "a.i"]).sources[0].lang.preprocessed
-    assert not parse(["cc", "-c", "a.c"]).sources[0].lang.preprocessed
 
 
 @pytest.mark.parametrize(
@@ -157,16 +142,14 @@ def test_unsplittable_sources_carry_a_reason(argv, reason):
     assert reason in src.reason
 
 
-def test_fortran_remote_compile_has_no_x_flag():
+def test_fortran_compile_has_no_x_flag():
     cmd = parse(["gfortran", "-O2", "-c", "k.F90", "-o", "k.o"])
-    src = cmd.sources[0]
-    assert cmd.remote_argv(src, "/usr/bin/gfortran", "k.abc.f90", "k.abc.o") == [
-        "/usr/bin/gfortran", "-O2", "-c", "k.abc.f90", "-o", "out/k.abc.o",
+    assert cmd.compile_argv(cmd.sources[0], "/usr/bin/gfortran", "k.abc.o") == [
+        "/usr/bin/gfortran", "-O2", "-c", "k.F90", "-o", "k.abc.o",
     ]
-    assert "-cpp" in cmd.preprocess_argv(src, "gfortran", "/s/k.f90")
 
 
-def test_tree_remote_argv_keeps_preproc_and_rewrites_project_includes(tmp_path):
+def test_compile_argv_keeps_preproc_and_rewrites_project_includes(tmp_path):
     root = tmp_path / "proj"
     src_dir = root / "src"
     inc = root / "include"
@@ -175,18 +158,16 @@ def test_tree_remote_argv_keeps_preproc_and_rewrites_project_includes(tmp_path):
     (src_dir / "a.c").write_text("int x;\n", encoding="utf-8")
     cmd = parse(["cc", "-O2", "-I../include", "-I/usr/include", "-DFOO=1", "-c", "a.c", "-o", "a.o"])
     src = cmd.sources[0]
-    argv = cmd.tree_remote_argv(
-        src, "/usr/bin/cc", "a.hash.o", root=str(root), cwd=str(src_dir)
-    )
+    argv = cmd.compile_argv(src, "/usr/bin/cc", "a.hash.o", root=str(root), cwd=str(src_dir))
     assert argv[0] == "/usr/bin/cc"
     assert "-O2" in argv and "-DFOO=1" in argv
     assert "-I../include" in argv  # still relative to cwd under root
     assert "-I/usr/include" in argv  # system path untouched
-    assert argv[-4:] == ["-c", "a.c", "-o", "out/a.hash.o"]
+    assert argv[-4:] == ["-c", "a.c", "-o", "a.hash.o"]
     assert "-MD" not in argv and "a.o" not in argv  # driver / original -o dropped
 
 
-def test_tree_remote_argv_rewrites_absolute_paths_under_root(tmp_path):
+def test_compile_argv_rewrites_absolute_paths_under_root(tmp_path):
     root = tmp_path / "proj"
     (root / "inc").mkdir(parents=True)
     (root / "a.c").write_text("int x;\n", encoding="utf-8")
@@ -194,7 +175,7 @@ def test_tree_remote_argv_rewrites_absolute_paths_under_root(tmp_path):
     abs_src = str((root / "a.c").resolve())
     cmd = parse(["cc", f"-I{abs_inc}", "-c", abs_src, "-o", "a.o"])
     src = cmd.sources[0]
-    argv = cmd.tree_remote_argv(src, "/usr/bin/cc", "a.hash.o", root=str(root.resolve()), cwd=str(root.resolve()))
+    argv = cmd.compile_argv(src, "/usr/bin/cc", "a.hash.o", root=str(root.resolve()), cwd=str(root.resolve()))
     assert f"-Iinc" in argv or "-I./inc" in argv
     assert argv[-3] == "a.c"
 

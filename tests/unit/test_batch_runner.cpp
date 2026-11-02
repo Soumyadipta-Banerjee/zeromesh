@@ -265,6 +265,38 @@ TEST(BatchCombinedCommitsEachItemWhenItsOutputIsClosed) {
     ASSERT_TRUE(at["frame_1"] < total - 1.0);
 }
 
+TEST(BatchCombinedCrashLosesOnlyTheItemsInFlight) {
+    Fixture f;
+    if (!f.Usable()) return;
+    auto spec = f.Spec();
+    for (int i = 1; i <= 4; ++i) {
+        ItemSpec it;
+        it.id = "frame_" + std::to_string(i);
+        it.seq = i;
+        it.outputs = {"out/f" + std::to_string(i) + ".txt"};
+        spec.items.push_back(it);
+    }
+    // Writes frames 1 and 2, then dies at once: no chance to commit while it runs.
+    spec.combine_argv = {"sh", "-c", "for i in $(seq {first} {last}); do [ $i -ge 3 ] && exit 9; echo frame$i > out/f$i.txt; done"};
+    BatchCallbacks cb;
+    cb.on_item = [&](ItemRunResult r) {
+        std::lock_guard lock(f.mu);
+        f.results[r.id] = std::move(r);
+    };
+    auto res = f.runner.Run(spec, cb, {});
+    ASSERT_EQ(res.error, std::string());
+    ASSERT_EQ(f.results.size(), 4u);
+    for (int i = 1; i <= 2; ++i) {
+        const std::string id = "frame_" + std::to_string(i);
+        ASSERT_TRUE(f.results[id].failure == ItemFailure::None);
+        ASSERT_EQ(f.Output(id, "out/f" + std::to_string(i) + ".txt"), "frame" + std::to_string(i) + "\n");
+    }
+    for (const char* id : {"frame_3", "frame_4"}) {
+        ASSERT_TRUE(f.results[id].failure == ItemFailure::Exit);
+        ASSERT_EQ(f.results[id].exit_code, 9);
+    }
+}
+
 TEST(BatchCancelSendsSigtermAndKeepsTheCheckpoint) {
     Fixture f;
     if (!f.Usable()) return;

@@ -73,9 +73,12 @@ class Client:
 
     # ---- workspace and environments ----------------------------------------------------------
 
-    def snapshot(self, path: str, force_large: bool = False, list_largest: bool = False) -> client_pb2.SnapshotReply:
-        """Snapshots a directory into the store (only changed files are read again)."""
-        req = client_pb2.SnapshotRequest(path=os.path.abspath(path), force_large=force_large, list=list_largest)
+    def snapshot(self, path: str, force_large: bool = False, list_largest: bool = False,
+                 exclude: Sequence[str] = ()) -> client_pb2.SnapshotReply:
+        """Snapshots a directory into the store (only changed files are read again). `exclude` holds
+        .zmignore-style patterns; the directory's own .zmignore can still re-include ("!...")."""
+        req = client_pb2.SnapshotRequest(path=os.path.abspath(path), force_large=force_large, list=list_largest,
+                                         exclude=list(exclude))
         return self._call(self.stub.Snapshot, req, timeout=None)
 
     def capture_env(self, probes: Sequence[Sequence[str]] = (), paths: Sequence[str] = (),

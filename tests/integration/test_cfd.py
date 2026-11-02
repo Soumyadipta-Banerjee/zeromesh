@@ -14,8 +14,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import zmtest  # noqa: E402
-import zeromesh  # noqa: E402
-from zm_cfd.runner import CfdOptions, run_cfd  # noqa: E402
+from zeromesh import report  # noqa: E402
+from zeromesh.adapter import run_adapter  # noqa: E402
+from zm_cfd.cli import Cfd  # noqa: E402
 
 
 def free_port() -> int:
@@ -105,20 +106,13 @@ class CfdMeshTest(unittest.TestCase):
                 (system / "controlDict").write_text("application fakeFoam;\n")
 
             output = Path(temp) / "results"
-            client = zeromesh.connect(socket_path=self.a.socket)
-            with client:
-                result = run_cfd(
-                    client,
-                    CfdOptions(
-                        cases=root,
-                        solver="../fakeFoam",
-                        out_dir=output,
-                        may_run_local=False,
-                    ),
-                )
+            rc = run_adapter(Cfd(), ["--socket", self.a.socket, "--remote-only", "--solver", "../fakeFoam",
+                                     "-o", str(output), str(root)])
+            self.assertEqual(rc, 0, self.a.log() + self.b.log())
 
-            self.assertEqual(result.failed, [])
-            self.assertEqual({item.executed_by for item in result.cases}, {self.id_b})
+            rep = report.load(str(output / "report.json"))
+            self.assertEqual(sorted(r.id for r in rep.items), ["highRe", "lowRe"])
+            self.assertEqual({r.attempts[-1].node for r in rep.items}, {self.id_b})
             for case_name in ("lowRe", "highRe"):
                 summary = output / case_name / "postProcessing" / "summary.txt"
                 self.assertEqual(summary.read_text().strip(), "node=" + self.id_b)

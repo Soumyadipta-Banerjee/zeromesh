@@ -1,334 +1,143 @@
-"""zm-cc command-line entry point.
+"""zm-cc: compile across a ZeroMesh team, one item per translation unit.
 
 Three input forms, exactly one per invocation:
 
   zm-cc --compdb build/compile_commands.json
   zm-cc --cc g++ --flags "-O2 -std=c++20 -Iinclude" src/a.cpp src/b.cpp
-  zm-cc -j8 -- gcc -O2 -c foo.c -o foo.o
+  zm-cc -- gcc -O2 -c foo.c -o foo.o
 
-Everything after the first ``--`` is a command. Everything before it is zm-cc's own options.
+Everything after the first ``--`` is the command; everything before it is zm-cc's options.
 """
 
 from __future__ import annotations
 
-import argparse
-import os
-import signal
+import shlex
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional, Sequence
 
-from zm_cc.compile import BuildOptions, link_objects, retry_failed_local, run_build
-from zm_cc.plan import (
-    Plan,
-    PlanError,
-    build_plan,
-    describe,
-    entries_from_command,
-    entries_from_files,
-    infer_workspace_root,
-    load_compdb,
-    make_tasks,
-)
-from zm_cc.report import UnitRecord, who_did_what, write_report
+from zeromesh.adapter import Adapter, AdapterError, Depfile, Item, Out, Res, Workspace, run_adapter
+
+from zm_cc import local, toolchain
+from zm_cc.plan import (PlanError, build_plan, describe, entries_from_command, entries_from_files,
+                        infer_workspace_root, load_compdb)
+
+# Build products never travel: the compiles do not read them, and a build directory inside the
+# workspace would otherwise ship every object of the last build.
+BUILD_PRODUCTS = ["*.o", "*.obj", "*.a", "*.so", "*.so.*", "*.d", "*.gch", "*.pch", "*.gcda", "*.gcno",
+                  "__pycache__/", "zm-out/", "zm-objs/"]
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="zm-cc",
-        description="Distribute compilation across a ZeroMesh team (distcc or tree mode).",
-    )
-    p.add_argument("sources", nargs="*", help="source files, compiled with --cc and --flags (form 2)")
-    p.add_argument("--compdb", type=Path, metavar="FILE", help="compile_commands.json (form 1)")
-    p.add_argument("--cc", default="cc", help="compiler for explicit SOURCES (default: cc)")
-    p.add_argument("--flags", default="", help='flags for explicit SOURCES, one string, e.g. "-O2 -Iinclude"')
-    p.add_argument(
-        "-o",
-        "--out",
-        type=Path,
-        default=None,
-        help="object directory (default: zm-objs/). With `-- CMD -o X` and no --out, the object goes to X.",
-    )
-    p.add_argument(
-        "--chunk",
-        type=int,
-        default=0,
-        help="translation units per task (default: tree sizes chunks to ~4 mesh tasks so "
-        "dual-core donors stay full; distcc default 1). Larger tree chunks amortize sandbox/CAS.",
-    )
-    p.add_argument(
-        "--cores",
-        type=int,
-        default=1,
-        help="cores reserved per task (default: 1). Compilers are mostly single-threaded; "
-        "use 1 so a 2-core donor runs two compiles at once.",
-    )
-    p.add_argument(
-        "-j",
-        "--jobs",
-        type=int,
-        default=0,
-        help="local preprocessing and passthrough concurrency (default: CPU count)",
-    )
-    p.add_argument(
-        "--mode",
-        choices=("tree", "distcc"),
-        default="tree",
-        help="tree: upload source tree once, full remote -c, no local -E (default); "
-        "distcc: preprocess locally and ship .i (compat path)",
-    )
-    p.add_argument(
-        "--root",
-        type=Path,
-        default=None,
-        metavar="DIR",
-        help="workspace root to upload for --mode tree (default: common ancestor of remote units)",
-    )
-    p.add_argument("--env", choices=("host", "mirror"), default="host", help="env provider (default: host)")
-    p.add_argument(
-        "--mirror",
-        type=Path,
-        action="append",
-        default=None,
-        dest="mirror_paths",
-        metavar="PATH",
-        help="root directory to mirror for --env mirror (repeatable; see `zm-cc mkroot`)",
-    )
-    p.add_argument("--ld-library-path", default="", metavar="PATHS", help="LD_LIBRARY_PATH for donor tasks")
-    p.add_argument("--remote-only", action="store_true", help="never run remote-eligible units here")
-    p.add_argument(
-        "--keep-going",
-        action="store_true",
-        help="do not cancel on the first failure; collect what compiled and exit 0 even if some units failed",
-    )
-    p.add_argument(
-        "--submit-timeout",
-        type=float,
-        default=1800.0,
-        help="seconds allowed for the upload and submit calls (default: 1800)",
-    )
-    p.add_argument("--link-output", type=Path, default=None, metavar="PATH", help="link the objects into PATH locally")
-    p.add_argument("--link-flags", default="", metavar="FLAGS", help="extra flags for the local link")
-    p.add_argument(
-        "--link-ninja",
-        type=Path,
-        default=None,
-        metavar="BUILD_DIR",
-        help="with --compdb: link the meson/ninja targets in BUILD_DIR from these objects (no recompile)",
-    )
-    p.add_argument(
-        "--link-targets", nargs="+", default=[], metavar="TARGET", help="ninja targets for --link-ninja"
-    )
-    p.add_argument(
-        "--no-retry-local",
-        action="store_true",
-        help="do not recompile units whose remote task failed on this machine",
-    )
-    p.add_argument("--socket", default=None, help="override the zmd unix socket path")
-    p.add_argument("--dry-run", action="store_true", help="print the plan and exit; needs no daemon")
-    p.add_argument("-v", "--verbose", action="store_true", help="print each local command")
-    return p
+class Cc(Adapter):
+    name = "zm-cc"
+    kind = "cc"
+    res = Res(cores=1)  # a compiler is one thread; raise --cores for -flto=auto
 
+    def __init__(self, command: Optional[list[str]] = None, out_given: bool = False):
+        self.command = command        # what followed "--"
+        self.out_given = out_given    # -o/--out was on the command line
 
-def _usage(msg: str) -> int:
-    print(f"zm-cc: {msg}", file=sys.stderr)
-    return 2
+    def add_args(self, p):
+        p.add_argument("sources", nargs="*", help="source files, compiled with --cc and --flags")
+        p.add_argument("--compdb", type=Path, metavar="FILE", help="compile_commands.json")
+        p.add_argument("--cc", default="cc", help="compiler for SOURCES (default: cc)")
+        p.add_argument("--flags", default="", help='flags for SOURCES, one string, e.g. "-O2 -Iinclude"')
+        p.add_argument("--root", type=Path, metavar="DIR", help="workspace to upload (default: the common "
+                                                                "directory of every unit and source)")
+        p.add_argument("--link-output", type=Path, metavar="PATH", help="link the objects into PATH here")
+        p.add_argument("--link-flags", default="", metavar="FLAGS", help="extra flags for --link-output")
+        p.add_argument("--link-ninja", type=Path, metavar="BUILD_DIR",
+                       help="with --compdb: run the ninja link steps of --link-targets from these objects")
+        p.add_argument("--link-targets", nargs="+", default=[], metavar="TARGET")
 
-
-def main(argv: Optional[list[str]] = None) -> int:
-    raw = list(sys.argv[1:] if argv is None else argv)
-    if raw[:1] == ["mkroot"]:
-        from zm_cc.mkroot import main as mkroot_main
-
-        return mkroot_main(raw[1:])
-
-    command: Optional[list[str]] = None
-    own = raw
-    if "--" in raw:
-        i = raw.index("--")
-        own, command = raw[:i], raw[i + 1 :]
-
-    try:
-        args = build_parser().parse_args(own)
-    except SystemExit as e:
-        return int(e.code or 0)
-
-    # A kill by `timeout` or a CI job must unwind like Ctrl-C so the staging directory (hundreds of MB) is removed.
-    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
-
-    chosen = [args.compdb is not None, bool(args.sources), command is not None]
-    if sum(chosen) != 1:
-        return _usage("give exactly one of --compdb FILE, SOURCES..., or -- COMMAND")
-    if command is not None and not command:
-        return _usage("nothing after --")
-    if args.chunk < 0 or args.cores < 1:
-        return _usage("--chunk must be >= 0 and --cores must be >= 1")
-    if args.env == "mirror" and not args.mirror_paths:
-        return _usage("--env mirror needs at least one --mirror PATH (make one with `zm-cc mkroot`)")
-
-    cwd = Path.cwd()
-    out_dir = (args.out or Path("zm-objs")).absolute()
-    try:
-        if args.compdb is not None:
-            entries = load_compdb(args.compdb)
-        elif args.sources:
-            entries = entries_from_files(args.cc, args.flags, args.sources, cwd)
-        else:
-            entries = entries_from_command(command or [], cwd)
-        plan = build_plan(entries, out_dir, honour_output=command is not None and args.out is None)
-    except PlanError as e:
-        print(f"zm-cc: {e}", file=sys.stderr)
-        return 2
-    if not plan.units:
-        return _usage("no translation units to build")
-    if args.root is not None and args.mode != "tree":
-        return _usage("--root is only valid with --mode tree")
-
-    # Tree mode is the ZeroMesh path: no local -E, one shared CAS digest. Size chunks so a
-    # 2-node × 2-slot mesh gets about four concurrent full remote -c streams (not a distcc clone).
-    if args.chunk > 0:
-        chunk = args.chunk
-    elif args.mode == "tree":
-        n_remote = len([u for u in plan.units if u.remote])
-        chunk = max(1, (n_remote + 3) // 4)
-    else:
-        chunk = 1
-
-    tree_root: Optional[Path] = None
-    try:
-        if args.mode == "tree" and plan.remote_units:
-            tree_root = infer_workspace_root(plan.remote_units, args.root)
-            for u in plan.remote_units:
-                # Fail early when a unit's cwd is outside the uploaded tree.
-                u.working_dir_under(tree_root)
-    except PlanError as e:
-        print(f"zm-cc: {e}", file=sys.stderr)
-        return 2
-    except ValueError as e:
-        print(f"zm-cc: --root {tree_root}: {e}", file=sys.stderr)
-        return 2
-
-    tasks = make_tasks(plan.remote_units, chunk, mode=args.mode, root=tree_root)
-    if args.dry_run:
-        print(describe(plan, tasks, env=args.env, cores=args.cores, mode=args.mode, root=tree_root))
-        print(f"(dry run: nothing executed; {len(plan.remote_units)} remote, {len(plan.local_units)} local)")
-        return 0
-
-    opts = BuildOptions(
-        out_dir=out_dir,
-        env=args.env,
-        mirror_paths=[str(p.resolve()) for p in (args.mirror_paths or [])],
-        ld_library_path=args.ld_library_path,
-        cores=args.cores,
-        chunk=chunk,
-        jobs=args.jobs or os.cpu_count() or 4,
-        may_run_local=not args.remote_only,
-        keep_going=args.keep_going,
-        submit_timeout=args.submit_timeout,
-        verbose=args.verbose,
-        mode=args.mode,
-        tree_root=tree_root,
-    )
-    prog = sys.stderr
-    mode_note = f", root={tree_root}" if tree_root is not None else ""
-    print(
-        f"zm-cc: {len(plan.units)} unit(s) -> {len(tasks)} remote task(s) "
-        f"(mode={args.mode}, chunk={chunk}, env={args.env}, cores={args.cores}"
-        f"{mode_note}), {len(plan.local_units)} local",
-        file=prog,
-        flush=True,
-    )
-    zm: Any = None  # the SDK module, once imported; needed to classify its errors below
-    try:
-        if plan.remote_units:
-            import zeromesh as zm  # deferred: --dry-run and all-local builds need no SDK
-            from zeromesh.v1 import common_pb2
-
-            with zm.connect(socket_path=args.socket) as client:
-                records, total = run_build(plan, opts, client, common_pb2=common_pb2, progress=prog)
-        else:
-            records, total = run_build(plan, opts, None, progress=prog)
-    except KeyboardInterrupt:
-        print("zm-cc: cancelled", file=sys.stderr)
-        return 130
-    except ImportError:
-        print("zm-cc: zeromesh SDK not installed (pip install ./sdk/python)", file=sys.stderr)
-        return 1
-    except Exception as e:  # SDK errors are not all one class; report them and stop
-        if zm is not None and isinstance(e, zm.DaemonNotRunning):
-            print("zmd is not running (start it with: zmd)", file=sys.stderr)
-            return 1
-        if zm is not None and isinstance(e, zm.ZeroMeshError):
-            print(f"zm-cc: {e}", file=sys.stderr)
-            return 1
-        raise
-
-    if not args.no_retry_local:
-        retry_failed_local(plan, records, opts, progress=prog)
-    return _finish(plan, records, total, args, opts, prog)
-
-
-def _finish(
-    plan: Plan,
-    records: list[UnitRecord],
-    total: float,
-    args: argparse.Namespace,
-    opts: BuildOptions,
-    prog: Any,
-) -> int:
-    failed = [r for r in records if r.status == "failed"]
-    objects = [r for r in records if r.status == "ok" and r.output]
-    report_path = opts.out_dir / "zm-cc-report.json"
-    write_report(
-        report_path,
-        records,
-        total_s=total,
-        meta={"env": opts.env, "cores": opts.cores, "chunk": opts.chunk, "keep_going": opts.keep_going},
-    )
-
-    print("zm-cc: who did what", file=prog, flush=True)
-    for node, labels in who_did_what(records):
-        print(f"  {node}: {len(labels)} unit(s): {', '.join(labels)}", file=prog, flush=True)
-
-    rc = 0
-    if args.link_output is not None:
-        if failed:
-            print(f"zm-cc: link skipped, {len(failed)} unit(s) failed", file=prog)
-            rc = 1
-        else:
-            code, err = link_objects(plan, records, output=args.link_output, flags=args.link_flags)
-            if code != 0:
-                print(f"zm-cc: link failed: {err.strip()[-400:]}", file=prog)
-                rc = 1
+    def check(self, a):
+        forms = [a.compdb is not None, bool(a.sources), self.command is not None]
+        if sum(forms) != 1:
+            raise AdapterError("give exactly one of --compdb FILE, SOURCES..., or -- COMMAND")
+        if self.command is not None and not self.command:
+            raise AdapterError("nothing after --")
+        cwd = Path.cwd()
+        try:
+            if a.compdb is not None:
+                entries = load_compdb(a.compdb)
+            elif a.sources:
+                entries = entries_from_files(a.cc, a.flags, a.sources, cwd)
             else:
-                print(f"zm-cc: linked {len(objects)} object(s) into {args.link_output}", file=prog)
+                entries = entries_from_command(self.command, cwd)
+            # `-- cc -c x.c -o x.o` without --out writes x.o where the command says.
+            self.tus = build_plan(entries, Path(a.out).absolute(),
+                                   honour_output=self.command is not None and not self.out_given)
+            if not self.tus.units:
+                raise AdapterError("no translation units to build")
+            self.root = None
+            if self.tus.remote_units:
+                self.root = infer_workspace_root(self.tus.remote_units, a.root)
+                for u in self.tus.remote_units:
+                    u.working_dir_under(self.root)  # a unit outside the workspace is an error, not a surprise
+        except PlanError as e:
+            raise AdapterError(str(e)) from None
+        if a.link_ninja is not None and (a.compdb is None or not a.link_targets):
+            raise AdapterError("--link-ninja needs --compdb and --link-targets")
+        remote = self.tus.remote_units
+        if a.env == "capture" and remote:
+            self.env = toolchain.capture_env(remote, self.root)
+        elif remote:
+            self.env = toolchain.host_env(remote)
 
-    if args.link_ninja is not None:
-        if failed or args.compdb is None or not args.link_targets:
-            print("zm-cc: ninja link skipped (needs --compdb, --link-targets and no failed units)", file=prog)
-            rc = 1
-        else:
+    def workspace(self, a):
+        return Workspace(str(self.root or Path.cwd()), exclude=BUILD_PRODUCTS)
+
+    def items(self, a):
+        for u in self.tus.remote_units:
+            wd = u.working_dir_under(self.root)
+            yield Item(id=u.name.replace(" ", "_"), argv=u.remote_argv(self.root), cwd="" if wd == "." else wd,
+                       outputs=[Out(u.object_name, dest=str(u.object_path))], footprint=Depfile(u.depfile_name),
+                       cost=float(u.path.stat().st_size) if u.path and u.path.exists() else 0.0)
+
+    def plan(self, a):
+        return describe(self.tus, self.root)
+
+    def finish(self, a, run):
+        rc = 0
+        if self.tus.local_units:
+            for r in local.run_units(self.tus.local_units):
+                mark = "here    " if r.ok else "FAILED  "
+                print(f"  {mark}{r.unit.label}" + (f": {r.error}" if r.error else f"  ({r.unit.reason})"),
+                      file=sys.stderr)
+                rc = rc or (0 if r.ok else 1)
+        if rc or run.failed:
+            if a.link_output or a.link_ninja:
+                print("zm-cc: not linking: some units failed", file=sys.stderr)
+            return 1
+        compiled = [u for u in self.tus.units if u.object_path is not None]
+        if a.link_output is not None:
+            objects = [str(u.object_path) for u in compiled]
+            code, err = local.link(local.link_driver(self.tus.units), objects, a.link_output,
+                                   shlex.split(a.link_flags))
+            if code != 0:
+                print(f"zm-cc: link failed: {err.strip()[-400:]}", file=sys.stderr)
+                return 1
+            print(f"zm-cc: linked {len(objects)} object(s) into {a.link_output}", file=sys.stderr)
+        if a.link_ninja is not None:
             from zm_cc.ninja_link import link_build
 
-            code, err, used = link_build(args.link_ninja, args.compdb, records, args.link_targets)
+            code, err, used = link_build(a.link_ninja, a.compdb, compiled, a.link_targets)
             if code != 0:
-                print(f"zm-cc: ninja link failed: {err.strip()[-400:]}", file=prog)
-                rc = 1
-            else:
-                print(f"zm-cc: linked {', '.join(args.link_targets)} from {used} zm-cc object(s)", file=prog)
+                print(f"zm-cc: ninja link failed: {err.strip()[-400:]}", file=sys.stderr)
+                return 1
+            print(f"zm-cc: linked {', '.join(a.link_targets)} from {used} zm-cc object(s)", file=sys.stderr)
+        return 0
 
-    print(
-        f"zm-cc: {len(objects)}/{len(records)} unit(s) compiled; objects are listed in {report_path} "
-        f"(\"objects\"); total {total:.2f}s",
-        file=prog,
-        flush=True,
-    )
-    if failed:
-        print(f"zm-cc: {len(failed)} unit(s) failed", file=prog)
-        if not opts.keep_going:
-            rc = 1
-    return rc
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    command = None
+    if "--" in raw:
+        i = raw.index("--")
+        raw, command = raw[:i], raw[i + 1:]
+    out_given = any(x in ("-o", "--out") or x.startswith("--out=") for x in raw)
+    sys.exit(run_adapter(Cc(command, out_given), raw))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

@@ -13,19 +13,17 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
-from zm_cc.report import UnitRecord
+from zm_cc.plan import Unit
 
 
-def object_map(compdb: Path, records: Sequence[UnitRecord]) -> dict[str, str]:
+def object_map(compdb: Path, compiled: Sequence[Unit]) -> dict[str, str]:
     """ninja's output path (relative to the build dir) -> the object zm-cc produced for it."""
     entries = json.loads(compdb.read_text())
     mapping: dict[str, str] = {}
-    for r in records:
-        if r.status != "ok" or not r.output:
-            continue
-        out = entries[r.index].get("output")
-        if out:
-            mapping[out] = r.output
+    for u in compiled:
+        out = entries[u.entry].get("output")
+        if out and u.object_path is not None:
+            mapping[out] = str(u.object_path)
     return mapping
 
 
@@ -56,10 +54,10 @@ def rewrite(cmd: str, mapping: dict[str, str]) -> str:
 
 
 def link_build(
-    build_dir: Path, compdb: Path, records: Sequence[UnitRecord], targets: Sequence[str]
+    build_dir: Path, compdb: Path, compiled: Sequence[Unit], targets: Sequence[str]
 ) -> tuple[int, str, int]:
     """Run the link steps for ``targets``. Returns (exit code, error text, objects substituted)."""
-    mapping = object_map(compdb, records)
+    mapping = object_map(compdb, compiled)
     used = 0
     for cmd in link_commands(build_dir, targets):
         new = rewrite(cmd, mapping)

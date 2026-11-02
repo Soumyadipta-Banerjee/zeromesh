@@ -4,9 +4,9 @@
 Understands the subset of flags zm-render passes:
   -b SCENE  [-noaudio]  [-E ENGINE]  -o //out/frame_####  -F PNG  -s A  -e B  -a
 
-If the scene basename contains 'skip3', frame 3 is omitted (for missing-frame tests).
-If the scene basename contains 'partialfail' and -s start >= 3, exits with code 1
-(for partial-chunk tests).
+If the scene basename contains 'skip3', frame 3 is not written but the exit is 0 (a frame
+Blender silently skipped). If it contains 'partialfail', Blender crashes (exit 1) when it reaches
+frame 3, after writing the frames before it.
 """
 
 from __future__ import annotations
@@ -60,10 +60,6 @@ def main(argv: list[str]) -> int:
         return 2
 
     base = os.path.basename(scene)
-    if "partialfail" in base and start is not None and start >= 3:
-        print("fake_blender: simulating chunk task failure", file=sys.stderr)
-        return 1
-
     # Blender //path is relative to the .blend directory (= cwd in our sandbox).
     if out_pat.startswith("//"):
         out_pat = out_pat[2:]
@@ -74,6 +70,9 @@ def main(argv: list[str]) -> int:
 
     skip3 = "skip3" in base
     for frame in range(start, end + 1):
+        if "partialfail" in base and frame >= 3:
+            print(f"fake_blender: crashed at frame {frame}", file=sys.stderr)
+            return 1
         if skip3 and frame == 3:
             continue
         path = out_pat.replace("####", f"{frame:04d}")

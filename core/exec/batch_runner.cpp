@@ -881,7 +881,9 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     const int64_t cpu =
         (ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000 + (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000;
 
-    if (g.combined && exit_code == 0 && !timed_out && !hung && !oom) commit_ready(capture_item);
+    // Items whose outputs were all closed before the process ended are done, however it ended (a crash,
+    // an OOM kill, a timeout at a later item): it loses only the items still in flight.
+    if (g.combined) commit_ready(capture_item);
     for (const ItemSpec* it : g.items) {
         if (committed.contains(it->id)) continue;
         ItemRunResult r;

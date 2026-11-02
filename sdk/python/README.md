@@ -34,15 +34,18 @@ class Sweep(Adapter):
         for case in a.cases:
             yield Item(id=case, argv=["solver", case], outputs=[Out(f"{case}.out")])
 
-    def finish(self, a, run):               # here, after the run, with every result
-        print(len(run.succeeded), "solved; outputs under", run.out_dir)
+    def finish(self, a, run):               # here, after the run, with every result;
+        print(len(run.succeeded), "solved; outputs under", run.out_dir)  # may return an exit status
 
 if __name__ == "__main__":
     main(Sweep)
 ```
 
 `main` exits 0 when every item succeeded, 1 when some did not, 2 for a usage error or a missing zmd,
-and 130 on Ctrl-C (finished items are kept; `--resume RUN` continues).
+and 130 on Ctrl-C (finished items are kept; `--resume RUN` continues). A non-zero status returned by
+`finish()` (a local merge or link failed) wins when the run itself succeeded. With no items, nothing
+is submitted and `finish()` still runs. `workspace()` may return
+`Workspace(dir, exclude=["*.o", "build/"])` to keep build products out of the snapshot.
 
 ### Items
 

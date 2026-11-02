@@ -1,102 +1,65 @@
-import tempfile
+import argparse
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from zm_render.frames import FrameRange, split_chunks
-from zm_render.render import (
-    blender_argv,
-    collect_frames,
-    expected_frame_path,
-)
+from zeromesh import cli
+
+from zm_render.cli import Render
+from zm_render.render import BLENDER_ENV, blender_argv
+
+DATA = Path(__file__).resolve().parent / "data"
+
+
+def parsed(*argv):
+    p = argparse.ArgumentParser()
+    adapter = Render()
+    adapter.add_args(p)
+    cli.add_shared_flags(p)
+    a = p.parse_args(list(argv))
+    adapter.check(a)
+    return adapter, a
 
 
 class BlenderArgvTest(unittest.TestCase):
-    def test_chunk_argv(self):
-        ch = split_chunks(FrameRange(5, 12), 10)[0]
-        argv = blender_argv("shot.blend", ch)
-        self.assertEqual(argv[0], "blender")
-        self.assertEqual(argv[argv.index("-b") + 1], "shot.blend")
-        self.assertIn("-noaudio", argv)
+    def test_frame_range(self):
+        argv = blender_argv("shot.blend", "5", "12")
+        self.assertEqual(argv[:4], ["blender", "-b", "shot.blend", "-noaudio"])
         self.assertNotIn("-E", argv)
+        self.assertEqual(argv[argv.index("-o") + 1], "//out/frame_####")
         self.assertEqual(argv[argv.index("-s") + 1], "5")
         self.assertEqual(argv[argv.index("-e") + 1], "12")
-        self.assertIn("-a", argv)
+        self.assertEqual(argv[-1], "-a")
 
     def test_optional_engine(self):
-        ch = split_chunks(FrameRange(1, 1), 1)[0]
-        argv = blender_argv("shot.blend", ch, engine="CYCLES")
+        argv = blender_argv("shot.blend", "1", "1", engine="CYCLES")
         self.assertEqual(argv[argv.index("-E") + 1], "CYCLES")
 
 
-class CollectFramesTest(unittest.TestCase):
-    def test_all_present(self):
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td)
-            for n in (1, 2, 3):
-                expected_frame_path(out, n).write_bytes(b"png")
-            r = collect_frames(out, FrameRange(1, 3))
-            self.assertEqual(r.frames_ok, [1, 2, 3])
-            self.assertEqual(r.frames_missing, [])
+class RenderAdapterTest(unittest.TestCase):
+    def test_one_item_per_frame_and_a_combine_template(self):
+        adapter, a = parsed(str(DATA / "cube.blend"), "--frames", "3-5")
+        items = list(adapter.items(a))
+        self.assertEqual([(i.id, i.seq) for i in items], [("frame_0003", 3), ("frame_0004", 4), ("frame_0005", 5)])
+        out = items[0].outputs[0]
+        self.assertEqual((out.path, out.dest), ("out/frame_0003.png", "frame_0003.png"))
+        combine = adapter.combine(a)
+        self.assertEqual(combine[combine.index("-s") + 1], "{first}")
+        self.assertEqual(combine[combine.index("-e") + 1], "{last}")
+        self.assertEqual(adapter.workspace(a), str(DATA))
 
-    def test_missing(self):
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td)
-            expected_frame_path(out, 1).write_bytes(b"png")
-            # frame 2 missing
-            expected_frame_path(out, 3).write_bytes(b"png")
-            r = collect_frames(out, FrameRange(1, 3))
-            self.assertEqual(r.frames_missing, [2])
-
-
-class BuildJobSpecTest(unittest.TestCase):
-    def test_one_task_per_chunk(self):
-        # Avoid importing generated stubs; stub common_pb2 shapes.
-        class Dig:
-            pass
-
-        class EnvSpec:
-            def __init__(self, name, params=None):
-                self.name = name
-                self.params = params or {}
-
-        class Resources:
-            def __init__(self, cores):
-                self.cores = cores
-
-        class TaskSpec:
-            def __init__(self, **kw):
-                self.__dict__.update(kw)
-
-        class JobSpec:
-            def __init__(self, name, tasks):
-                self.name = name
-                self.tasks = tasks
-
-        common = mock.Mock()
-        common.EnvSpec = EnvSpec
-        common.Resources = Resources
-        common.TaskSpec = TaskSpec
-        common.JobSpec = JobSpec
-
-        from zm_render.render import build_job_spec
-
-        chunks = split_chunks(FrameRange(1, 5), 2)
-        spec = build_job_spec(
-            input_root=Dig(),
-            blend_rel="s.blend",
-            chunks=chunks,
-            env="host",
-            cores=1,
-            blender_bin="./blender",
-            common_pb2=common,
-        )
-        self.assertEqual(len(spec.tasks), 3)
-        self.assertEqual(spec.tasks[0].name, "frames_1_2")
-        self.assertEqual(spec.tasks[0].argv[spec.tasks[0].argv.index("-s") + 1], "1")
-        self.assertEqual(spec.tasks[0].argv[spec.tasks[0].argv.index("-e") + 1], "2")
-        self.assertEqual(spec.tasks[-1].name, "frames_5_5")
-        self.assertEqual(spec.tasks[0].outputs, ["out/"])
+    def test_environment_follows_the_blender_flag(self):
+        adapter, _ = parsed(str(DATA / "cube.blend"), "--frames", "1")
+        self.assertEqual([(p.name, p.version) for p in adapter.env.programs], [("blender", ">=0")])
+        self.assertEqual(adapter.env.vars, BLENDER_ENV)
+        adapter, _ = parsed(str(DATA / "cube.blend"), "--frames", "1", "--blender-version", ">=4.2")
+        self.assertEqual(adapter.env.programs[0].version, ">=4.2")
+        adapter, _ = parsed(str(DATA / "cube.blend"), "--frames", "1", "--blender", "./blender")
+        self.assertEqual(adapter.env.programs, ())  # travels with the scene
+        adapter, _ = parsed(str(DATA / "cube.blend"), "--frames", "2", "--env", "capture")
+        probe = adapter.env.probes[0]
+        self.assertEqual(probe[probe.index("-b") + 1], str(DATA / "cube.blend"))
+        self.assertTrue(probe[probe.index("-o") + 1].startswith("/"))  # never into the user's scene dir
+        self.assertEqual(probe[probe.index("-s") + 1], "2")
 
 
 if __name__ == "__main__":

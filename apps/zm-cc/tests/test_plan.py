@@ -12,8 +12,8 @@ from zm_cc.plan import (
     describe,
     entries_from_command,
     entries_from_files,
+    infer_workspace_root,
     load_compdb,
-    make_tasks,
     resolve_remote,
 )
 
@@ -62,30 +62,16 @@ def test_compdb_plan_splits_remote_and_local(compdb_plan):
     assert "-S needs the whole command" in compdb_plan.local_units[0].reason
 
 
-def test_remote_argv_drops_preprocessor_and_dependency_flags(compdb_plan):
+def test_remote_argv_is_the_full_compile_with_zm_ccs_object_and_depfile(compdb_plan):
     hello = compdb_plan.remote_units[0]
-    argv = hello.remote_argv()
+    argv = hello.remote_argv(DATA)
     assert argv[0] == "/usr/bin/cc"
-    assert "-O2" in argv and "-g" in argv and "-std=c11" in argv
-    for banned in ("-Iinclude", "-DGREETING=hi there", "-MD", "-MF", "build/hello.d"):
-        assert banned not in argv
-    assert argv[argv.index("-x") + 1] == "cpp-output"
-    assert argv[argv.index("-c") + 1] == hello.stage_name
-    assert argv[argv.index("-o") + 1] == f"out/{hello.object_name}"
-
-
-def test_preprocess_keeps_include_and_define(compdb_plan):
-    hello = compdb_plan.remote_units[0]
-    pre = hello.preprocess_argv("/stage/x.i")
-    assert "-Iinclude" in pre and "-DGREETING=hi there" in pre
-    assert "-E" in pre and pre[-2:] == ["-o", "/stage/x.i"]
-    assert "-MD" not in pre and "-c" not in pre
-
-
-def test_fortran_stage_name_and_no_x_flag(compdb_plan):
-    kernel = compdb_plan.remote_units[3]
-    assert kernel.stage_name.endswith(".f90")
-    assert "-x" not in kernel.remote_argv()
+    for kept in ("-O2", "-g", "-std=c11", "-Iinclude", "-DGREETING=hi there"):
+        assert kept in argv
+    assert "build/hello.d" not in argv and "build/hello.o" not in argv  # the command's own -MF/-o are dropped
+    assert argv[argv.index("-MF") + 1] == hello.depfile_name
+    assert argv[-4:] == ["-c", "src/hello.c", "-o", hello.object_name]
+    assert "-x" not in compdb_plan.remote_units[3].remote_argv(DATA)  # Fortran: the extension decides
 
 
 def test_local_unit_runs_unchanged_with_resolved_driver(compdb_plan):
@@ -143,46 +129,24 @@ def test_explicit_files_build_one_unit_per_file(tmp_path):
     assert plan.remote_units[0].driver_remote == "/usr/bin/g++"
 
 
-def test_make_tasks_groups_units(tmp_path):
-    entries = entries_from_files("cc", "-O2", [f"f{i}.c" for i in range(5)], tmp_path)
-    plan = build_plan(entries, tmp_path / "o", which=fake_which)
-    tasks = make_tasks(plan.units, chunk=2)
-    assert [len(t.units) for t in tasks] == [2, 2, 1]
-    assert [t.name for t in tasks] == ["cc_0000", "cc_0001", "cc_0002"]
-    assert tasks[0].argv[:2] == ("/bin/sh", "-c")
-    assert " && " in tasks[0].argv[2]
-    assert tasks[2].argv == tuple(plan.units[4].remote_argv())
-
-
-def test_make_tasks_chunk_one_is_plain_argv(tmp_path):
-    entries = entries_from_files("cc", "-O2", ["a.c"], tmp_path)
-    plan = build_plan(entries, tmp_path / "o", which=fake_which)
-    (task,) = make_tasks(plan.units, chunk=1)
-    assert task.argv == tuple(plan.units[0].remote_argv())
-
-
-def test_make_tasks_tree_mode_sets_working_dir_and_full_compile(tmp_path):
-    from zm_cc.plan import infer_workspace_root
-
+def test_remote_argv_rewrites_project_paths_relative_to_the_units_directory(tmp_path):
     sub = tmp_path / "src"
+    (tmp_path / "include").mkdir()
     sub.mkdir()
     (sub / "a.c").write_text("int a;\n", encoding="utf-8")
-    (sub / "b.c").write_text("int b;\n", encoding="utf-8")
-    entries = entries_from_files("cc", "-O2 -I.", ["a.c", "b.c"], sub)
+    entries = entries_from_files("cc", "-O2 -I../include -isystem /usr/include/x", [str(sub / "a.c")], sub)
     plan = build_plan(entries, tmp_path / "o", which=fake_which)
-    root = infer_workspace_root(plan.remote_units, tmp_path)
-    tasks = make_tasks(plan.remote_units, chunk=2, mode="tree", root=root)
-    assert len(tasks) == 1
-    assert tasks[0].working_dir == "src"
-    assert "-E" not in " ".join(tasks[0].argv)
-    assert any(a.endswith("a.c") or a == "a.c" for a in tasks[0].argv) or "a.c" in tasks[0].argv[2]
-    joined = " ".join(tasks[0].argv)
-    assert "-c" in joined and "out/" in joined
+    root = infer_workspace_root(plan.remote_units)
+    assert root == tmp_path.resolve()  # the sibling include directory is part of the project
+    u = plan.remote_units[0]
+    assert u.working_dir_under(root) == "src"
+    argv = u.remote_argv(root)
+    assert "-I../include" in argv  # inside the uploaded tree: relative, so it resolves on the donor
+    assert argv[argv.index("-isystem") + 1] == "/usr/include/x"  # the donor's own system headers
+    assert argv[argv.index("-c") + 1] == "a.c"
 
 
 def test_infer_workspace_root_explicit_and_common_ancestor(tmp_path):
-    from zm_cc.plan import infer_workspace_root
-
     a = tmp_path / "a"
     b = tmp_path / "b"
     a.mkdir()
@@ -195,15 +159,11 @@ def test_infer_workspace_root_explicit_and_common_ancestor(tmp_path):
     assert infer_workspace_root(plan.remote_units, tmp_path) == tmp_path.resolve()
 
 
-def test_make_tasks_rejects_bad_chunk(tmp_path):
-    plan = build_plan(entries_from_files("cc", "", ["a.c"], tmp_path), tmp_path / "o", which=fake_which)
-    with pytest.raises(PlanError):
-        make_tasks(plan.units, chunk=0)
-
-
-def test_local_only_plan_has_no_tasks(tmp_path):
-    plan = build_plan(entries_from_command(["cc", "-S", "-c", "a.c"], tmp_path), tmp_path / "o", which=fake_which)
-    assert make_tasks(plan.units, chunk=1) == []
+def test_a_unit_outside_the_root_is_an_error(tmp_path):
+    (tmp_path / "a").mkdir()
+    plan = build_plan(entries_from_files("cc", "", ["x.c"], tmp_path / "a"), tmp_path / "o", which=fake_which)
+    with pytest.raises(PlanError, match="outside --root"):
+        plan.remote_units[0].working_dir_under(tmp_path / "elsewhere")
 
 
 def test_resolve_remote_prefers_absolute_then_path_then_usr_bin():
@@ -213,10 +173,8 @@ def test_resolve_remote_prefers_absolute_then_path_then_usr_bin():
 
 
 def test_describe_lists_every_unit_and_needs_no_daemon(compdb_plan):
-    tasks = make_tasks(compdb_plan.remote_units, chunk=2)
     with mock.patch("subprocess.run", side_effect=AssertionError("dry run must not execute")):
-        text = describe(compdb_plan, tasks, env="host", cores=2)
-    assert "remote  src/hello.c" in text
-    assert "local   src/asm_stub.c" in text
-    assert shlex.join(compdb_plan.remote_units[0].remote_argv()) in text
-    assert "task cc_0000" in text
+        text = describe(compdb_plan, DATA)
+    assert "mesh   src/hello.c" in text
+    assert "here   src/asm_stub.c" in text
+    assert shlex.join(compdb_plan.remote_units[0].remote_argv(DATA)) in text

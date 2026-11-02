@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from zm_cfd.cases import discover_cases
-from zm_cfd.runner import CfdOptions, _command
+from zm_cfd.cli import solver_command
 
 
 def make_case(root: Path, name: str) -> None:
@@ -37,16 +37,11 @@ class CaseDiscoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "system/controlDict"):
                 discover_cases(Path(temp))
     def test_setup_command_quotes_setup_path_and_solver_args(self):
-        opts = CfdOptions(
-            cases=Path("cases"),
-            solver="simpleFoam",
-            solver_args=["-case", "case with spaces"],
-            bashrc=Path("/opt/OpenFOAM/etc/bashrc"),
-        )
-        argv = _command(opts)
+        argv = solver_command("simpleFoam", ["-case", "case with spaces"], Path("/opt/OpenFOAM/etc/bashrc"))
         self.assertEqual(argv[:2], ["bash", "-lc"])
         self.assertIn("source /opt/OpenFOAM/etc/bashrc", argv[2])
         self.assertIn("'case with spaces'", argv[2])
+        self.assertEqual(solver_command("icoFoam", ["-parallel"], None), ["icoFoam", "-parallel"])
 
 
 if __name__ == "__main__":

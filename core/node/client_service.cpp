@@ -230,7 +230,8 @@ grpc::Status ClientService::Snapshot(grpc::ServerContext*, const v1::SnapshotReq
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return Invalid("snapshot path is not a directory: " + root.string());
 
-    const store::IgnoreRules ignore = store::IgnoreRules::ForRoot(root);
+    const store::IgnoreRules ignore =
+        store::IgnoreRules::ForRoot(root, std::vector<std::string>(req->exclude().begin(), req->exclude().end()));
     const store::IgnoreRules deny = store::DenyRules();
     if (!req->force_large()) {
         uint64_t total = 0;

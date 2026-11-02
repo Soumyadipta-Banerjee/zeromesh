@@ -1,14 +1,14 @@
-"""Turn the three input forms into translation units (TUs) and remote tasks.
+"""Turn the three input forms into translation units (TUs).
 
 Input forms, all reduced to a list of ``Entry`` (a directory plus a full command):
 
   --compdb FILE          compile_commands.json (CMake, Meson, Make+bear, ninja -t compdb, ...)
   SOURCES --cc CC        explicit files with one shared flag string
-  -- CMD ...             one plain command line (single TU passthrough)
+  -- CMD ...             one plain command line
 
 Each source file in an entry becomes one ``Unit``. A unit is *remote* when the
-command is a plain compile of that file, and *local* (run unchanged on this
-machine) otherwise. Remote units are then grouped into ``RemoteTask`` chunks.
+command is a plain compile of that file (one item on the mesh), and *local* (run
+unchanged on this machine) otherwise.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ class Entry:
 @dataclass(frozen=True)
 class Unit:
     index: int
+    entry: int  # the input entry (compdb row) it came from
     command: Command
     source: Optional[Source]  # None for a command that is not a compile of one file
     directory: Path
@@ -61,40 +62,27 @@ class Unit:
         return self.command.sources[0].text if self.command.sources else "(command)"
 
     @property
-    def stage_name(self) -> str:
-        assert self.source is not None and self.source.lang is not None
-        return self.name + self.source.lang.ext
-
-    @property
     def object_name(self) -> str:
         return self.name + ".o"
+
+    @property
+    def depfile_name(self) -> str:
+        return self.name + ".d"
 
     def local_argv(self) -> list[str]:
         argv = self.command.argv_for(self.source)
         argv[0] = self.driver_local
         return argv
 
-    def preprocess_argv(self, out: str) -> list[str]:
+    def remote_argv(self, root: Path) -> list[str]:
+        """The compile on a donor, in this unit's directory inside the uploaded copy of ``root``:
+        the object and the depfile land next to it under their unique names."""
         assert self.source is not None
-        return self.command.preprocess_argv(self.source, self.driver_local, out)
-
-    def remote_argv(self) -> list[str]:
-        assert self.source is not None
-        return self.command.remote_argv(self.source, self.driver_remote, self.stage_name, self.object_name)
-
-    def tree_remote_argv(self, root: Path) -> list[str]:
-        """Full remote ``-c`` against an uploaded source tree rooted at ``root``."""
-        assert self.source is not None
-        return self.command.tree_remote_argv(
-            self.source,
-            self.driver_remote,
-            self.object_name,
-            root=str(root),
-            cwd=str(self.directory),
-        )
+        return self.command.compile_argv(self.source, self.driver_remote, self.object_name,
+                                         depfile=self.depfile_name, root=str(root), cwd=str(self.directory))
 
     def working_dir_under(self, root: Path) -> str:
-        """Task working_dir relative to the uploaded tree root.
+        """The unit's directory relative to the uploaded tree root.
 
         Raises ``PlanError`` when ``directory`` is outside ``root`` (donors reject ``..``).
         """
@@ -134,20 +122,12 @@ class Plan:
         return [u for u in self.units if not u.remote]
 
 
-@dataclass(frozen=True)
-class RemoteTask:
-    """One ZeroMesh task: a single compile, or ``--chunk`` compiles run one after another."""
-
-    name: str
-    units: tuple[Unit, ...]
-    argv: tuple[str, ...]
-    working_dir: str = "."
-
-
 def infer_workspace_root(units: Sequence[Unit], explicit: Optional[Path] = None) -> Path:
-    """Directory uploaded as the shared input tree for ``--mode tree``.
+    """The directory uploaded as the workspace every remote compile shares.
 
-    Defaults to the common ancestor of every remote unit's directory (and source path).
+    Defaults to the common ancestor of every remote unit's directory, its source and the relative
+    paths its preprocessor options name (``-I../include`` is project code; an absolute path may be
+    a system directory, and stays the donor's own).
     """
     if explicit is not None:
         root = explicit.expanduser().resolve()
@@ -161,11 +141,12 @@ def infer_workspace_root(units: Sequence[Unit], explicit: Optional[Path] = None)
     for u in remote:
         if u.path is not None:
             paths.append(u.path.resolve().parent)
+        paths.extend((u.directory / v).resolve() for v in u.command.path_values() if not os.path.isabs(v))
     try:
         return Path(os.path.commonpath([str(p) for p in paths]))
     except ValueError as e:
         raise PlanError(
-            "remote units do not share a common directory; pass --root PATH for --mode tree"
+            "remote units do not share a common directory; pass --root PATH"
         ) from e
 
 
@@ -239,7 +220,7 @@ def build_plan(
     """
     units: list[Unit] = []
     seen: dict[str, tuple[str, ...]] = {}
-    for entry in entries:
+    for entry_index, entry in enumerate(entries):
         argv = expand_response_files(list(entry.argv), entry.directory)
         if not argv:
             raise PlanError("empty compiler command")
@@ -267,6 +248,7 @@ def build_plan(
             units.append(
                 Unit(
                     index=len(units),
+                    entry=entry_index,
                     command=cmd,
                     source=src,
                     directory=entry.directory,
@@ -281,93 +263,19 @@ def build_plan(
     return Plan(units=tuple(units), out_dir=out_dir)
 
 
-def make_tasks(
-    units: Sequence[Unit],
-    chunk: int,
-    *,
-    mode: str = "distcc",
-    root: Optional[Path] = None,
-) -> list[RemoteTask]:
-    """Group remote units ``chunk`` at a time. Each group becomes one task."""
-    if chunk < 1:
-        raise PlanError(f"--chunk must be >= 1, got {chunk}")
-    if mode not in ("distcc", "tree"):
-        raise PlanError(f"unknown mode {mode!r}")
-    remote = [u for u in units if u.remote]
-    tasks: list[RemoteTask] = []
-    # Tree mode: never mix different working directories in one chunk (cwd is per-task).
-    if mode == "tree":
-        if root is None:
-            raise PlanError("make_tasks(mode='tree') needs root")
-        groups: list[list[Unit]] = []
-        cur: list[Unit] = []
-        cur_dir: Optional[Path] = None
-        for u in remote:
-            if cur and (u.directory != cur_dir or len(cur) >= chunk):
-                groups.append(cur)
-                cur = []
-            cur.append(u)
-            cur_dir = u.directory
-        if cur:
-            groups.append(cur)
-        for group_list in groups:
-            group = tuple(group_list)
-            wd = group[0].working_dir_under(root)
-            if len(group) == 1:
-                argv = tuple(group[0].tree_remote_argv(root))
-            else:
-                script = " && ".join(shlex.join(u.tree_remote_argv(root)) for u in group)
-                argv = ("/bin/sh", "-c", script)
-            tasks.append(
-                RemoteTask(name=f"cc_{len(tasks):04d}", units=group, argv=argv, working_dir=wd)
-            )
-        return tasks
-
-    for start in range(0, len(remote), chunk):
-        group = tuple(remote[start : start + chunk])
-        if len(group) == 1:
-            argv = tuple(group[0].remote_argv())
-        else:
-            # One task, several compiles. Stop at the first failure.
-            script = " && ".join(shlex.join(u.remote_argv()) for u in group)
-            argv = ("/bin/sh", "-c", script)
-        tasks.append(RemoteTask(name=f"cc_{len(tasks):04d}", units=group, argv=argv))
-    return tasks
-
-
-def describe(
-    plan: Plan,
-    tasks: Sequence[RemoteTask],
-    *,
-    env: str,
-    cores: int,
-    mode: str = "distcc",
-    root: Optional[Path] = None,
-) -> str:
-    """Human-readable plan for --dry-run and --verbose."""
-    lines = [
-        f"zm-cc plan: {len(plan.units)} unit(s): {len(plan.remote_units)} remote in "
-        f"{len(tasks)} task(s) (mode={mode}, env={env}, cores={cores}), {len(plan.local_units)} local"
-    ]
-    if mode == "tree" and root is not None:
-        lines.append(f"  tree root: {root}")
+def describe(plan: Plan, root: Optional[Path]) -> str:
+    """The plan for --dry-run: what compiles where, and with which command."""
+    lines = [f"zm-cc: {len(plan.units)} unit(s): {len(plan.remote_units)} on the mesh, {len(plan.local_units)} here"]
+    if root is not None:
+        lines.append(f"  workspace: {root}")
     for u in plan.units:
         target = str(u.object_path) if u.object_path is not None else "-"
         if u.remote:
-            lines.append(f"  remote  {u.label}  ->  {target}")
-            if mode == "tree" and root is not None:
-                lines.append(f"      cwd:        {u.working_dir_under(root)}  (under {root})")
-                lines.append(f"      compile:    {shlex.join(u.tree_remote_argv(root))}")
-            else:
-                lines.append(f"      preprocess: {shlex.join(u.preprocess_argv('<stage>/' + u.stage_name))}")
-                lines.append(f"      cwd:        {u.directory}")
-                lines.append(f"      compile:    {shlex.join(u.remote_argv())}")
+            lines.append(f"  mesh   {u.label}  ->  {target}")
+            lines.append(f"      in {u.working_dir_under(root)}: {shlex.join(u.remote_argv(root))}")
         else:
-            lines.append(f"  local   {u.label}  ->  {target}  ({u.reason})")
-            lines.append(f"      run:        {shlex.join(u.local_argv())}")
-            lines.append(f"      cwd:        {u.directory}")
-    for t in tasks:
-        lines.append(f"  task {t.name}: {', '.join(u.label for u in t.units)}")
+            lines.append(f"  here   {u.label}  ->  {target}  ({u.reason})")
+            lines.append(f"      in {u.directory}: {shlex.join(u.local_argv())}")
     return "\n".join(lines)
 
 
@@ -375,7 +283,6 @@ __all__ = [
     "Entry",
     "Plan",
     "PlanError",
-    "RemoteTask",
     "Unit",
     "build_plan",
     "describe",
@@ -383,7 +290,6 @@ __all__ = [
     "entries_from_files",
     "infer_workspace_root",
     "load_compdb",
-    "make_tasks",
     "resolve_local",
     "resolve_remote",
 ]

@@ -1,163 +1,92 @@
-"""zm-render command-line entry point."""
+"""zm-render: a Blender frame range across a ZeroMesh team, one item per frame."""
 
 from __future__ import annotations
 
-import argparse
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
-from zm_render.frames import parse_frames
-from zm_render.render import RenderOptions, run_render
+from zeromesh.adapter import Adapter, AdapterError, Env, Item, Out, Policy, Program, Res, main as run
+
+from zm_render.blend_paths import warn_external_paths
+from zm_render.frames import frame_filename, parse_frames
+from zm_render.render import BLENDER_ENV, blender_argv, encode_video
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="zm-render",
-        description="Render a Blender frame range across a ZeroMesh team.",
-    )
-    p.add_argument("scene", type=Path, help="Path to SCENE.blend")
-    p.add_argument(
-        "--frames",
-        required=True,
-        help="Frame range: N or A-B (inclusive)",
-    )
-    p.add_argument(
-        "--chunk",
-        type=int,
-        default=1,
-        help="Frames per task (default: 1)",
-    )
-    p.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        default=Path("renders"),
-        help="Directory for collected frames (default: renders/)",
-    )
-    p.add_argument(
-        "--env",
-        choices=("host", "mirror"),
-        default="host",
-        help="Env provider: host (Blender on donor) or mirror (M5c)",
-    )
-    p.add_argument(
-        "--mirror",
-        type=Path,
-        action="append",
-        default=None,
-        dest="mirror_paths",
-        metavar="PATH",
-        help="Host path to export for --env mirror (repeatable; required with --env mirror)",
-    )
-    p.add_argument(
-        "--encode",
-        type=Path,
-        default=None,
-        help="Optional local ffmpeg encode to this .mp4 path",
-    )
-    p.add_argument(
-        "--blender",
-        default="blender",
-        help="Blender binary name/path on the donor (default: blender)",
-    )
-    p.add_argument(
-        "--engine",
-        default=None,
-        metavar="NAME",
-        help="Blender render engine (-E), e.g. CYCLES; default: use the .blend setting",
-    )
-    p.add_argument(
-        "--cores",
-        type=int,
-        default=8,
-        help="Cores reserved per chunk (default: 8). Higher ≈ fewer concurrent "
-        "Blenders per machine (Flamenco-style: keep peers fed from a queue).",
-    )
-    p.add_argument(
-        "--remote-only",
-        action="store_true",
-        help="Only run on peer donors (needed when local Blender lives under /opt)",
-    )
-    p.add_argument(
-        "--socket",
-        default=None,
-        help="Override zmd unix socket path",
-    )
-    return p
+class Render(Adapter):
+    name = "zm-render"
+    kind = "blender"
+    res = Res(cores=4)
+    policy = Policy(keep_going=True)  # one bad frame does not stop the others; --resume redoes it
+
+    def add_args(self, p):
+        p.add_argument("scene", type=Path, help="the .blend to render")
+        p.add_argument("--frames", required=True, help="N or A-B (inclusive)")
+        p.add_argument("--blender", default="blender", help="Blender on the donors (default: blender)")
+        p.add_argument("--blender-version", default="any", metavar="CONSTRAINT",
+                       help='which Blender donors may use, e.g. ">=4.2,<5" (default: any)')
+        p.add_argument("--engine", metavar="NAME", help="render engine (-E), e.g. CYCLES; default: the .blend's")
+        p.add_argument("--encode", type=Path, metavar="MP4", help="encode the frames here with ffmpeg afterwards")
+
+    def check(self, a):
+        try:
+            self.frames = parse_frames(a.frames)
+        except ValueError as e:
+            raise AdapterError(str(e)) from None
+        self.scene = a.scene.resolve()
+        if not self.scene.is_file():
+            raise AdapterError(f"scene not found: {self.scene}")
+        warn_external_paths(self.scene, file=sys.stderr)
+        self.env = self._env(a)
+
+    def _env(self, a) -> Env:
+        if a.env == "capture":
+            # Render one real frame here: Blender's scripts, data files and add-ons are read only then.
+            # A stable path: the probe's command keys the capture, so an unchanged Blender is reused.
+            scratch = os.path.join(tempfile.gettempdir(), f"zm-render-capture-{os.getuid()}")
+            os.makedirs(scratch, mode=0o700, exist_ok=True)
+            probe_out = os.path.join(scratch, "frame_####")
+            first = str(self.frames.start)
+            probe = blender_argv(str(self.scene), first, first, a.blender, a.engine, output=probe_out)
+            found = shutil.which(a.blender)
+            install = os.path.dirname(os.path.realpath(found)) if found else ""
+            paths = [install] if install and not install.startswith("/usr/") else []  # e.g. a tarball in /opt
+            return Env.capture([probe], paths, vars=BLENDER_ENV)
+        if "/" in a.blender and not os.path.isabs(a.blender):
+            return Env(vars=BLENDER_ENV)  # a Blender inside the scene directory travels with it
+        version = ">=0" if a.blender_version == "any" else a.blender_version
+        return Env.host(Program(a.blender, version), vars=BLENDER_ENV)
+
+    def workspace(self, a):
+        return str(self.scene.parent)
+
+    def combine(self, a):
+        # One Blender for consecutive frames: the scene loads once; each frame is still committed
+        # (and retried) on its own as soon as its file is written.
+        return blender_argv(self.scene.name, "{first}", "{last}", a.blender, a.engine)
+
+    def items(self, a):
+        for n in self.frames.frame_numbers():
+            name = frame_filename(n)
+            yield Item(id=name[:-len(".png")], seq=n, argv=blender_argv(self.scene.name, str(n), str(n), a.blender,
+                                                                       a.engine),
+                       outputs=[Out(f"out/{name}", dest=name)])
+
+    def finish(self, a, run):
+        if not a.encode:
+            return
+        if run.failed:
+            print(f"zm-render: not encoding {a.encode}: {len(run.failed)} frame(s) missing", file=sys.stderr)
+            return
+        encode_video(Path(run.out_dir), self.frames, a.encode)
+        print(f"zm-render: encoded {a.encode}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    try:
-        frames = parse_frames(args.frames)
-    except ValueError as e:
-        print(f"zm-render: {e}", file=sys.stderr)
-        return 2
-
-    if args.chunk < 1:
-        print("zm-render: --chunk must be >= 1", file=sys.stderr)
-        return 2
-    if args.env == "mirror" and not args.mirror_paths:
-        print("zm-render: --env mirror requires at least one --mirror PATH", file=sys.stderr)
-        return 2
-
-    try:
-        import zeromesh
-    except ImportError:
-        print(
-            "zm-render: zeromesh SDK not installed (pip install ./sdk/python)",
-            file=sys.stderr,
-        )
-        return 1
-
-    try:
-        client = zeromesh.connect(socket_path=args.socket)
-    except zeromesh.DaemonNotRunning:
-        print("zmd is not running (start it with: zmd)", file=sys.stderr)
-        return 1
-
-    opts = RenderOptions(
-        blend=args.scene,
-        frames=frames,
-        chunk=args.chunk,
-        out_dir=args.output,
-        env=args.env,
-        mirror_paths=list(args.mirror_paths or []),
-        encode=args.encode,
-        blender_bin=args.blender,
-        engine=args.engine,
-        cores=args.cores,
-        may_run_local=not args.remote_only,
-        may_run_remote=True,
-    )
-
-    from zm_render.render import ChunkTasksFailed, MissingFramesError
-
-    try:
-        with client:
-            result = run_render(client, opts)
-    except FileNotFoundError as e:
-        print(f"zm-render: {e}", file=sys.stderr)
-        return 1
-    except ChunkTasksFailed as e:
-        print(f"zm-render: {e}", file=sys.stderr)
-        return 1
-    except MissingFramesError as e:
-        print(f"zm-render: {e}", file=sys.stderr)
-        return 1
-    except zeromesh.TaskFailed as e:
-        print(f"zm-render: {e}", file=sys.stderr)
-        return e.exit_code or 1
-    except KeyboardInterrupt:
-        print("zm-render: cancelled", file=sys.stderr)
-        return 130
-
-    print(
-        f"wrote {len(result.frames_ok)} frames to {opts.out_dir}",
-        file=sys.stderr,
-    )
-    return 0
+def main(argv: list[str] | None = None) -> None:
+    run(Render, argv)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

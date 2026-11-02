@@ -1,70 +1,50 @@
 from pathlib import Path
 
+import pytest
+
 from zm_cc.cli import main
 
 FIXTURE = Path(__file__).resolve().parent / "data" / "compile_commands.json"
 
 
-def test_dry_run_compdb_prints_plan_and_exits_zero(capsys):
-    rc = main(["--dry-run", "--compdb", str(FIXTURE)])
+def zmcc(*argv: str) -> int:
+    with pytest.raises(SystemExit) as e:
+        main(list(argv))
+    return e.value.code
+
+
+def test_dry_run_compdb_prints_plan_and_needs_no_daemon(capsys, tmp_path):
+    assert zmcc("--dry-run", "--socket", str(tmp_path / "none.sock"), "--compdb", str(FIXTURE)) == 0
     out = capsys.readouterr().out
-    assert rc == 0
-    assert "zm-cc plan: 5 unit(s): 4 remote in 4 task(s)" in out
-    assert "local   src/asm_stub.c" in out
-    assert "(dry run: nothing executed; 4 remote, 1 local)" in out
+    assert "zm-cc: 5 unit(s): 4 on the mesh, 1 here" in out
+    assert "here   src/asm_stub.c" in out
 
 
-def test_dry_run_explicit_files(capsys):
-    rc = main(
-        ["--dry-run", "--mode", "distcc", "--cc", "g++", "--flags", "-O2 -Iinc", "a.cpp", "b.cpp"]
-    )
+def test_dry_run_explicit_files_compile_in_full(capsys):
+    assert zmcc("--dry-run", "--cc", "g++", "--flags", "-O2 -Iinc", "a.cpp", "b.cpp") == 0
     out = capsys.readouterr().out
-    assert rc == 0
-    assert "remote  a.cpp" in out and "remote  b.cpp" in out
-    assert "-x c++-cpp-output -c" in out
-
-
-def test_dry_run_tree_mode_shows_full_remote_c(capsys):
-    rc = main(["--dry-run", "--mode", "tree", "--cc", "g++", "--flags", "-O2 -Iinc", "a.cpp", "b.cpp"])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "mode=tree" in out
+    assert "mesh   a.cpp" in out and "mesh   b.cpp" in out
+    assert "-Iinc" in out and " -c a.cpp -o a." in out
     assert "-x c++-cpp-output" not in out
-    assert " -c a.cpp " in out or " -c a.cpp\n" in out or "-c a.cpp -o" in out
 
 
 def test_dry_run_command_form_honours_o_when_out_not_given(tmp_path, capsys):
     target = tmp_path / "foo.o"
-    rc = main(["--dry-run", "--", "gcc", "-O2", "-c", "foo.c", "-o", str(target)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert f"remote  foo.c  ->  {target}" in out
+    assert zmcc("--dry-run", "--", "gcc", "-O2", "-c", "foo.c", "-o", str(target)) == 0
+    assert f"mesh   foo.c  ->  {target}" in capsys.readouterr().out
 
 
 def test_dry_run_command_form_with_out_uses_out_dir(tmp_path, capsys):
-    rc = main(["--dry-run", "--out", str(tmp_path / "objs"), "--", "gcc", "-c", "foo.c", "-o", "foo.o"])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert str(tmp_path / "objs") in out
-
-
-def test_dry_run_shows_chunked_tasks(capsys):
-    rc = main(["--dry-run", "--chunk", "2", "--compdb", str(FIXTURE)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "task cc_0000: src/hello.c, src/util.cc" in out
+    assert zmcc("--dry-run", "--out", str(tmp_path / "objs"), "--", "gcc", "-c", "foo.c", "-o", "foo.o") == 0
+    assert str(tmp_path / "objs") in capsys.readouterr().out
 
 
 def test_usage_errors_return_2(tmp_path):
-    assert main([]) == 2  # no input form at all
-    assert main(["--compdb", str(FIXTURE), "a.c"]) == 2  # two input forms
-    assert main(["--dry-run", "--"]) == 2  # nothing after --
-    assert main(["--dry-run", "--chunk", "-1", "--", "cc", "-c", "a.c"]) == 2
-    assert main(["--dry-run", "--env", "mirror", "--", "cc", "-c", "a.c"]) == 2  # mirror needs --mirror
-    assert main(["--dry-run", "--compdb", str(tmp_path / "missing.json")]) == 2
-
-
-def test_empty_compdb_is_a_usage_error(tmp_path):
+    assert zmcc() == 2  # no input form at all
+    assert zmcc("--compdb", str(FIXTURE), "a.c") == 2  # two input forms
+    assert zmcc("--dry-run", "--") == 2  # nothing after --
+    assert zmcc("--dry-run", "--compdb", str(tmp_path / "missing.json")) == 2
+    assert zmcc("--dry-run", "--link-ninja", "build", "a.c") == 2  # needs --compdb and targets
     empty = tmp_path / "cc.json"
     empty.write_text("[]", encoding="utf-8")
-    assert main(["--dry-run", "--compdb", str(empty)]) == 2
+    assert zmcc("--dry-run", "--compdb", str(empty)) == 2

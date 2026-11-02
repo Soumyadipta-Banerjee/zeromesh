@@ -47,9 +47,10 @@ IgnoreRules IgnoreRules::FromLines(const std::vector<std::string>& lines) {
     return r;
 }
 
-IgnoreRules IgnoreRules::ForRoot(const std::filesystem::path& root) {
+IgnoreRules IgnoreRules::ForRoot(const std::filesystem::path& root, const std::vector<std::string>& extra) {
     IgnoreRules r;
     r.Add(".git");
+    for (const auto& line : extra) r.Add(line);
     std::ifstream in(root / ".zmignore");
     std::string line;
     while (std::getline(in, line)) r.Add(line);

@@ -1,16 +1,17 @@
-"""Parse a compiler command line and decide what travels where in a split build.
+"""Parse a compiler command line and decide how each translation unit compiles on a donor.
 
-A split build runs the preprocessor locally (``cc -E``), ships the self-contained
-output to a donor, and compiles it there with the codegen flags only. Every
-option on the command line therefore has one of these kinds:
+A donor compiles one source against an uploaded copy of the source tree, so every option on the
+command line has one of these kinds:
 
-  KEEP         codegen (-O2, -g, -std=..., -W..., -m..., -f...): kept on both sides
-  PREPROC      preprocessor-only (-I, -D, -include, -isystem, ...): local -E only
-  DRIVER       dependency files and listings (-MD, -MF, -P, ...): dropped from both
+  KEEP         codegen (-O2, -g, -std=..., -W..., -m..., -f...): kept
+  PREPROC      preprocessor (-I, -D, -include, -isystem, ...): kept; paths inside the uploaded
+               tree are rewritten relative to the compile's directory there
+  DRIVER       dependency files and listings (-MD, -MF, -P, ...): dropped; zm-cc asks for its own
+               depfile, which keys the cache
   OUTPUT       -o VALUE: replaced by zm-cc's own object name
-  LANG         -x LANG: local -E only; the remote compile sets its own
+  LANG         -x LANG: kept
   PASSTHROUGH  cannot be split (-S, -E, -M, PCH, modules, profiles...): the whole
-               command runs locally, unchanged
+               command runs on this machine, unchanged
 
 ``_RULES`` is the whole policy. To teach the classifier a new flag, add a row.
 Nothing here knows about CMake, Meson or any one project.
@@ -110,24 +111,21 @@ _NO_OBJECT = frozenset({"-E", "-S", "-M", "-MM", "-dM", "-fsyntax-only", "-###",
 
 @dataclass(frozen=True)
 class Lang:
-    """What the splitter needs to know about one source language."""
+    """A source language, by family: "c", "c++" or "fortran"."""
 
-    family: str  # "c", "c++" or "fortran"
-    preprocessed: bool  # input is already preprocessor output: no local -E
-    ext: str  # extension of the staged, preprocessed file
-    remote_x: Optional[str]  # -x for the remote compile; None lets the extension decide
+    family: str
 
 
 _LANGS: dict[str, Lang] = {
     # gcc and clang spell preprocessed C "cpp-output" (not "c-cpp-output"); C++ is "c++-cpp-output".
-    "c": Lang("c", False, ".i", "cpp-output"),
-    "c++": Lang("c++", False, ".ii", "c++-cpp-output"),
-    "cpp-output": Lang("c", True, ".i", "cpp-output"),
-    "c++-cpp-output": Lang("c++", True, ".ii", "c++-cpp-output"),
-    "f95": Lang("fortran", False, ".f90", None),
-    "f95-cpp-input": Lang("fortran", False, ".f90", None),
-    "f77": Lang("fortran", False, ".f", None),
-    "f77-cpp-input": Lang("fortran", False, ".f", None),
+    "c": Lang("c"),
+    "c++": Lang("c++"),
+    "cpp-output": Lang("c"),
+    "c++-cpp-output": Lang("c++"),
+    "f95": Lang("fortran"),
+    "f95-cpp-input": Lang("fortran"),
+    "f77": Lang("fortran"),
+    "f77-cpp-input": Lang("fortran"),
 }
 
 # Extension -> key in _LANGS. Upper-case Fortran extensions mean "run cpp first".
@@ -192,66 +190,54 @@ class Command:
         """The original command with only ``src`` as input (all tokens when src is None)."""
         return [self.driver] + [t.text for t in self.tokens if not _is_other_source(t, src)]
 
-    def preprocess_argv(self, src: Source, driver: str, out: str) -> list[str]:
-        """Local ``-E`` for one source: preprocessor and codegen options, no -c or -o."""
-        args = [driver]
+    def path_values(self) -> list[str]:
+        """The values of path-taking preprocessor options (-I dir, -Idir, --sysroot=dir, ...)."""
+        out: list[str] = []
+        pending = False
         for t in self.tokens:
-            if t.kind in (Kind.KEEP, Kind.PREPROC, Kind.LANG) or (t.kind is Kind.SOURCE and t.text == src.text):
-                args.append(t.text)
-        args.append("-E")
-        if src.lang is not None and src.lang.family == "fortran":
-            args += ["-cpp", "-P"]  # gfortran: force cpp; no line markers in free/fixed form
-        return args + ["-o", out]
+            if t.kind is not Kind.PREPROC:
+                pending = False
+            elif pending:
+                out.append(t.text)
+                pending = False
+            elif _is_path_flag_name(t.text):
+                pending = True
+            elif (glued := _glued_path(t.text)) is not None:
+                out.append(glued[2])
+        return out
 
-    def remote_argv(self, src: Source, driver: str, stage_name: str, object_name: str) -> list[str]:
-        """Remote compile of the preprocessed file: codegen options only (distcc mode)."""
-        if src.lang is None:
-            raise ValueError(f"{src.text}: unsplittable input has no remote compile")
-        args = [driver] + [t.text for t in self.tokens if t.kind is Kind.KEEP]
-        if src.lang.remote_x:
-            # *-cpp-output tells gcc and clang the input is already preprocessed
-            # (this is what -fpreprocessed would otherwise say).
-            args += ["-x", src.lang.remote_x]
-        return args + ["-c", stage_name, "-o", f"out/{object_name}"]
-
-    def tree_remote_argv(
+    def compile_argv(
         self,
         src: Source,
         driver: str,
-        object_name: str,
+        output: str,
         *,
-        root: str,
-        cwd: str,
+        depfile: Optional[str] = None,
+        root: Optional[str] = None,
+        cwd: Optional[str] = None,
     ) -> list[str]:
-        """Full remote ``-c`` with preprocessor flags kept (tree mode).
+        """The compile of ``src`` alone: ``driver ... -c SRC -o OUTPUT`` with the command's codegen,
+        preprocessor and language options; its own -c/-o/-M* are dropped. ``depfile`` adds
+        ``-MD -MF depfile``.
 
-        Project-local ``-I`` / ``-include`` paths under ``root`` are rewritten so they
-        resolve from ``cwd`` inside the uploaded tree. Absolute system paths (e.g.
-        ``/usr/include``) are left alone for ``env-host``.
+        With ``root`` and ``cwd``, preprocessor paths and an absolute source that lie under ``root``
+        are rewritten relative to ``cwd`` (the same directory inside an uploaded copy of ``root``);
+        paths outside it, such as ``/usr/include``, stay as they are.
         """
         if src.lang is None:
-            raise ValueError(f"{src.text}: unsplittable input has no remote compile")
-        root_r = os.path.realpath(root)
-        cwd_r = os.path.realpath(cwd)
+            raise ValueError(f"{src.text}: unsplittable input has no compile")
+        root_r = os.path.realpath(root) if root is not None else None
+        cwd_r = os.path.realpath(cwd) if cwd is not None else None
         args = [driver]
-        src_arg: Optional[str] = None
+        src_arg = src.text
         path_value_pending = False
         for t in self.tokens:
-            if t.kind is Kind.SOURCE:
-                if t.text == src.text:
-                    if os.path.isabs(src.text):
-                        src_arg = os.path.relpath(os.path.realpath(src.text), cwd_r)
-                    else:
-                        src_arg = src.text
+            if t.kind in (Kind.SOURCE, Kind.OUTPUT, Kind.DRIVER):
+                if t.kind is Kind.SOURCE and t.text == src.text and root_r and os.path.isabs(src.text):
+                    src_arg = _path_under_tree(src.text, root_r, cwd_r) or src.text
                 path_value_pending = False
                 continue
-            if t.kind is Kind.OUTPUT:
-                path_value_pending = False
-                continue
-            if t.kind is Kind.DRIVER:
-                path_value_pending = False
-                continue  # drop -c/-MD/...; we add our own -c/-o
-            if t.kind is Kind.PREPROC:
+            if t.kind is Kind.PREPROC and root_r is not None:
                 if path_value_pending:
                     new = _path_under_tree(t.text, root_r, cwd_r)
                     args.append(new if new is not None else t.text)
@@ -261,12 +247,12 @@ class Command:
                 args.append(rewritten if rewritten is not None else t.text)
                 path_value_pending = _is_path_flag_name(t.text)
                 continue
-            if t.kind in (Kind.KEEP, Kind.LANG):
+            if t.kind in (Kind.KEEP, Kind.LANG, Kind.PREPROC):
                 args.append(t.text)
                 path_value_pending = False
-        if src_arg is None:
-            src_arg = src.text
-        return args + ["-c", src_arg, "-o", f"out/{object_name}"]
+        if depfile is not None:
+            args += ["-MD", "-MF", depfile]
+        return args + ["-c", src_arg, "-o", output]
 
 
 _PATH_FLAGS = (
@@ -288,23 +274,29 @@ def _is_path_flag_name(text: str) -> bool:
     return text in _PATH_FLAGS
 
 
-def _rewrite_glued_path_flag(text: str, root: str, cwd: str) -> Optional[str]:
-    """Rewrite glued ``-Idir`` / ``--sysroot=dir``; return None when not a glued path flag."""
+def _glued_path(text: str) -> Optional[tuple[str, str, str]]:
+    """(flag, separator, value) for a glued ``-Idir`` / ``--sysroot=dir``; None otherwise."""
     for name in _PATH_FLAGS:
         if text == name or not text.startswith(name):
             continue
         rest = text[len(name) :]
         if name.startswith("--"):
-            if not rest.startswith("="):
-                continue
-            val, sep = rest[1:], "="
-        else:
-            if rest == "" or rest.startswith("-"):
-                continue
-            val, sep = rest, ""
-        new = _path_under_tree(val, root, cwd)
-        return f"{name}{sep}{new}" if new is not None else text
+            if rest.startswith("="):
+                return name, "=", rest[1:]
+            continue
+        if rest and not rest.startswith("-"):
+            return name, "", rest
     return None
+
+
+def _rewrite_glued_path_flag(text: str, root: str, cwd: str) -> Optional[str]:
+    """Rewrite glued ``-Idir`` / ``--sysroot=dir``; return None when not a glued path flag."""
+    glued = _glued_path(text)
+    if glued is None:
+        return None
+    name, sep, val = glued
+    new = _path_under_tree(val, root, cwd)
+    return f"{name}{sep}{new}" if new is not None else text
 
 
 def _path_under_tree(val: str, root: str, cwd: str) -> Optional[str]:

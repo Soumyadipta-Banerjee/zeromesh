@@ -1,11 +1,6 @@
 import unittest
 
-from zm_render.frames import (
-    FrameRange,
-    frame_filename,
-    parse_frames,
-    split_chunks,
-)
+from zm_render.frames import FrameRange, frame_filename, parse_frames
 
 
 class ParseFramesTest(unittest.TestCase):
@@ -28,31 +23,6 @@ class ParseFramesTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     parse_frames(bad)
-
-
-class SplitChunksTest(unittest.TestCase):
-    def test_exact(self):
-        chunks = split_chunks(FrameRange(1, 10), 5)
-        self.assertEqual([(c.start, c.end) for c in chunks], [(1, 5), (6, 10)])
-
-    def test_remainder(self):
-        chunks = split_chunks(FrameRange(1, 8), 3)
-        self.assertEqual(
-            [(c.start, c.end) for c in chunks],
-            [(1, 3), (4, 6), (7, 8)],
-        )
-
-    def test_chunk_one(self):
-        chunks = split_chunks(FrameRange(2, 4), 1)
-        self.assertEqual([(c.start, c.end, c.name) for c in chunks], [
-            (2, 2, "frames_2_2"),
-            (3, 3, "frames_3_3"),
-            (4, 4, "frames_4_4"),
-        ])
-
-    def test_bad_chunk(self):
-        with self.assertRaises(ValueError):
-            split_chunks(FrameRange(1, 2), 0)
 
 
 class FrameFilenameTest(unittest.TestCase):
