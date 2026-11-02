@@ -1357,7 +1357,7 @@ v1::RunStatus RunEngine::StatusLocked(const Run& run) const {
     v1::RunStatus st;
     st.set_run_id(run.id);
     st.set_name(run.spec.name());
-    st.set_done(run.done || run.finishing);
+    st.set_done(run.done); // only once its report is written: whoever sees "done" may read it at once
     st.set_open(run.open);
     st.set_total(static_cast<int32_t>(run.items.size()));
     for (const auto& it : run.items) {
