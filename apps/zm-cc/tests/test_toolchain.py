@@ -28,3 +28,15 @@ def test_capture_probes_one_compile_per_compiler_and_language_and_keys_stably(tm
     assert any(d.startswith("/usr/") for d in first.paths)  # the compiler's own header search list
     # The probe's command keys the capture: the same project must give the same spec every time.
     assert toolchain.capture_env(units(tmp_path), tmp_path) == first
+
+
+def test_capture_takes_include_directories_outside_the_workspace(tmp_path):
+    sdk = tmp_path / "sdk" / "include"
+    sdk.mkdir(parents=True)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.c").write_text("int a;\n")
+    plan = build_plan(entries_from_files("cc", f"-I{sdk} -Iinc", ["a.c"], ws), ws / "o")
+    env = toolchain.capture_env(plan.remote_units, ws)
+    assert str(sdk.resolve()) in env.paths
+    assert not any(p.startswith(str(ws.resolve())) for p in env.paths)

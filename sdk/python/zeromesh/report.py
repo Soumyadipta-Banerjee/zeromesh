@@ -1,6 +1,7 @@
 """The standard run report (`<out>/report.json`, written by zmd when a run ends) and the words used
 for it everywhere: the same as `zm run` and `zm report` print."""
 
+import re
 from typing import List
 
 from google.protobuf import json_format
@@ -29,13 +30,30 @@ def load(path: str) -> run_pb2.Report:
         return json_format.Parse(f.read(), run_pb2.Report(), ignore_unknown_fields=True)
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def last_error_line(result: run_pb2.ItemResult) -> str:
+    """What the item's stderr says went wrong (colours removed): its last line mentioning an error,
+    else its last line; "" when it wrote nothing. Compilers end with source excerpts and a summary
+    ("compilation terminated."), so the last line alone rarely says why."""
+    text = _ANSI.sub("", result.failure.stderr_tail.decode("utf-8", errors="replace"))
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    errors = [ln for ln in lines if "error" in ln.lower()]
+    return (errors or lines or [""])[-1]
+
+
 def describe(result: run_pb2.ItemResult) -> str:
-    """"<id>: <kind>[: <message>]" for an item that did not succeed."""
+    """"<id>: <kind>[: <message>][: <last stderr line>]" for an item that did not succeed."""
     f = result.failure
     word = KIND_WORDS.get(f.kind, "failed")
     text = f"{result.id}: {word}"
     if f.message and f.message != word:
         text += f": {f.message}"
+    if f.kind == run_pb2.FAILURE_EXIT:
+        why = last_error_line(result)
+        if why:
+            text += f": {why}"
     return text
 
 

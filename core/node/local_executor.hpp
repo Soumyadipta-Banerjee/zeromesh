@@ -6,6 +6,7 @@
 #include "plugin/loader.hpp"
 #include "store/store.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -64,7 +65,8 @@ private:
         std::stop_source stop;
         bool started{false};
         int cores{1};
-        int64_t mem{0};
+        int64_t mem{0}; // reservation
+        std::shared_ptr<std::atomic<int64_t>> memory_now = std::make_shared<std::atomic<int64_t>>(0); // measured
         int done{0};
         std::string current;
     };

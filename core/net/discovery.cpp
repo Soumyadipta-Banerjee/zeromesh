@@ -1,18 +1,23 @@
 #include "net/discovery.hpp"
 
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
-#include <cstdio>
+#include <cerrno>
 #include <charconv>
 #include <cmath>
+#include <cstdio>
 #include <exception>
 #include <random>
+#include <set>
 #include <system_error>
 #include <vector>
 
@@ -393,6 +398,22 @@ std::optional<TeamKey> Discovery::Team() const {
     return team_;
 }
 
+std::vector<std::string> MulticastInterfaceAddresses() {
+    std::vector<std::string> out;
+    ifaddrs* list = nullptr;
+    if (getifaddrs(&list) != 0) return out;
+    for (const ifaddrs* i = list; i != nullptr; i = i->ifa_next) {
+        if (i->ifa_addr == nullptr || i->ifa_addr->sa_family != AF_INET) continue;
+        const unsigned flags = i->ifa_flags;
+        if (!(flags & IFF_UP) || !(flags & IFF_RUNNING) || !(flags & IFF_MULTICAST) || (flags & IFF_LOOPBACK)) continue;
+        char text[INET_ADDRSTRLEN] = {0};
+        inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in*>(i->ifa_addr)->sin_addr, text, sizeof(text));
+        if (std::find(out.begin(), out.end(), text) == out.end()) out.emplace_back(text);
+    }
+    freeifaddrs(list);
+    return out;
+}
+
 void Discovery::Send(const std::string& msg) const {
     const int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (sock < 0) return;
@@ -405,7 +426,20 @@ void Discovery::Send(const std::string& msg) const {
     sockaddr_in dest{};
     dest.sin_family = AF_INET;
     dest.sin_port = htons(static_cast<uint16_t>(config_.discovery_port));
-    if (inet_pton(AF_INET, config_.multicast_group.c_str(), &dest.sin_addr) == 1) {
+    if (inet_pton(AF_INET, config_.multicast_group.c_str(), &dest.sin_addr) != 1) {
+        close(sock);
+        return;
+    }
+    // Once out of every interface: the routing table alone would pick one network (the default
+    // route's) and peers on the others would never hear us. Receivers keep the first copy.
+    const auto interfaces = MulticastInterfaceAddresses();
+    for (const auto& addr : interfaces) {
+        in_addr ifa{};
+        if (inet_pton(AF_INET, addr.c_str(), &ifa) != 1) continue;
+        if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &ifa, sizeof(ifa)) != 0) continue;
+        sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+    }
+    if (interfaces.empty()) {
         sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
     }
     close(sock);
@@ -530,10 +564,29 @@ void Discovery::ListenerLoop() {
         return;
     }
 
-    ip_mreq mreq{};
-    inet_pton(AF_INET, config_.multicast_group.c_str(), &mreq.imr_multiaddr);
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+    // Listen on every interface's network, joining interfaces that come up later (Wi-Fi
+    // reconnecting, a VM bridge starting). The kernel drops a membership when its interface goes.
+    in_addr group{};
+    inet_pton(AF_INET, config_.multicast_group.c_str(), &group);
+    std::set<std::string> joined;
+    auto join = [&] {
+        auto current = MulticastInterfaceAddresses();
+        std::erase_if(joined, [&](const std::string& a) {
+            return std::find(current.begin(), current.end(), a) == current.end();
+        });
+        if (current.empty()) current.emplace_back("0.0.0.0"); // no interface yet: the default one
+        for (const auto& addr : current) {
+            if (joined.contains(addr)) continue;
+            ip_mreq mreq{};
+            mreq.imr_multiaddr = group;
+            inet_pton(AF_INET, addr.c_str(), &mreq.imr_interface);
+            if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) == 0 || errno == EADDRINUSE) {
+                joined.insert(addr);
+            }
+        }
+    };
+    join();
+    auto next_join = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 
     std::array<char, kMaxPacket + 1> buffer{};
     pollfd pfd{};
@@ -541,6 +594,10 @@ void Discovery::ListenerLoop() {
     pfd.events = POLLIN;
 
     while (running_.load()) {
+        if (std::chrono::steady_clock::now() >= next_join) {
+            join();
+            next_join = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        }
         if (poll(&pfd, 1, 200) <= 0) continue;
 
         sockaddr_in sender{};

@@ -227,6 +227,11 @@ def test_failures_carry_their_kind_and_resume_reruns_only_them(shared_zmd, tmp_d
     assert {r.id: r.failure.exit_code for r in run.failed}["exit-3"] == 3
     err = capsys.readouterr().err
     assert "FAILED  exit-3: exit" in err and "FAILED  noout: missing output" in err
+    r = run_pb2.ItemResult(id="x", failure=run_pb2.Failure(
+        kind=run_pb2.FAILURE_EXIT, message="exit 1",
+        stderr_tail=b"a.c:4:10: \x1b[01;31mfatal error: \x1b[mx.h: No such file\n    4 | #include <x.h>\n"
+                    b"      |          ^~~~~\ncompilation terminated.\n"))
+    assert report.describe(r) == "x: exit: exit 1: a.c:4:10: fatal error: x.h: No such file"
 
     rc, resumed = run_echo(shared_zmd, ws, out, "ok", extra=("--resume", run.id))
     assert rc == 1  # the same two items fail again

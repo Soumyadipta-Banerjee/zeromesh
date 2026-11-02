@@ -166,6 +166,18 @@ std::vector<pid_t> Descendants(pid_t root) {
     return out;
 }
 
+// Resident memory of the processes in `pids` together, in bytes.
+int64_t RssOf(const std::vector<pid_t>& pids) {
+    static const long page = sysconf(_SC_PAGESIZE);
+    int64_t total = 0;
+    for (pid_t p : pids) {
+        std::ifstream statm("/proc/" + std::to_string(p) + "/statm");
+        int64_t size = 0, resident = 0;
+        if (statm >> size >> resident) total += resident * page;
+    }
+    return total;
+}
+
 // User+system CPU of the processes in `pids`, in milliseconds.
 int64_t CpuMsOf(const std::vector<pid_t>& pids) {
     const long ticks = sysconf(_SC_CLK_TCK);
@@ -549,6 +561,7 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     uint64_t last_output_bytes = 0;
     int64_t last_cpu = -1;
     auto last_tick = start;
+    int64_t peak_mem = 0;
     bool exited = false;
     auto exited_at = start;
     bool timed_out = false, hung = false, terminating = false, killed = false;
@@ -594,6 +607,15 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
             if (auto u = cgroup::CpuUsageUsec(cg)) return static_cast<int64_t>(*u / 1000);
         }
         return CpuMsOf(Descendants(pid));
+    };
+    // The items' memory, sampled every tick: wait4 on bwrap reports only bwrap's own, never the
+    // sandboxed processes'. The cgroup's own figure when its memory controller is on (memory.peak
+    // replaces the samples at the end), else the resident memory of the processes together.
+    auto sample_memory = [&] {
+        std::optional<uint64_t> c = cg.empty() ? std::nullopt : cgroup::MemoryCurrent(cg);
+        const int64_t now_bytes = c ? static_cast<int64_t>(*c) : RssOf(task_pids());
+        peak_mem = std::max(peak_mem, now_bytes);
+        if (spec.memory_now) spec.memory_now->store(now_bytes);
     };
     auto begin_termination = [&] {
         if (terminating) return;
@@ -822,6 +844,7 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
             last_progress += now - last_tick;
         }
         last_tick = now;
+        sample_memory();
         scan_checkpoint();
         if (watch) {
             for (auto& p : watch->Poll(std::chrono::milliseconds(0)))
@@ -855,6 +878,9 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     int status = 0;
     struct rusage ru{};
     wait4(pid, &status, 0, &ru);
+    if (!cg.empty()) {
+        if (auto p = cgroup::MemoryPeak(cg)) peak_mem = std::max(peak_mem, static_cast<int64_t>(*p));
+    }
     const auto end = Clock::now();
     out_file.close();
     err_file.close();
@@ -917,7 +943,7 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         r.stderr_tail = err_tail;
         r.wall_ms = wall;
         r.cpu_ms = g.combined ? std::max<int64_t>(0, cpu - cpu_at_last_commit) : cpu;
-        r.peak_rss = static_cast<int64_t>(ru.ru_maxrss) * 1024;
+        r.peak_rss = std::max(peak_mem, static_cast<int64_t>(ru.ru_maxrss) * 1024);
         if (r.failure != ItemFailure::None && r.message.empty()) r.message = FailureWord(r.failure);
         if (cb.on_item) cb.on_item(std::move(r));
     }

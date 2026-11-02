@@ -11,6 +11,7 @@ Everything after the first ``--`` is the command; everything before it is zm-cc'
 
 from __future__ import annotations
 
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -25,7 +26,31 @@ from zm_cc.plan import (PlanError, build_plan, describe, entries_from_command, e
 # Build products never travel: the compiles do not read them, and a build directory inside the
 # workspace would otherwise ship every object of the last build.
 BUILD_PRODUCTS = ["*.o", "*.obj", "*.a", "*.so", "*.so.*", "*.d", "*.gch", "*.pch", "*.gcda", "*.gcno",
-                  "__pycache__/", "zm-out/", "zm-objs/"]
+                  ".ninja_deps", ".ninja_log", ".cache/", "__pycache__/", "zm-out/", "zm-objs/"]
+
+
+def binaries_under(root: Path, dirs: Sequence[Path]) -> list[str]:
+    """Anchored exclude patterns for the ELF files (programs, libraries, objects) in `dirs` and below:
+    a build directory's executables have no telling extension, and no compile reads one."""
+    root = root.resolve()
+    tops = sorted({d.resolve() for d in dirs})
+    tops = [d for d in tops if not any(t != d and t in d.parents for t in tops)]
+    found = []
+    for top in tops:
+        for dirpath, dirnames, files in os.walk(top):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            for name in files:
+                path = os.path.join(dirpath, name)
+                if os.path.islink(path) or any(c in name for c in "*?[]!#\\"):
+                    continue
+                try:
+                    with open(path, "rb") as f:
+                        if f.read(4) != b"\x7fELF":
+                            continue
+                except OSError:
+                    continue
+                found.append("/" + os.path.relpath(path, root))
+    return found
 
 
 class Cc(Adapter):
@@ -85,7 +110,9 @@ class Cc(Adapter):
             self.env = toolchain.host_env(remote)
 
     def workspace(self, a):
-        return Workspace(str(self.root or Path.cwd()), exclude=BUILD_PRODUCTS)
+        root = self.root or Path.cwd()
+        dirs = [u.directory for u in self.tus.remote_units]
+        return Workspace(str(root), exclude=BUILD_PRODUCTS + binaries_under(root, dirs))
 
     def items(self, a):
         for u in self.tus.remote_units:

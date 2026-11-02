@@ -19,6 +19,7 @@
 #include "store/merkle.hpp"
 #include "store/store.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -69,6 +70,9 @@ struct BatchRunSpec {
     std::string node_id;                // ZM_NODE_ID
     std::string tag;                    // names the batch to CgroupFor / SetFrozen
     bool stream_logs{false};
+    // Set: the running process's memory is stored here at every sample, so whoever admits work
+    // can tell how far a starting batch still is from the memory it will use.
+    std::shared_ptr<std::atomic<int64_t>> memory_now;
 };
 
 struct OutputEntry {

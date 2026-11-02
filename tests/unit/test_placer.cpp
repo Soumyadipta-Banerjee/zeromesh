@@ -97,7 +97,7 @@ TEST(PlacerReportsWhyNoNodeCanRunABatch) {
         placer->Execute("run/b1", ShBatch({{"x", "true"}}), {}, log.Callbacks());
         ASSERT_TRUE(log.Wait());
         ASSERT_TRUE(log.result.failure == v1::FAILURE_ENV_UNAVAILABLE);
-        Expect(log.result.message == "no node can run this batch", log.result.message);
+        Expect(log.result.message == "no node can run this batch: no node is online that may run it", log.result.message);
     }
     // A peer without the program: its reason is reported, and the kind says "software".
     b.Start();
@@ -239,6 +239,25 @@ TEST(PlacerExcludedNodesAreNotUsed) {
     placer->Execute("run/b1", ShBatch({{"x", "true"}}), {"node-b"}, log.Callbacks());
     ASSERT_TRUE(log.Wait());
     ASSERT_EQ(log.result.node, std::string("node-c"));
+
+    // Exclusion is a preference: when only excluded nodes could run it, they get it again.
+    AttemptLog again;
+    placer->Execute("run/b2", ShBatch({{"x", "true"}}), {"node-b", "node-c"}, again.Callbacks());
+    ASSERT_TRUE(again.Wait());
+    Expect(again.result.failure == v1::FAILURE_NONE, again.result.message);
+}
+
+TEST(PlacerSaysTheExcludedNodesLeftWhenNoneIsBack) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key);
+    a.Start();
+    AttemptLog log;
+    auto placer = PlacerFor(a);
+    placer->Execute("run/b1", ShBatch({{"x", "true"}}), {"node-gone"}, log.Callbacks());
+    ASSERT_TRUE(log.Wait());
+    // Not "software unavailable": the only node that could run it is gone.
+    ASSERT_TRUE(log.result.failure == v1::FAILURE_DONOR_LEFT);
+    Expect(log.result.message.find("node-gon: lost earlier in this run") != std::string::npos, log.result.message);
 }
 
 TEST(PlacerInFlightCapSpread) {
@@ -355,4 +374,42 @@ TEST(PlacerCountsSlotsForTheRunEngine) {
     v1::Resources gpu;
     gpu.set_gpus(1);
     ASSERT_EQ(placer->SlotsFor(gpu, v1::REMOTE_ONLY), 1); // no GPU donor: at least one slot
+}
+
+TEST(PlacerWaitsForADonorThatIsBusyNowButBigEnough) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    auto busy = b.AsPeer();
+    busy.mem_available = 100ull << 20; // its other work holds the memory this second
+    a.peers->Upsert(busy);
+    auto spec = ShBatch({{"x", "true"}});
+    spec.mutable_resources()->set_mem_bytes(1ll << 30);
+    AttemptLog log;
+    auto placer = PlacerFor(a);
+    placer->Execute("run/b1", spec, {}, log.Callbacks());
+    ASSERT_FALSE(log.Wait(std::chrono::milliseconds(800))); // waits: 8 GiB total is enough, given time
+    a.peers->Upsert(b.AsPeer());                             // the memory is free again
+    ASSERT_TRUE(log.Wait());
+    Expect(log.result.failure == v1::FAILURE_NONE, log.result.message);
+}
+
+TEST(PlacerSaysWhenNoDonorHasEnoughMemoryAtAll) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    a.peers->Upsert(b.AsPeer()); // 8 GiB
+    auto spec = ShBatch({{"x", "true"}});
+    spec.mutable_resources()->set_mem_bytes(16ll << 30);
+    AttemptLog log;
+    auto placer = PlacerFor(a);
+    placer->Execute("run/b1", spec, {}, log.Callbacks());
+    ASSERT_TRUE(log.Wait());
+    ASSERT_TRUE(log.result.failure == v1::FAILURE_ENV_UNAVAILABLE);
+    Expect(log.result.message.find("node-b: has 8192 MiB of memory, the batch needs 16384 MiB") != std::string::npos,
+           log.result.message);
 }

@@ -48,3 +48,15 @@ def test_usage_errors_return_2(tmp_path):
     empty = tmp_path / "cc.json"
     empty.write_text("[]", encoding="utf-8")
     assert zmcc("--dry-run", "--compdb", str(empty)) == 2
+
+
+def test_binaries_in_unit_directories_stay_out_of_the_workspace(tmp_path):
+    import shutil
+    from zm_cc.cli import binaries_under
+
+    build = tmp_path / "build"
+    (build / "sub").mkdir(parents=True)
+    shutil.copy("/bin/true", build / "prog")             # an executable with no extension
+    (build / "sub" / "gen.pb.h").write_text("// generated header\n")
+    shutil.copy("/bin/true", tmp_path / "elsewhere")     # outside every unit directory
+    assert binaries_under(tmp_path, [build, build / "sub"]) == ["/build/prog"]

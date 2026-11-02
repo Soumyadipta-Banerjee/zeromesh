@@ -512,6 +512,7 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
                         .arch = self.arch,
                         .missing_bytes = 0};
             c.gpus = self.gpus;
+            if (!for_reservation && c.mem_total > 0) c.mem_available = c.mem_total; // could it, given time?
             if (for_reservation) {
                 c.mem_committed = shared_->MemInFlightLocked(local_id_);
                 c.in_flight = shared_->InFlightLocked(local_id_);
@@ -537,6 +538,7 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
                         .missing_bytes = EstimatedMissingBytes(p.id, input_root_hash, input_tree_bytes),
                         .bandwidth_bytes_per_s = bandwidth_.Measured(p.id).value_or(0.0)};
             c.gpus = p.gpus;
+            if (!for_reservation && c.mem_total > 0) c.mem_available = c.mem_total; // could it, given time?
             if (for_reservation) {
                 c.mem_committed = shared_->MemInFlightLocked(p.id);
                 c.in_flight = shared_->InFlightLocked(p.id);
@@ -576,7 +578,8 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
         }
         shared_->cv.notify_all();
     };
-    // True when some node could take the batch if nothing were in flight: wait for capacity.
+    // True when some node could take the batch if nothing were in flight (memory against its total,
+    // not what is free this second): then the batch waits for capacity instead of failing.
     auto any_eligible = [&] {
         std::lock_guard lock(shared_->mu);
         return !Rank(need, candidates(false), input_tree_bytes, batch_s).empty();
@@ -590,20 +593,66 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             reachable = reachable || why.first != v1::REJECT_UNSPECIFIED;
             reasons += (reasons.empty() ? "" : "; ") + node.substr(0, 8) + ": " + why.second;
         }
+        // Nodes the run excluded for this batch (they were lost running it earlier) are the reason
+        // too: "software unavailable" with no reason would send the user looking at the wrong thing.
+        bool left = false;
+        for (const auto& node : batch->exclude) {
+            if (refused.contains(node) || batch->is_hedge) continue;
+            left = true;
+            reasons += (reasons.empty() ? "" : "; ") + node.substr(0, 8) + ": lost earlier in this run";
+        }
+        if (reasons.empty()) {
+            // Nobody refused: no node is big enough. Say which limit, per node.
+            auto mib = [](int64_t b) { return std::to_string(b >> 20) + " MiB"; };
+            std::vector<Candidate> all;
+            {
+                std::lock_guard lock(shared_->mu);
+                all = candidates(false);
+            }
+            for (const auto& c : all) {
+                if (c.is_local ? !need.may_local : !need.may_remote) continue;
+                std::string why;
+                if (mem > 0 && c.mem_total > 0 && static_cast<int64_t>(c.mem_total) < mem) {
+                    why = "has " + mib(static_cast<int64_t>(c.mem_total)) + " of memory, the batch needs " + mib(mem);
+                } else if (gpus > 0 && c.gpus < gpus) {
+                    why = "has " + std::to_string(c.gpus) + " GPU(s), the batch needs " + std::to_string(gpus);
+                } else if (!need.arch.empty() && c.arch != need.arch) {
+                    why = "is " + c.arch + ", the batch needs " + need.arch;
+                } else if (c.cores_total > 0 && c.cores_total < std::max(need.cores, 1)) {
+                    why = "has " + std::to_string(c.cores_total) + " cores, the batch needs " + std::to_string(need.cores);
+                }
+                if (!why.empty()) reasons += (reasons.empty() ? "" : "; ") + c.node_id.substr(0, 8) + ": " + why;
+            }
+            if (reasons.empty()) reasons = "no node is online that may run it";
+        }
         v1::FailureKind kind = v1::FAILURE_ENV_UNAVAILABLE;
         if (toolchain && !env) kind = v1::FAILURE_TOOLCHAIN_MISMATCH;
-        if (!refused.empty() && !reachable) kind = v1::FAILURE_DONOR_LEFT;
+        if ((!refused.empty() || left) && !reachable) kind = v1::FAILURE_DONOR_LEFT;
         return Done(local_id_, kind, "no node can run this batch" + (reasons.empty() ? std::string() : ": " + reasons));
     };
 
     std::optional<std::vector<v1::Digest>> needed;
+    bool relaxed = false; // the run's exclusions were lifted because nothing else could run it
     for (;;) {
         if (batch->cancelled) return void(EndAttempt(batch, Done(local_id_, v1::FAILURE_CANCELLED, "cancelled", true)));
         auto reserved = reserve_next();
         if (!reserved) {
             // A hedge only takes a slot that is free now; it never queues behind real work.
             if (batch->is_hedge) return void(EndAttempt(batch, Done(local_id_, v1::FAILURE_CANCELLED, "no free slot", true)));
-            if (!any_eligible()) return void(EndAttempt(batch, unplaceable()));
+            if (!any_eligible()) {
+                // Excluded nodes were lost running this batch before. With nothing else left they
+                // may well be back (a stall, not a departure): try them once more rather than fail
+                // work a recovered node can do. Hedges never come here (above).
+                if (!relaxed && !batch->exclude.empty()) {
+                    relaxed = true;
+                    for (const auto& n : batch->exclude) {
+                        if (!refused.contains(n)) skip.erase(n);
+                    }
+                    tried.clear();
+                    continue;
+                }
+                return void(EndAttempt(batch, unplaceable()));
+            }
             tried.clear();
             std::unique_lock wait_lock(shared_->mu);
             shared_->cv.wait_for(wait_lock, kPlacementRecheck);

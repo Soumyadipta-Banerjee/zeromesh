@@ -3,9 +3,12 @@
 #include "net/peer_table.hpp"
 #include "net/team.hpp"
 
+#include <arpa/inet.h>
+
 #include <chrono>
 #include <memory>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -185,4 +188,15 @@ TEST(DiscoveryLoopbackOtherTeam) {
     std::this_thread::sleep_for(std::chrono::seconds(3));
     ASSERT_EQ(table_a->Count(), 0u);
     ASSERT_EQ(table_b->Count(), 0u);
+}
+
+TEST(DiscoveryUsesEveryUpMulticastInterfaceButLoopback) {
+    const auto addrs = zeromesh::net::MulticastInterfaceAddresses();
+    std::set<std::string> seen;
+    for (const auto& a : addrs) {
+        in_addr parsed{};
+        ASSERT_TRUE(inet_pton(AF_INET, a.c_str(), &parsed) == 1);
+        ASSERT_FALSE(a.rfind("127.", 0) == 0);
+        ASSERT_TRUE(seen.insert(a).second); // each address once
+    }
 }

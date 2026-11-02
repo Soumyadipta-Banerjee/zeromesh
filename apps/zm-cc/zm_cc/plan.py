@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from zm_cc.flags import Command, Source, expand_response_files, parse
+from zm_cc.flags import Command, Source, expand_response_files, parse, strip_launcher
 
 Which = Callable[[str], Optional[str]]
 
@@ -221,7 +221,7 @@ def build_plan(
     units: list[Unit] = []
     seen: dict[str, tuple[str, ...]] = {}
     for entry_index, entry in enumerate(entries):
-        argv = expand_response_files(list(entry.argv), entry.directory)
+        argv = strip_launcher(expand_response_files(list(entry.argv), entry.directory))
         if not argv:
             raise PlanError("empty compiler command")
         cmd = parse(argv)

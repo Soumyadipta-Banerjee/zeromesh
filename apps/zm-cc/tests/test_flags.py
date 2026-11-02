@@ -199,3 +199,12 @@ def test_response_file_cycle_terminates(tmp_path):
     (tmp_path / "loop.rsp").write_text("@loop.rsp -O2\n", encoding="utf-8")
     out = expand_response_files(["cc", "@loop.rsp"], tmp_path)
     assert "-O2" in out
+
+
+def test_compiler_launchers_are_not_the_compiler():
+    from zm_cc.flags import strip_launcher
+
+    assert strip_launcher(["/usr/bin/ccache", "c++", "-c", "a.cc"]) == ["c++", "-c", "a.cc"]
+    assert strip_launcher(["sccache", "ccache", "gcc", "-c", "a.c"]) == ["gcc", "-c", "a.c"]
+    assert strip_launcher(["ccache"]) == ["ccache"]
+    assert strip_launcher(["gcc", "-c", "a.c"]) == ["gcc", "-c", "a.c"]

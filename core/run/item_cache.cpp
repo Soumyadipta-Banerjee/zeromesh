@@ -117,8 +117,13 @@ void ItemCache::Prune() {
     for (const auto& key : cas_->ListActionResults()) {
         auto raw = cas_->GetActionResult(key);
         if (!raw) continue;
-        v1::WeakFootprints list;
-        if (list.ParseFromString(*raw) && !list.weak().empty() && FootprintsKey(list.weak()) == key) continue;
+        // A footprints record is the only kind whose key derives from its first field, the 64-hex
+        // weak key (field 1, length 64: bytes 0x0a 0x40). Recognised exactly, it is never parsed as
+        // the other kind, which would read binary into a string field.
+        if (raw->size() >= 66 && (*raw)[0] == '\x0a' && (*raw)[1] == '\x40') {
+            const std::string weak = raw->substr(2, 64);
+            if (store::CasStore::IsValidHash(weak) && FootprintsKey(weak) == key) continue;
+        }
         v1::CachedItem item;
         if (!item.ParseFromString(*raw) || !Complete(item)) cas_->RemoveActionResult(key);
     }

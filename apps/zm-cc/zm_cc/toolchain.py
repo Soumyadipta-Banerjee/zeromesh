@@ -40,8 +40,9 @@ def search_dirs(driver: str, family: str) -> list[str]:
 
 def capture_env(units: Sequence[Unit], workspace: Path) -> Env:
     """The compiler captured here: one real compile per (compiler, language) under a trace takes the
-    driver, cc1/cc1plus/f951, the assembler and their libraries; the header search list is taken
-    whole, because other units include headers this one does not."""
+    driver, cc1/cc1plus/f951, the assembler and their libraries; the header search list and the
+    include directories the commands name outside the workspace are taken whole, because other
+    units include headers this one does not."""
     probes: list[list[str]] = []
     paths: set[str] = set()
     seen: set[tuple[str, str]] = set()
@@ -58,4 +59,11 @@ def capture_env(units: Sequence[Unit], workspace: Path) -> Env:
         argv = u.command.compile_argv(u.source, u.driver_local, obj)
         probes.append(["/bin/sh", "-c", f"cd {shlex.quote(str(u.directory))} && exec {shlex.join(argv)}"])
         paths.update(d for d in search_dirs(u.driver_local, family) if d != ws and not d.startswith(ws + os.sep))
+    # Include directories the commands name outside the workspace (an SDK in /opt, a prefix in $HOME):
+    # the donor has none of them.
+    for u in units:
+        for v in u.command.path_values():
+            d = os.path.realpath(v if os.path.isabs(v) else os.path.join(u.directory, v))
+            if os.path.isdir(d) and d != ws and not d.startswith(ws + os.sep):
+                paths.add(d)
     return Env.capture(probes, sorted(paths))

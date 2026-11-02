@@ -132,9 +132,10 @@ std::vector<LocalExecutor::Active> LocalExecutor::ListActive() const {
     return out;
 }
 
-// A batch that declares memory starts only when that much is free (plus headroom), and no sooner
-// than kStartSpacing after the previous start so free memory can catch up. The first batch always
-// runs, so an undersized node still makes progress.
+// A batch that reserves memory starts only when that much is free, plus headroom, plus what the
+// running batches have yet to grow into (their reservation minus what they use now: a compiler
+// that just started looks small and will not stay so). No sooner than kStartSpacing after the
+// previous start. The first batch always runs, so an undersized node still makes progress.
 bool LocalExecutor::MemoryAllowsLocked(const Item& item) const {
     if (item.mem <= 0 || mem_in_use_ == 0) return true;
     if (std::chrono::steady_clock::now() - last_start_ < kStartSpacing) return false;
@@ -142,7 +143,12 @@ bool LocalExecutor::MemoryAllowsLocked(const Item& item) const {
     if (m.available == UINT64_MAX) return true;
     const uint64_t headroom = std::clamp(static_cast<uint64_t>(static_cast<double>(m.total) * kMemoryHeadroomShare),
                                          kMemoryHeadroomFloor, kMemoryHeadroomCeil);
-    return m.available >= static_cast<uint64_t>(item.mem) + headroom;
+    uint64_t growth = 0;
+    for (const auto& [id, running] : items_) {
+        if (!running->started) continue;
+        growth += static_cast<uint64_t>(std::max<int64_t>(running->mem - running->memory_now->load(), 0));
+    }
+    return m.available >= static_cast<uint64_t>(item.mem) + headroom + growth;
 }
 
 void LocalExecutor::Worker(std::stop_token st) {
@@ -259,6 +265,7 @@ BatchDone LocalExecutor::Run(Item& item) {
         }
         rs.node_id = node_id_;
         rs.tag = item.batch_id;
+        rs.memory_now = item.memory_now;
         rs.stream_logs = spec.stream_logs();
 
         exec::BatchCallbacks cb;

@@ -230,8 +230,15 @@ grpc::Status ClientService::Snapshot(grpc::ServerContext*, const v1::SnapshotReq
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return Invalid("snapshot path is not a directory: " + root.string());
 
-    const store::IgnoreRules ignore =
-        store::IgnoreRules::ForRoot(root, std::vector<std::string>(req->exclude().begin(), req->exclude().end()));
+    std::vector<std::string> exclude(req->exclude().begin(), req->exclude().end());
+    // This daemon's own state (its store above all) never goes into a snapshot that contains it:
+    // it would ship the store, and grow it by itself on every snapshot.
+    if (!options_.state_dir.empty()) {
+        const fs::path state = fs::weakly_canonical(options_.state_dir, ec);
+        const fs::path rel = state.lexically_relative(fs::weakly_canonical(root, ec));
+        if (!rel.empty() && *rel.begin() != ".." && rel != ".") exclude.push_back("/" + rel.generic_string() + "/");
+    }
+    const store::IgnoreRules ignore = store::IgnoreRules::ForRoot(root, exclude);
     const store::IgnoreRules deny = store::DenyRules();
     if (!req->force_large()) {
         uint64_t total = 0;

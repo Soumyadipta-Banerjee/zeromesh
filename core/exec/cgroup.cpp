@@ -182,6 +182,23 @@ std::optional<uint64_t> CpuUsageUsec(const fs::path& dir) {
     return ReadKeyed(dir / "cpu.stat", "usage_usec");
 }
 
+namespace {
+std::optional<uint64_t> ReadNumber(const fs::path& file) {
+    std::ifstream in(file);
+    uint64_t v = 0;
+    if (in >> v) return v;
+    return std::nullopt;
+}
+} // namespace
+
+std::optional<uint64_t> MemoryCurrent(const fs::path& dir) {
+    return ReadNumber(dir / "memory.current");
+}
+
+std::optional<uint64_t> MemoryPeak(const fs::path& dir) {
+    return ReadNumber(dir / "memory.peak");
+}
+
 std::vector<pid_t> Procs(const fs::path& dir) {
     std::vector<pid_t> out;
     std::ifstream in(dir / "cgroup.procs");

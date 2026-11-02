@@ -381,3 +381,15 @@ TEST(BatchReportsOomAsItsOwnKind) {
     f.Run(spec);
     ASSERT_TRUE(f.results["hog"].failure == ItemFailure::Oom);
 }
+
+TEST(BatchMeasuresTheItemsMemoryNotTheSandboxes) {
+    Fixture f;
+    if (!f.Usable()) return;
+    auto spec = f.Spec();
+    // 200 MiB touched and held for a second, in a grandchild of the sandbox (sh -> python3).
+    spec.items = {Fixture::Sh("big", "python3 -c 'import time; b = bytearray(200 << 20); b[::4096] = b\"x\" * len(b[::4096]); time.sleep(1)'")};
+    f.Run(spec);
+    ASSERT_TRUE(f.results["big"].failure == ItemFailure::None);
+    // wait4 on bwrap saw about 2 MiB; the items' processes held over 200 MiB.
+    ASSERT_TRUE(f.results["big"].peak_rss >= (190ll << 20));
+}

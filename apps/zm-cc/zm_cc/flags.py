@@ -419,6 +419,19 @@ def parse(argv: Sequence[str]) -> Command:
     )
 
 
+# Programs that run the compiler named after them (CMake's *_COMPILER_LAUNCHER, meson with ccache).
+# A donor compiles without them: the team's cache stands in for theirs.
+_LAUNCHERS = frozenset({"ccache", "sccache", "distcc", "icecc", "buildcache"})
+
+
+def strip_launcher(argv: Sequence[str]) -> list[str]:
+    """``argv`` without a leading compiler launcher (``ccache c++ -c a.cc`` -> ``c++ -c a.cc``)."""
+    out = list(argv)
+    while len(out) > 1 and PurePath(out[0]).name in _LAUNCHERS:
+        out = out[1:]
+    return out
+
+
 def expand_response_files(argv: Sequence[str], base: os.PathLike | str, _depth: int = 0) -> list[str]:
     """Replace ``@file`` tokens with the words in ``file`` (relative to ``base``), as gcc does."""
     out: list[str] = []

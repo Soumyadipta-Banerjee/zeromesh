@@ -43,6 +43,9 @@ void Join(const std::filesystem::path& dir);
 bool SetFrozen(const std::filesystem::path& dir, bool frozen);
 // Total CPU time of the cgroup (cpu.stat usage_usec), present even without the cpu controller.
 [[nodiscard]] std::optional<uint64_t> CpuUsageUsec(const std::filesystem::path& dir);
+// Memory of the cgroup now (memory.current) and the most it has used (memory.peak, Linux 5.19+).
+[[nodiscard]] std::optional<uint64_t> MemoryCurrent(const std::filesystem::path& dir);
+[[nodiscard]] std::optional<uint64_t> MemoryPeak(const std::filesystem::path& dir);
 [[nodiscard]] std::vector<pid_t> Procs(const std::filesystem::path& dir);
 // SIGKILLs every process in the cgroup at once (cgroup.kill); false when unsupported.
 bool KillAll(const std::filesystem::path& dir);

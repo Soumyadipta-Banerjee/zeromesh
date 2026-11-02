@@ -20,6 +20,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace zeromesh::net {
 
@@ -77,6 +78,11 @@ std::string FormatDrain(const DrainFields&, const TeamKey&);
 std::optional<DrainNotice> ParseDrain(std::string_view packet, const TeamKey&, std::string_view self_node_id);
 
 [[nodiscard]] bool TimestampAcceptable(int64_t unix_ms, std::chrono::milliseconds max_skew = kDiscoveryReplaySkew);
+
+// The IPv4 addresses of every up, multicast-capable, non-loopback interface (Wi-Fi, Ethernet,
+// virtual bridges, VPNs). Discovery announces on and listens to each, so a machine on several
+// networks finds peers on all of them.
+std::vector<std::string> MulticastInterfaceAddresses();
 
 // Per-sender replay filter: monotonic seq per boot_id; a new boot_id is accepted only
 // when the packet timestamp is within the skew window.
