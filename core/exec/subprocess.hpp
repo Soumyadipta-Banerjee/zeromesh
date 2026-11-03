@@ -35,4 +35,10 @@ struct CommandResult {
 // and dispositions, so a daemon that blocks signals for signalfd does not pass that on.
 CommandResult RunCommand(const std::vector<std::string>& argv, const CommandOptions& opts = {});
 
+// In a child the daemon forked, before exec: every signal back to its default disposition and
+// none blocked, as RunCommand starts its commands. exec keeps both, and zmd blocks SIGINT and
+// SIGTERM for its signalfd while nohup or a shell may have left signals ignored: a program started
+// with them never sees the SIGTERM that asks it to stop. Async-signal-safe.
+void DefaultSignalsInChild();
+
 } // namespace zeromesh::exec

@@ -102,4 +102,15 @@ CommandResult RunCommand(const std::vector<std::string>& argv, const CommandOpti
     return r;
 }
 
+void DefaultSignalsInChild() {
+    struct sigaction dfl{};
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    // SIGKILL, SIGSTOP and the C library's own signals refuse: harmless.
+    for (int sig = 1; sig < NSIG; ++sig) sigaction(sig, &dfl, nullptr);
+    sigset_t none;
+    sigemptyset(&none);
+    sigprocmask(SIG_SETMASK, &none, nullptr);
+}
+
 } // namespace zeromesh::exec

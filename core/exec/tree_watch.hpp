@@ -21,6 +21,8 @@ public:
     TreeWatch& operator=(const TreeWatch&) = delete;
 
     [[nodiscard]] bool ok() const { return fd_ >= 0; }
+    // Readable when something happened under the root: for a caller's own poll(). -1 when !ok().
+    [[nodiscard]] int fd() const { return fd_; }
 
     // Paths (relative to the root) finished since the last call; waits up to `timeout`.
     std::vector<std::string> Poll(std::chrono::milliseconds timeout);

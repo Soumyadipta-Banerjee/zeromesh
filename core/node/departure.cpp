@@ -37,6 +37,7 @@ pid_t Spawn(const std::string& cmd, int* out_fd) {
     }
     if (pid == 0) {
         setpgid(0, 0);
+        exec::DefaultSignalsInChild(); // or the SIGTERM that releases the inhibitor is never seen
         const int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
             dup2(devnull, STDIN_FILENO);

@@ -13,6 +13,7 @@
 #include <sodium.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -33,7 +34,12 @@ namespace {
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 
+// Paces what is checked over time while an item runs (checkpoints, a hang, the timeout,
+// cancellation). Output, the item's end and a combined batch's finished outputs wake the runner.
 constexpr auto kTick = std::chrono::milliseconds(200);
+// After the item's process ends, how long a process it handed its stdout or stderr to may keep
+// them open: the end of its output is waited for no longer.
+constexpr auto kPipeGrace = std::chrono::seconds(2);
 constexpr size_t kMaxIdBytes = 200;
 // A forked child that cannot enter its cgroup exits with this, saying so, instead of running
 // uncontained.
@@ -518,6 +524,9 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
             (void)!write(STDERR_FILENO, "\n", 1);
             _exit(kUncontainedExit);
         }
+        // bwrap passes the mask and ignored signals on: the item must see the SIGTERM that asks it
+        // to save its checkpoint and stop.
+        DefaultSignalsInChild();
         execv(cargv[0], cargv.data());
         _exit(127);
     }
@@ -525,6 +534,17 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     close(procs_fd);
     close(out_pipe[1]);
     close(err_pipe[1]);
+    // Readable once the process has ended: the loop below sees its end at once.
+    const int pidfd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+    if (pidfd < 0) {
+        const std::string why = std::strerror(errno);
+        kill(pid, SIGKILL); // bwrap; the sandbox dies with it and the cgroup's removal takes the rest
+        waitpid(pid, nullptr, 0);
+        close(out_pipe[0]);
+        close(err_pipe[0]);
+        fail_all(ItemFailure::Sandbox, "cannot watch the item's process: " + why);
+        return;
+    }
     // Known to StopYoungestForMemory while it runs.
     const auto stopped_for_memory = std::make_shared<std::atomic<bool>>(false);
     uint64_t live_id = 0;
@@ -549,8 +569,6 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     std::ofstream out_file(g.dir / "stdout", std::ios::binary);
     std::ofstream err_file(g.dir / "stderr", std::ios::binary);
     std::string out_tail, err_tail;
-    pollfd fds[2] = {{out_pipe[0], POLLIN, 0}, {err_pipe[0], POLLIN, 0}};
-    int open_fds = 2;
     char buf[65536];
     uint64_t output_bytes = 0;
 
@@ -789,38 +807,47 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     };
 
     // ---- the loop ----
+    // Woken by output, by the process's end and by a combined batch's finished outputs; otherwise
+    // by the tick.
+    enum { kOut, kErr, kEnd, kWatch };
+    pollfd fds[4] = {{out_pipe[0], POLLIN, 0},
+                     {err_pipe[0], POLLIN, 0},
+                     {pidfd, POLLIN, 0},
+                     {watch ? watch->fd() : -1, POLLIN, 0}}; // poll() skips a negative fd
+    int open_pipes = 2;
     for (;;) {
-        if (open_fds > 0) {
-            if (poll(fds, 2, 100) > 0) {
-                for (int i = 0; i < 2; ++i) {
-                    if (fds[i].fd < 0 || !(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
-                    ssize_t n = read(fds[i].fd, buf, sizeof(buf));
-                    if (n > 0) {
-                        const std::string_view chunk(buf, static_cast<size_t>(n));
-                        output_bytes += static_cast<uint64_t>(n);
-                        (i == 0 ? out_file : err_file).write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-                        AppendTail(i == 0 ? out_tail : err_tail, chunk);
-                        if (spec.stream_logs && cb.on_log) cb.on_log(first.id, i + 1, chunk);
-                    } else {
-                        close(fds[i].fd);
-                        fds[i].fd = -1;
-                        --open_fds;
-                    }
+        auto wake = last_tick + kTick;
+        if (exited) wake = std::min(wake, exited_at + kPipeGrace);
+        const auto wait = std::chrono::ceil<std::chrono::milliseconds>(wake - Clock::now()).count();
+        if (poll(fds, 4, static_cast<int>(std::max<int64_t>(wait, 0))) > 0) {
+            for (int i : {kOut, kErr}) {
+                if (fds[i].fd < 0 || !(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+                ssize_t n = read(fds[i].fd, buf, sizeof(buf));
+                if (n > 0) {
+                    const std::string_view chunk(buf, static_cast<size_t>(n));
+                    output_bytes += static_cast<uint64_t>(n);
+                    (i == kOut ? out_file : err_file).write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+                    AppendTail(i == kOut ? out_tail : err_tail, chunk);
+                    if (spec.stream_logs && cb.on_log) cb.on_log(first.id, i == kOut ? 1 : 2, chunk);
+                } else {
+                    close(fds[i].fd);
+                    fds[i].fd = -1;
+                    --open_pipes;
                 }
             }
-        } else {
-            usleep(50 * 1000);
-        }
-        const auto now = Clock::now();
-        if (!exited) {
-            siginfo_t info{};
-            if (waitid(P_PID, static_cast<id_t>(pid), &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == pid) {
+            if (fds[kEnd].fd >= 0 && (fds[kEnd].revents & POLLIN)) {
                 exited = true;
-                exited_at = now;
+                exited_at = Clock::now();
+                fds[kEnd].fd = -1; // closed after the loop
+            }
+            if (fds[kWatch].fd >= 0 && (fds[kWatch].revents & POLLIN)) {
+                for (auto& p : watch->Poll(std::chrono::milliseconds(0)))
+                    finished_paths.insert(fs::path(p).lexically_normal().string());
+                commit_ready(capture_item);
             }
         }
-        if (exited && (open_fds == 0 || now - exited_at > std::chrono::seconds(2)))
-            break; // a grandchild may hold the pipes
+        const auto now = Clock::now();
+        if (exited && (open_pipes == 0 || now - exited_at >= kPipeGrace)) break;
         if (now - last_tick < kTick) continue;
 
         // Frozen time is not running time: it counts neither against the timeout nor as a hang.
@@ -830,11 +857,6 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         }
         last_tick = now;
         scan_checkpoint();
-        if (watch) {
-            for (auto& p : watch->Poll(std::chrono::milliseconds(0)))
-                finished_paths.insert(fs::path(p).lexically_normal().string());
-            commit_ready(capture_item);
-        }
         if (spec.hung_after.count() > 0 && !terminating) {
             const int64_t cpu = cpu_ms_now();
             if (cpu != last_cpu || output_bytes != last_output_bytes) {
@@ -856,9 +878,10 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
         }
         if (terminating && !killed && now - term_started >= spec.term_grace) hard_kill();
     }
-    for (int i = 0; i < 2; ++i) {
+    for (int i : {kOut, kErr}) {
         if (fds[i].fd >= 0) close(fds[i].fd);
     }
+    close(pidfd);
     int status = 0;
     waitpid(pid, &status, 0);
     const auto end = Clock::now();

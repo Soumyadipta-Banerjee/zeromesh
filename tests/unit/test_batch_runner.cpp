@@ -8,6 +8,8 @@
 #include "exec/tree_watch.hpp"
 #include "plugins/env-host/env_host.hpp"
 
+#include <signal.h>
+
 #include <atomic>
 #include <chrono>
 #include <map>
@@ -84,6 +86,28 @@ struct Fixture {
             return false;
         }
         return true;
+    }
+};
+
+// While it lives, this thread's signals are as in zmd: SIGINT and SIGTERM blocked for its
+// signalfd, SIGHUP ignored as nohup leaves it.
+struct SignalsAsInZmd {
+    sigset_t old_mask{};
+    struct sigaction old_hup{};
+
+    SignalsAsInZmd() {
+        sigset_t sigs;
+        sigemptyset(&sigs);
+        sigaddset(&sigs, SIGINT);
+        sigaddset(&sigs, SIGTERM);
+        pthread_sigmask(SIG_BLOCK, &sigs, &old_mask);
+        struct sigaction ignore{};
+        ignore.sa_handler = SIG_IGN;
+        sigaction(SIGHUP, &ignore, &old_hup);
+    }
+    ~SignalsAsInZmd() {
+        sigaction(SIGHUP, &old_hup, nullptr);
+        pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
     }
 };
 
@@ -305,16 +329,30 @@ TEST(BatchCancelSendsSigtermAndKeepsTheCheckpoint) {
     if (!f.Usable()) return;
     auto spec = f.Spec();
     spec.term_grace = 5s;
-    // On SIGTERM the item saves its progress atomically and exits.
-    auto it = Fixture::Sh("long", "trap 'echo 41 > $ZM_CHECKPOINT_DIR/.tmp && mv $ZM_CHECKPOINT_DIR/.tmp "
-                                  "$ZM_CHECKPOINT_DIR/progress; exit 0' TERM; while true; do sleep 0.1; done");
+    // On SIGTERM the item saves its progress atomically and exits. A program with its own handler,
+    // as a solver is: a shell clears the signal mask it was started with, a program does not.
+    ItemSpec it;
+    it.id = "long";
+    it.argv = {"python3", "-c",
+               "import os, signal, sys, time\n"
+               "def save(*_):\n"
+               "    d = os.environ['ZM_CHECKPOINT_DIR']\n"
+               "    open(d + '/.tmp', 'w').write('41\\n')\n"
+               "    os.rename(d + '/.tmp', d + '/progress')\n"
+               "    sys.exit(0)\n"
+               "signal.signal(signal.SIGTERM, save)\n"
+               "while True: time.sleep(0.1)\n"};
     spec.items = {it, Fixture::Sh("never", "true")};
     std::stop_source stop;
     std::thread canceller([&] {
         std::this_thread::sleep_for(800ms);
         stop.request_stop();
     });
-    auto r = f.Run(spec, stop.get_token());
+    zeromesh::exec::BatchRunResult r;
+    {
+        const SignalsAsInZmd as_in_zmd; // the item sees the SIGTERM all the same
+        r = f.Run(spec, stop.get_token());
+    }
     canceller.join();
     ASSERT_TRUE(r.cancelled);
     ASSERT_TRUE(f.results.empty()); // neither item reached an outcome
@@ -335,6 +373,21 @@ TEST(BatchCancelSendsSigtermAndKeepsTheCheckpoint) {
     spec2.items = {resume};
     g.Run(spec2);
     ASSERT_EQ(g.Output("long", "out.txt"), "41\n");
+}
+
+TEST(BatchItemStartsWithNoSignalBlockedOrIgnored) {
+    Fixture f;
+    if (!f.Usable()) return;
+    auto spec = f.Spec();
+    ItemSpec it;
+    it.id = "sigs";
+    it.argv = {"grep", "-E", "^Sig(Blk|Ign):", "/proc/self/status"}; // no shell between: the item itself
+    spec.items = {it};
+    {
+        const SignalsAsInZmd as_in_zmd;
+        f.Run(spec);
+    }
+    ASSERT_EQ(f.results["sigs"].stdout_tail, "SigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\n");
 }
 
 TEST(BatchTimeoutAndHungAreTheirOwnKinds) {
