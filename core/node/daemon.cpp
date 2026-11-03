@@ -649,9 +649,11 @@ int Daemon::Run() {
 
         // Reclaim CAS toward 90% of the cap. Protected digests are inputs and fresh outputs of live
         // runs and batches. Idle input trees go first: their hard links would keep blobs alive.
+        // Garbage collection every 5 minutes; the store made durable every 10 seconds (what a machine
+        // that goes down loses is checked at the next start).
         gc_thread = std::thread([&]() {
-            while (!admit_stop.load()) {
-                if (cas) {
+            for (int tick = 0; !admit_stop.load(); ++tick) {
+                if (cas && tick % 300 == 0) {
                     const uint64_t target = cas->MaxBlobBytes() * 9 / 10;
                     std::unordered_set<std::string> protect;
                     if (node_service) {
@@ -662,11 +664,10 @@ int Daemon::Run() {
                         for (const auto& h : engine->ProtectedBlobHashes()) protect.insert(h);
                     }
                     cas->CollectGarbage(target, protect);
+                    if (cache) cache->Prune();
                 }
-                if (cache) cache->Prune();
-                for (int i = 0; i < 300 && !admit_stop.load(); ++i) {
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                }
+                if (cas && tick % 10 == 0) cas->Flush();
+                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         });
 
@@ -750,6 +751,7 @@ int Daemon::Run() {
         clients.clear();
     }
     local_executor.reset(); // kills running sandboxes and joins its workers
+    if (cas) cas->Flush();  // nothing writes any more: a clean stop leaves nothing to check at the next start
     discovery.reset();
     team.reset();
     pins.reset();

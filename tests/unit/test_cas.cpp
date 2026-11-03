@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -190,4 +191,87 @@ TEST(CasConcurrentPutAndGc_Integrity) {
     stop = true;
     gc_thread.join();
     ASSERT_EQ(integrity_failures.load(), 0);
+}
+
+namespace {
+
+int64_t UnixMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string ThisBoot() {
+    std::ifstream in("/proc/sys/kernel/random/boot_id");
+    std::string id;
+    std::getline(in, id);
+    return id;
+}
+
+void SetAge(const std::filesystem::path& p, std::chrono::seconds age) {
+    std::filesystem::last_write_time(p, std::filesystem::file_time_type::clock::now() - age);
+}
+
+} // namespace
+
+TEST(CasStoreChecksWhatAMachineThatWentDownWroteAfterItsLastRecord) {
+    zeromesh::testing::TempDir d;
+    const auto dir = d / "cas";
+    const std::string key(64, 'a');
+    zeromesh::store::Digest old, good, torn;
+    {
+        zeromesh::store::CasStore store(dir);
+        old = store.PutBlob("written long before");
+        good = store.PutBlob("written after the record, intact");
+        torn = store.PutBlob("written after the record, torn when the machine went down");
+        ASSERT_TRUE(store.PutActionResult(key, "an entry written after the record", true));
+        store.Flush();
+    }
+    SetAge(dir / "blobs" / old.hash, std::chrono::hours(1));
+    // The last record is ten minutes old and from another boot; one blob lost its bytes.
+    std::ofstream(dir / "durable", std::ios::trunc) << "another-boot " << UnixMs() - 600'000 << "\n";
+    std::ofstream(dir / "blobs" / torn.hash, std::ios::trunc) << "";
+
+    zeromesh::store::CasStore store(dir);
+    ASSERT_TRUE(store.HasBlob(old.hash));        // older than the record: synced then
+    ASSERT_TRUE(store.HasBlob(good.hash));       // re-hashed and kept
+    ASSERT_FALSE(store.HasBlob(torn.hash));      // re-hashed and dropped
+    ASSERT_FALSE(store.GetActionResult(key));    // cannot be checked: dropped
+    std::ifstream record(dir / "durable");
+    std::string boot;
+    record >> boot;
+    ASSERT_EQ(boot, ThisBoot()); // this run's writes are covered from now on
+}
+
+TEST(CasStoreChecksNothingAfterARestartInTheSameBoot) {
+    zeromesh::testing::TempDir d;
+    const auto dir = d / "cas";
+    zeromesh::store::Digest blob;
+    {
+        zeromesh::store::CasStore store(dir);
+        blob = store.PutBlob("kept by the kernel across a process restart");
+    }
+    std::ofstream(dir / "durable", std::ios::trunc) << ThisBoot() << " " << UnixMs() - 600'000 << "\n";
+    std::ofstream(dir / "blobs" / blob.hash, std::ios::app) << "x"; // would fail a check
+    zeromesh::store::CasStore store(dir);
+    ASSERT_TRUE(store.HasBlob(blob.hash)); // not re-hashed: nothing was lost
+}
+
+TEST(CasPresenceChecksStampABlobAtMostOncePerInterval) {
+    zeromesh::testing::TempDir d;
+    const auto dir = d / "cas";
+    zeromesh::store::Digest blob;
+    {
+        zeromesh::store::CasStore store(dir);
+        blob = store.PutBlob("checked often");
+    }
+    const auto path = dir / "blobs" / blob.hash;
+    SetAge(path, std::chrono::hours(1));
+    zeromesh::store::CasStore store(dir); // its recency, from the mtime, is an hour old
+    ASSERT_TRUE(store.HasBlob(blob.hash));
+    ASSERT_TRUE(std::filesystem::file_time_type::clock::now() - std::filesystem::last_write_time(path) <
+                std::chrono::minutes(1)); // stamped once
+    SetAge(path, std::chrono::hours(1));
+    for (int i = 0; i < 100; ++i) ASSERT_TRUE(store.HasBlob(blob.hash));
+    ASSERT_TRUE(std::filesystem::file_time_type::clock::now() - std::filesystem::last_write_time(path) >
+                std::chrono::minutes(30)); // and not again within the interval
 }

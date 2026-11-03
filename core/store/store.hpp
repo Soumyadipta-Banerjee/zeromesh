@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -46,6 +47,13 @@ public:
     // Non-copyable
     CasStore(const CasStore&) = delete;
     CasStore& operator=(const CasStore&) = delete;
+
+    // Makes what was written so far durable (one syncfs of the store's file system) and records it,
+    // when anything was written since the last call. Writes are committed by an atomic rename with
+    // no fsync each: after the machine went down without a later record, the store re-hashes the
+    // blobs written since and drops those that do not match, and drops the action results written
+    // since. Call it every few seconds and before exiting.
+    void Flush();
 
     void SetMaxBlobBytes(uint64_t bytes);
     [[nodiscard]] uint64_t MaxBlobBytes() const;
@@ -142,6 +150,7 @@ private:
     struct BlobMeta {
         uint64_t size{0};
         std::chrono::steady_clock::time_point last_used{};
+        std::chrono::steady_clock::time_point stamped{}; // when last_used last went to the file's mtime
     };
 
     struct PeerIngestWindow {
@@ -150,6 +159,12 @@ private:
     };
 
     void ScanBlobsOnDisk();
+    // At start: drops temporary files, and what a machine that went down may have torn. True when
+    // the record is from this boot (nothing was lost, and it still says what to check).
+    bool RecoverUnflushed();
+    // syncfs (unless there is nothing to make durable), then the record "<boot id> <unix ms>"; false
+    // when either failed.
+    bool RecordDurable(bool sync = true);
     void TouchBlobLocked(const std::string& hash) const;
     void TouchBlobOnDisk(const std::filesystem::path& path) const;
     void PromoteLruLocked(const std::string& hash) const;
@@ -170,6 +185,9 @@ private:
     mutable std::list<std::string> lru_order_;
     mutable std::unordered_map<std::string, std::list<std::string>::iterator> lru_iters_;
     std::unordered_map<std::string, PeerIngestWindow> peer_ingest_;
+
+    std::atomic<bool> unflushed_{false};
+    std::mutex flush_mutex_;
 
     mutable std::mutex mem_cache_mutex_;
     mutable std::unordered_map<std::string, std::string> mem_cache_;

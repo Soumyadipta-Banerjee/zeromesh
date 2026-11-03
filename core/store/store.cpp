@@ -15,6 +15,7 @@
 #include <system_error>
 #include <unistd.h>
 #include <algorithm>
+#include <cstdio>
 #include <vector>
 
 namespace zeromesh::store {
@@ -139,7 +140,27 @@ std::chrono::steady_clock::time_point SteadyFromFileTime(std::filesystem::file_t
     return sctp;
 }
 
+// What the store knows to be durable: "<boot id> <unix ms>" (see CasStore::Flush).
+constexpr const char* kDurableRecord = "durable";
+// A blob's mtime carries its recency across restarts (garbage collection orders by it); writing it
+// on every use would turn every presence check into a metadata write.
+constexpr auto kStampInterval = std::chrono::minutes(10);
+
+std::string BootId() {
+    std::ifstream in("/proc/sys/kernel/random/boot_id");
+    std::string id;
+    std::getline(in, id);
+    return id;
+}
+
+int64_t UnixMsNow() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 } // namespace
+
+void FsyncPath(const std::filesystem::path& path);
 
 CasStore::CasStore(std::filesystem::path base_path, CasLimits limits) : limits_(limits) {
     if (base_path.empty()) {
@@ -158,7 +179,84 @@ CasStore::CasStore(std::filesystem::path base_path, CasLimits limits) : limits_(
 
     std::filesystem::create_directories(blobs_dir_);
     std::filesystem::create_directories(ac_dir_);
+    const bool current = RecoverUnflushed();
     ScanBlobsOnDisk();
+    // From here on, what this run writes is checked if the machine goes down.
+    if (!current) RecordDurable(/*sync=*/!blobs_.empty());
+}
+
+bool CasStore::RecoverUnflushed() {
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(blobs_dir_, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code rm;
+        if (it->path().filename().string().starts_with("upload-")) std::filesystem::remove(it->path(), rm);
+    }
+    std::filesystem::remove_all(base_dir_ / "incoming", ec);
+
+    std::ifstream in(base_dir_ / kDurableRecord);
+    std::string boot;
+    int64_t at = -1;
+    in >> boot >> at;
+    // The same boot: the kernel kept every write, whatever happened to the process. No record: a
+    // new store, or one written by code that synced every blob.
+    if (at >= 0 && boot == BootId()) return true;
+    if (at < 0) return false;
+    // The machine went down after `at` with no later record: what was written since may be torn.
+    const auto since = std::chrono::file_clock::from_sys(
+        std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(at - 1000)));
+    auto written_since = [&](const std::filesystem::directory_entry& e) {
+        std::error_code tec;
+        const auto t = e.last_write_time(tec);
+        return !tec && t >= since;
+    };
+    size_t dropped = 0;
+    for (std::filesystem::directory_iterator it(blobs_dir_, ec), end; !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file() || !written_since(*it)) continue;
+        const std::string name = it->path().filename().string();
+        if (IsValidHash(name) && ComputeFileDigest(it->path()).hash == name) continue;
+        std::error_code rm;
+        if (std::filesystem::remove(it->path(), rm)) ++dropped;
+    }
+    for (std::filesystem::directory_iterator it(ac_dir_, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code rm;
+        if (it->is_regular_file() && written_since(*it) && std::filesystem::remove(it->path(), rm)) ++dropped;
+    }
+    if (dropped > 0) {
+        std::fprintf(stderr, "zmd: the store dropped %zu entries written before the machine went down\n", dropped);
+    }
+    return false;
+}
+
+bool CasStore::RecordDurable(bool sync) {
+    const int64_t at = UnixMsNow(); // before the sync: everything written before it is covered
+    if (sync) {
+        const int fd = ::open(base_dir_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (fd < 0) return false;
+        const bool synced = ::syncfs(fd) == 0;
+        ::close(fd);
+        if (!synced) return false;
+    }
+    const auto tmp = base_dir_ / "durable.tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        out << BootId() << ' ' << at << '\n';
+        out.close();
+        if (!out) return false;
+    }
+    try {
+        FsyncPath(tmp);
+        std::filesystem::rename(tmp, base_dir_ / kDurableRecord);
+        FsyncPath(base_dir_);
+    } catch (const std::exception&) {
+        return false;
+    }
+    return true;
+}
+
+void CasStore::Flush() {
+    std::lock_guard lock(flush_mutex_);
+    if (!unflushed_.exchange(false)) return;
+    if (!RecordDurable()) unflushed_ = true; // try again next time
 }
 
 void CasStore::SetMaxBlobBytes(uint64_t bytes) {
@@ -206,7 +304,7 @@ void CasStore::ScanBlobsOnDisk() {
 void CasStore::RegisterBlobLocked(const std::string& hash, uint64_t size,
                                   std::chrono::steady_clock::time_point when) const {
     if (blobs_.contains(hash)) return;
-    blobs_[hash] = BlobMeta{size, when};
+    blobs_[hash] = BlobMeta{size, when, when};
     lru_order_.push_front(hash);
     lru_iters_[hash] = lru_order_.begin();
     blob_bytes_ += size;
@@ -222,8 +320,12 @@ void CasStore::PromoteLruLocked(const std::string& hash) const {
 }
 
 void CasStore::TouchBlobLocked(const std::string& hash) const {
-    if (!blobs_.contains(hash)) return;
+    auto it = blobs_.find(hash);
+    if (it == blobs_.end()) return;
     PromoteLruLocked(hash);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - it->second.stamped < kStampInterval) return;
+    it->second.stamped = now;
     TouchBlobOnDisk(blobs_dir_ / hash);
 }
 
@@ -321,6 +423,7 @@ void CasStore::NoteBlobCommitted(const std::string& hash, uint64_t size_bytes) {
     }
     RegisterBlobLocked(hash, size_bytes, std::chrono::steady_clock::now());
     TouchBlobOnDisk(blobs_dir_ / hash);
+    unflushed_ = true;
 }
 
 bool CasStore::AdmitPeerIngest(const std::string& peer_id, uint64_t bytes) {
@@ -413,8 +516,8 @@ void FsyncPath(const std::filesystem::path& path) {
     ::close(fd);
 }
 
+// Publishes `tmp` as `target` by an atomic rename. Durability is CasStore::Flush's.
 void CommitTempFile(const std::filesystem::path& tmp, const std::filesystem::path& target) {
-    FsyncPath(tmp);
     std::error_code ec;
     std::filesystem::rename(tmp, target, ec);
     if (!ec) return;
@@ -622,6 +725,7 @@ bool CasStore::PutActionResult(const std::string& action_hash, std::string_view 
             return false;
         }
         CommitTempFile(tmp, target);
+        unflushed_ = true;
         return true;
     } catch (...) {
         if (!tmp.empty()) RemovePath(tmp);
