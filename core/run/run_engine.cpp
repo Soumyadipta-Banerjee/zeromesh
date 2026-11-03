@@ -25,7 +25,13 @@ namespace fs = std::filesystem;
 
 constexpr size_t kLookupChunk = 1024;
 constexpr size_t kMaxItemsPerBatch = 2000;
-constexpr double kMinBatchSeconds = 2.0;
+// A batch is worth forming when dispatching it (from being formed to its first item starting:
+// placement, the offer, the donor's setup) costs at most this share of its work. The floor follows
+// the measured cost, not a fixed size: a fixed one keeps the last round's batches too big for the
+// slots to finish together.
+constexpr double kDispatchShare = 0.1;
+constexpr double kAssumedDispatchSeconds = 0.05; // until a batch of this engine has started
+constexpr double kMinBatchSeconds = 0.05;
 constexpr double kMaxBatchSeconds = 120.0;
 constexpr double kDefaultItemSeconds = 1.0;
 // Past a limit, beside other work, alone on too small a node: each kill is retried differently.
@@ -142,6 +148,8 @@ struct BatchRun {
     int tid{-1};
     int cores{1};
     int64_t started_ms{0};
+    int64_t formed_ms{0};
+    bool first_started{false}; // its dispatch cost was measured
 };
 
 struct RunEngine::Run {
@@ -869,7 +877,9 @@ void RunEngine::Dispatch(const RunPtr& run) {
             if (room <= 0) continue;
             double total = 0;
             for (size_t i : members) total += seconds(run->items[i]);
-            const double target = std::clamp(total / (2.0 * std::max(slots.total, 1)), kMinBatchSeconds, kMaxBatchSeconds);
+            const double floor = std::clamp((dispatch_s_ > 0 ? dispatch_s_ : kAssumedDispatchSeconds) / kDispatchShare,
+                                            kMinBatchSeconds, kMaxBatchSeconds);
+            const double target = std::clamp(total / (2.0 * std::max(slots.total, 1)), floor, kMaxBatchSeconds);
             const size_t fixed =
                 run->policy.batch() > 0 ? std::min(static_cast<size_t>(run->policy.batch()), kMaxItemsPerBatch) : 0;
             auto full_up = [&](const auto& chunks) { return static_cast<int>(chunks.size()) >= room; };
@@ -988,6 +998,7 @@ void RunEngine::Dispatch(const RunPtr& run) {
                     bi->set_seq(it.spec.seq());
                     if (!it.checkpoint.hash().empty()) *bi->mutable_checkpoint() = it.checkpoint;
                 }
+                br.formed_ms = NowMs();
                 run->batches[bid] = std::move(br);
                 launches.push_back(Launch{bid, std::move(b), key.exclude});
             }
@@ -1032,6 +1043,11 @@ void RunEngine::Dispatch(const RunPtr& run) {
             if (IsTerminal(it.state) || it.batch != bid) return;
             it.node = bi->second.node;
             it.started_ms = NowMs();
+            if (!bi->second.first_started) {
+                bi->second.first_started = true;
+                const double s = std::max<double>(static_cast<double>(it.started_ms - bi->second.formed_ms), 0.0) / 1000.0;
+                dispatch_s_ = dispatch_s_ < 0 ? s : kDispatchAlpha * s + (1.0 - kDispatchAlpha) * dispatch_s_;
+            }
             Update(*r, ii->second, v1::ITEM_RUNNING, it.node);
         });
         cb.on_log = guarded([this, weak](const v1::ItemLog& log) {

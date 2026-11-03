@@ -137,6 +137,10 @@ private:
 
     EngineDeps deps_;
     std::shared_ptr<Guard> guard_ = std::make_shared<Guard>();
+    // What dispatching a batch costs, from forming it to its first item starting (moving average; -1
+    // until measured). Batches are sized against it.
+    double dispatch_s_{-1.0};
+    static constexpr double kDispatchAlpha = 0.3;
     mutable std::mutex mu_;
     std::condition_variable_any cv_;
     bool dirty_{false};

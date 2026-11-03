@@ -695,6 +695,26 @@ TEST(EngineFormsABatchOnlyForAFreeSlot) {
     ASSERT_EQ(e.exec->peak_active, 2);
 }
 
+TEST(EngineSizesBatchesAgainstWhatDispatchingOneCosts) {
+    // 40 items of 100 ms on 4 slots: 4 s of work. A batch need only be large against its own dispatch
+    // (a fixed 2 s floor made two 20-item batches and left two slots idle), so every slot gets one.
+    Engine e;
+    TempDir ws;
+    e.slots = 4;
+    e.resources->Record("k", 1, 100, 0);
+    auto spec = e.Spec(ws.path());
+    spec.mutable_stages(0)->set_kind("k");
+    for (int i = 0; i < 40; ++i) {
+        auto it = MakeItem("i" + std::to_string(i), {"t", std::to_string(i)});
+        it.set_cost(1);
+        *spec.add_items() = it;
+    }
+    auto rep = e.Wait(e.engine->Submit(spec));
+    ASSERT_EQ(rep.run().succeeded(), 40);
+    ASSERT_EQ(e.exec->peak_active, 4);
+    ASSERT_TRUE(e.exec->batches.front().items_size() <= 10);
+}
+
 TEST(EngineSpreadsTheLongItemsOfAFixedBatchSize) {
     // --batch 4 over 4 long and 12 short items, 4 slots: each batch gets one long item, not one
     // batch all four (the run would last as long as that batch).
