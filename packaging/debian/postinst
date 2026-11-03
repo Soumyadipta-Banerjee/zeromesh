@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if [ -f /usr/lib/sysctl.d/99-zeromesh-userns.conf ] || [ -f /etc/sysctl.d/99-zeromesh-userns.conf ]; then
+            sysctl -p /usr/lib/sysctl.d/99-zeromesh-userns.conf >/dev/null 2>&1 || \
+            sysctl -p /etc/sysctl.d/99-zeromesh-userns.conf >/dev/null 2>&1 || true
+        fi
+        echo "ZeroMesh installed successfully."
+        echo ""
+        echo "To run the ZeroMesh daemon as your user:"
+        echo "  systemctl --user daemon-reload"
+        echo "  systemctl --user enable --now zmd"
+        echo ""
+        echo "To allow zmd to continue running while logged out:"
+        echo "  loginctl enable-linger \$USER"
+        echo ""
+        echo "On Ubuntu, remote tasks need unprivileged user namespaces:"
+        echo "  sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0"
+        echo "  (packaging installs packaging/sysctl/99-zeromesh-userns.conf)"
+        echo ""
+        echo "Network ports:"
+        echo "  - TCP 8981 (NodeApi mTLS communications)"
+        echo "  - UDP 8988 (Team multicast discovery)"
+        ;;
+esac
+
+exit 0
