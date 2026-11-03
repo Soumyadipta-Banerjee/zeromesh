@@ -9,11 +9,11 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <sodium.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -41,10 +41,65 @@ constexpr auto kTick = std::chrono::milliseconds(200);
 // them open: the end of its output is waited for no longer.
 constexpr auto kPipeGrace = std::chrono::seconds(2);
 constexpr size_t kMaxIdBytes = 200;
-// A forked child that cannot enter its cgroup exits with this, saying so, instead of running
+// An item's process that cannot enter its cgroup exits with this, saying so, instead of running
 // uncontained.
 constexpr int kUncontainedExit = 125;
 constexpr std::string_view kUncontainedMessage = "zmd: cannot enter the item's cgroup";
+// The item's process runs on this stack until it execs bwrap.
+constexpr size_t kChildStackBytes = 64 * 1024;
+
+// What the item's process does between its start and exec. It starts with CLONE_VM | CLONE_VFORK
+// (as posix_spawn does): in zmd's memory, on a stack of its own, while the runner's thread waits.
+// A fork would copy zmd's page tables for every item, the exec would tear the copy down again, and
+// every page zmd's threads then write would fault once: about 5 ms of CPU per item on a 2-core VM,
+// a third of zmd's. So: only async-signal-safe calls, and nothing written but this stack.
+struct ItemChild {
+    char* const* argv;
+    int procs_fd; // the item cgroup's cgroup.procs
+    int out_fd;
+    int err_fd;
+};
+
+int ItemChildMain(void* arg) {
+    const ItemChild& c = *static_cast<const ItemChild*>(arg);
+    rlimit core{};
+    setrlimit(RLIMIT_CORE, &core);
+    setpgid(0, 0);
+    EnterIdlePriority();
+    const int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (devnull >= 0) dup2(devnull, STDIN_FILENO);
+    dup2(c.out_fd, STDOUT_FILENO);
+    dup2(c.err_fd, STDERR_FILENO);
+    // "0" moves the writing process. Nothing of the item runs outside its cgroup.
+    if (write(c.procs_fd, "0", 1) != 1) {
+        (void)!write(STDERR_FILENO, kUncontainedMessage.data(), kUncontainedMessage.size());
+        (void)!write(STDERR_FILENO, "\n", 1);
+        _exit(kUncontainedExit);
+    }
+    // bwrap passes the mask and ignored signals on: the item must see the SIGTERM that asks it
+    // to save its checkpoint and stop.
+    DefaultSignalsInChild();
+    execv(c.argv[0], c.argv);
+    _exit(127);
+}
+
+// Starts ItemChildMain and returns once it has exec'd or exited: its pidfd and pid, or -1 with
+// errno set.
+int StartItemChild(const ItemChild& child, pid_t& pid) {
+    // zmd's signal handlers must never run in the child: every signal stays blocked there until
+    // it has set them all back to the default.
+    sigset_t all, old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, &old);
+    std::vector<char> stack(kChildStackBytes);
+    int pidfd = -1;
+    pid = clone(ItemChildMain, stack.data() + stack.size(), CLONE_VM | CLONE_VFORK | CLONE_PIDFD | SIGCHLD,
+                const_cast<ItemChild*>(&child), &pidfd);
+    const int err = errno;
+    pthread_sigmask(SIG_SETMASK, &old, nullptr);
+    errno = err;
+    return pid < 0 ? -1 : pidfd;
+}
 
 std::string RandomHex(size_t bytes) {
     std::string raw(bytes, '\0');
@@ -503,47 +558,17 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     cargv.push_back(nullptr);
     const uint64_t limit_ooms_before = cgroup::LimitOoms(batch_cg);
     const auto start = Clock::now();
-    pid_t pid = fork();
-    if (pid < 0) {
-        for (int fd : {procs_fd, out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) close(fd);
-        fail_all(ItemFailure::Sandbox, "fork failed");
-        return;
-    }
-    if (pid == 0) {
-        // Only async-signal-safe calls until exec: this process was forked from a threaded one.
-        rlimit core{};
-        setrlimit(RLIMIT_CORE, &core);
-        setpgid(0, 0);
-        EnterIdlePriority();
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) dup2(devnull, STDIN_FILENO);
-        dup2(out_pipe[1], STDOUT_FILENO);
-        dup2(err_pipe[1], STDERR_FILENO);
-        // "0" moves the writing process. Nothing of the item runs outside its cgroup.
-        if (write(procs_fd, "0", 1) != 1) {
-            (void)!write(STDERR_FILENO, kUncontainedMessage.data(), kUncontainedMessage.size());
-            (void)!write(STDERR_FILENO, "\n", 1);
-            _exit(kUncontainedExit);
-        }
-        // bwrap passes the mask and ignored signals on: the item must see the SIGTERM that asks it
-        // to save its checkpoint and stop.
-        DefaultSignalsInChild();
-        execv(cargv[0], cargv.data());
-        _exit(127);
-    }
-    setpgid(pid, pid);
+    pid_t pid = -1;
+    // Readable once the process has ended: the loop below sees its end at once.
+    const int pidfd = StartItemChild({cargv.data(), procs_fd, out_pipe[1], err_pipe[1]}, pid);
+    const int start_errno = errno;
     close(procs_fd);
     close(out_pipe[1]);
     close(err_pipe[1]);
-    // Readable once the process has ended: the loop below sees its end at once.
-    const int pidfd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
     if (pidfd < 0) {
-        const std::string why = std::strerror(errno);
-        kill(pid, SIGKILL); // bwrap; the sandbox dies with it and the cgroup's removal takes the rest
-        waitpid(pid, nullptr, 0);
         close(out_pipe[0]);
         close(err_pipe[0]);
-        fail_all(ItemFailure::Sandbox, "cannot watch the item's process: " + why);
+        fail_all(ItemFailure::Sandbox, std::string("cannot start the item's process: ") + std::strerror(start_errno));
         return;
     }
     // Known to StopYoungestForMemory while it runs.
