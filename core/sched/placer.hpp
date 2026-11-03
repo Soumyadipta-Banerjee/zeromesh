@@ -144,9 +144,10 @@ private:
     void EndAttempt(const std::shared_ptr<Batch>& batch, node::BatchDone d);
     // Runs on this node and waits for it to end.
     node::BatchDone RunLocal(const std::shared_ptr<Batch>& batch);
-    // Runs on `node_id` through `client` once the offer was accepted and the inputs pushed.
+    // Runs on `node_id` through `client` once the offer was accepted and the inputs pushed. `ran` is
+    // called when the donor has finished running it, while its last outputs may still be on the way.
     node::BatchDone RunRemote(const std::shared_ptr<Batch>& batch, const std::string& node_id,
-                              const std::shared_ptr<node::NodeClient>& client);
+                              const std::shared_ptr<node::NodeClient>& client, const std::function<void()>& ran);
     void OnPeerDrain(const std::string& node_id, const std::string& reason);
     void LaunchWorker(const std::shared_ptr<Batch>& batch);
     // Lets `target` fetch what it misses from donors known to hold it; returns what is still missing.

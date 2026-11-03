@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <exception>
 #include <future>
 #include <map>
@@ -403,9 +404,69 @@ node::BatchDone Placer::RunLocal(const std::shared_ptr<Batch>& batch) {
 
 
 node::BatchDone Placer::RunRemote(const std::shared_ptr<Batch>& batch, const std::string& node_id,
-                                  const std::shared_ptr<node::NodeClient>& client) {
+                                  const std::shared_ptr<node::NodeClient>& client,
+                                  const std::function<void()>& ran) {
+    // Events are handled as they arrive; outputs are fetched beside them, in order. A slow fetch
+    // must neither hold back what the next item reports (when it started) nor keep the donor's slot
+    // once the donor has finished.
+    struct Fetches {
+        std::mutex mu;
+        std::condition_variable cv;
+        std::deque<v1::BatchEvent> events; // done and checkpoint events, in stream order
+        bool closed{false};
+        void Close() {
+            {
+                std::lock_guard lock(mu);
+                closed = true;
+            }
+            cv.notify_one();
+        }
+    } fetches;
     uint64_t pulled = 0;
+    std::chrono::nanoseconds pulling{0}; // time spent fetching: what the bandwidth is measured over
     std::string pull_error;
+    auto fetch = [&](const std::vector<v1::Digest>& blobs, const std::vector<v1::Digest>& trees, std::string* err) {
+        uint64_t bytes = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ok = node::PullTrees(*client, *cas_, blobs, trees, err, &bytes);
+        pulling += std::chrono::steady_clock::now() - t0;
+        pulled += bytes;
+        AddTraffic(node_id, 0, bytes);
+        return ok;
+    };
+    std::jthread fetcher([&] {
+        for (;;) {
+            v1::BatchEvent ev;
+            {
+                std::unique_lock lock(fetches.mu);
+                fetches.cv.wait(lock, [&] { return fetches.closed || !fetches.events.empty(); });
+                if (fetches.events.empty()) return;
+                ev = std::move(fetches.events.front());
+                fetches.events.pop_front();
+            }
+            std::string err;
+            if (ev.has_done()) {
+                // An item is reported once its outputs are here: if this donor is lost next, it is safe.
+                const v1::ItemOutcome& o = ev.done();
+                std::vector<v1::Digest> blobs{o.stdout(), o.stderr()}, trees;
+                for (const auto& f : o.outputs()) {
+                    if (f.symlink()) continue;
+                    (f.is_dir() ? trees : blobs).push_back(f.digest());
+                }
+                if (fetch(blobs, trees, &err)) {
+                    if (batch->cb.on_item) batch->cb.on_item(o, node_id);
+                } else if (pull_error.empty()) {
+                    pull_error = err; // the item is not reported: it will run again
+                }
+            } else if (fetch({}, {ev.checkpoint().tree()}, &err)) {
+                if (batch->cb.on_checkpoint) batch->cb.on_checkpoint(ev.checkpoint().item(), ev.checkpoint().tree());
+            }
+        }
+    });
+    struct CloseFirst { // whatever happens, the fetcher ends before it is joined
+        Fetches& f;
+        ~CloseFirst() { f.Close(); }
+    } close_first{fetches};
     bool cancel_forwarded = false;
     auto on_event = [&](const v1::BatchEvent& ev) {
         if ((batch->cancelled || batch->drain_preempted) && !cancel_forwarded) {
@@ -416,32 +477,12 @@ node::BatchDone Placer::RunRemote(const std::shared_ptr<Batch>& batch, const std
             if (batch->cb.on_started) batch->cb.on_started(ev.started());
         } else if (ev.has_log()) {
             if (batch->cb.on_log) batch->cb.on_log(ev.log());
-        } else if (ev.has_done()) {
-            // Fetch the item's outputs now: if this donor is lost next, the item is already safe here.
-            const v1::ItemOutcome& o = ev.done();
-            std::vector<v1::Digest> blobs{o.stdout(), o.stderr()}, trees;
-            for (const auto& f : o.outputs()) {
-                if (f.symlink()) continue;
-                (f.is_dir() ? trees : blobs).push_back(f.digest());
+        } else if (ev.has_done() || ev.has_checkpoint()) {
+            {
+                std::lock_guard lock(fetches.mu);
+                fetches.events.push_back(ev);
             }
-            std::string err;
-            uint64_t bytes = 0;
-            const bool ok = node::PullTrees(*client, *cas_, blobs, trees, &err, &bytes);
-            pulled += bytes;
-            AddTraffic(node_id, 0, bytes);
-            if (ok) {
-                if (batch->cb.on_item) batch->cb.on_item(o, node_id);
-            } else if (pull_error.empty()) {
-                pull_error = err; // the item is not reported: it will run again
-            }
-        } else if (ev.has_checkpoint()) {
-            std::string err;
-            uint64_t bytes = 0;
-            if (node::PullTrees(*client, *cas_, {}, {ev.checkpoint().tree()}, &err, &bytes)) {
-                if (batch->cb.on_checkpoint) batch->cb.on_checkpoint(ev.checkpoint().item(), ev.checkpoint().tree());
-            }
-            pulled += bytes;
-            AddTraffic(node_id, 0, bytes);
+            fetches.cv.notify_one();
         }
     };
     {
@@ -451,9 +492,15 @@ node::BatchDone Placer::RunRemote(const std::shared_ptr<Batch>& batch, const std
         batch->run_started = std::chrono::steady_clock::now();
     }
     std::string err;
-    const auto start = std::chrono::steady_clock::now();
     auto finished = client->Run(batch->id, on_event, &err);
-    if (pulled > 0) bandwidth_.Observe(node_id, pulled, std::chrono::steady_clock::now() - start);
+    {
+        std::lock_guard lock(batch->mu);
+        batch->running = false; // what is left is fetching outputs: nothing a copy elsewhere would speed up
+    }
+    ran();
+    fetches.Close();
+    fetcher.join();
+    if (pulled > 0) bandwidth_.Observe(node_id, pulled, pulling);
 
     node::BatchDone d;
     d.node = node_id;
@@ -587,18 +634,26 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
         }
         return std::nullopt;
     };
-    auto release = [&](const std::string& node_id) {
-        std::lock_guard lock(shared_->mu);
-        shared_->AddLocked(node_id, -1, need.cores, booked_mem, gpus);
-        if (local_ && node_id == local_id_) local_->Release(batch->id); // a hold never handed over
+    // Gives back the slot (and memory, GPUs) the attempt held on `node_id`.
+    auto free_slot = [&](const std::string& node_id) {
         {
-            std::lock_guard block(batch->mu);
-            if (batch->assigned_node == node_id) batch->assigned_node.clear();
-            batch->client.reset();
-            batch->is_local = false;
-            batch->running = false;
+            std::lock_guard lock(shared_->mu);
+            shared_->AddLocked(node_id, -1, need.cores, booked_mem, gpus);
+            if (local_ && node_id == local_id_) local_->Release(batch->id); // a hold never handed over
         }
         shared_->cv.notify_all();
+    };
+    // The attempt is no longer on `node_id`.
+    auto leave = [&](const std::string& node_id) {
+        std::lock_guard block(batch->mu);
+        if (batch->assigned_node == node_id) batch->assigned_node.clear();
+        batch->client.reset();
+        batch->is_local = false;
+        batch->running = false;
+    };
+    auto release = [&](const std::string& node_id) {
+        free_slot(node_id);
+        leave(node_id);
     };
     // True when some node could take the batch if nothing were in flight (memory against its total,
     // not what is free this second): then the batch waits for capacity instead of failing.
@@ -820,8 +875,10 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             NoteInputsPushed(node_id, input_root_hash, pushed, input_tree_bytes);
         }
 
-        node::BatchDone d = RunRemote(batch, node_id, client);
-        release(node_id);
+        // The donor's slot is free as soon as it has run the batch; fetching the last outputs does not
+        // hold it, and the batch is still on the node (not waiting for one) until they are here.
+        node::BatchDone d = RunRemote(batch, node_id, client, [&] { free_slot(node_id); });
+        leave(node_id);
         d.bytes_pushed = wire_pushed;
         {
             std::lock_guard lock(traffic_mu_);

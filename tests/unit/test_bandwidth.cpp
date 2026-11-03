@@ -10,6 +10,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -174,4 +175,26 @@ TEST(PlacerMeasuresDonorBandwidthFromRealPushes) {
     ASSERT_TRUE(measured.has_value());
     ASSERT_TRUE(*measured > 0.0);
     ASSERT_TRUE(std::isfinite(*measured));
+}
+
+TEST(PlacerMeasuresPullBandwidthOverTheFetchAlone) {
+    // An item that runs for a second, then writes 2 MiB: what the link carried is 2 MiB in the
+    // time the fetch took, not over the second the item ran (which would make loopback look like
+    // 2 MB/s, and every donor's inputs look expensive to send).
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    a.peers->Upsert(b.AsPeer());
+    zeromesh::testing::PlacerRequester req(a);
+    auto spec = zeromesh::testing::ShBatch({{"t", "sleep 1; head -c 2097152 /dev/zero > out.bin"}});
+    spec.mutable_items(0)->add_outputs("out.bin");
+    auto& log = req.Execute(spec);
+    req.WaitAll();
+    ASSERT_TRUE(log.result.failure == v1::FAILURE_NONE);
+    ASSERT_TRUE(req.placer->Traffic().at("node-b").bytes_pulled >= 2097152);
+    auto measured = req.placer->Bandwidth().Measured("node-b");
+    ASSERT_TRUE(measured.has_value());
+    if (!(*measured > 20e6)) throw std::runtime_error("measured " + std::to_string(*measured) + " B/s");
 }
