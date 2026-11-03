@@ -163,7 +163,13 @@ private:
     void CancelHedges(const std::shared_ptr<Batch>& primary);
     void ReapFinishedLocked();
 
-    [[nodiscard]] int64_t InputTreeBytes(const v1::BatchSpec& spec) const;
+    // Every digest under an input tree and their bytes. A tree is content-addressed, so this is
+    // walked once per tree, not for every batch over it (a run's batches share one).
+    struct InputTree {
+        std::vector<store::Digest> digests;
+        int64_t bytes{0};
+    };
+    [[nodiscard]] std::shared_ptr<const InputTree> InputTreeOf(const v1::Digest& root) const;
     [[nodiscard]] int64_t EstimatedMissingBytes(const std::string& node_id, const std::string& input_root_hash,
                                                 int64_t total_bytes) const;
     void NoteInputsPushed(const std::string& node_id, const std::string& input_root_hash, int64_t bytes_pushed,
@@ -208,6 +214,10 @@ private:
     std::unordered_map<std::string, int64_t> push_cache_; // "node|root" -> bytes known on peer
     std::list<std::string> push_cache_lru_;
     static constexpr size_t kPushCacheMax = 128;
+
+    mutable std::mutex trees_mu_;
+    mutable std::list<std::pair<std::string, std::shared_ptr<const InputTree>>> trees_; // most recent first
+    static constexpr size_t kTreesKept = 16;
 
     std::shared_ptr<node::LocalExecutor> local_;
     std::shared_ptr<net::PeerTable> peers_;

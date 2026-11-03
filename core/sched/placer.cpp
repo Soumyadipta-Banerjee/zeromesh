@@ -216,14 +216,24 @@ std::shared_ptr<const HazardModel> Placer::Hazard() const {
     return hazard_;
 }
 
-int64_t Placer::InputTreeBytes(const v1::BatchSpec& spec) const {
-    const auto root = node::FromProto(spec.input_root());
-    if (root.hash.empty()) return 0;
-    int64_t sum = 0;
-    for (const auto& d : merkle_->CollectTree(root)) {
-        sum += std::max<int64_t>(d.size_bytes, 0);
+std::shared_ptr<const Placer::InputTree> Placer::InputTreeOf(const v1::Digest& root) const {
+    {
+        std::lock_guard lock(trees_mu_);
+        for (auto it = trees_.begin(); it != trees_.end(); ++it) {
+            if (it->first != root.hash()) continue;
+            trees_.splice(trees_.begin(), trees_, it);
+            return it->second;
+        }
     }
-    return sum;
+    auto tree = std::make_shared<InputTree>();
+    if (!root.hash().empty()) {
+        tree->digests = merkle_->CollectTree(node::FromProto(root));
+        for (const auto& d : tree->digests) tree->bytes += std::max<int64_t>(d.size_bytes, 0);
+    }
+    std::lock_guard lock(trees_mu_);
+    trees_.emplace_front(root.hash(), tree);
+    if (trees_.size() > kTreesKept) trees_.pop_back();
+    return tree;
 }
 
 namespace {
@@ -546,7 +556,8 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
     const int gpus = std::max(need.gpus, 0);
     int64_t booked_mem = 0; // what this attempt holds of its node's memory for work (HeldOn)
     const std::string input_root_hash = spec.input_root().hash();
-    const int64_t input_tree_bytes = InputTreeBytes(spec);
+    const auto input_tree = InputTreeOf(spec.input_root());
+    const int64_t input_tree_bytes = input_tree->bytes;
     const double batch_s = BatchSeconds(spec);
 
     std::set<std::string> skip = batch->exclude; // nodes this attempt will not use again
@@ -776,7 +787,7 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             auto add = [&](const store::Digest& d) {
                 if (!d.hash.empty() && seen.insert(d.hash).second) needed->push_back(node::ToProto(d));
             };
-            for (const auto& d : merkle_->CollectTree(node::FromProto(spec.input_root()))) add(d);
+            for (const auto& d : input_tree->digests) add(d);
             for (const auto& it : spec.items()) {
                 if (it.checkpoint().hash().empty()) continue;
                 for (const auto& d : merkle_->CollectTree(node::FromProto(it.checkpoint()))) add(d);
