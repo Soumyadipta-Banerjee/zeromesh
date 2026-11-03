@@ -146,6 +146,33 @@ TEST(HedgeNotLaunchedOutsideTheTail) {
     ASSERT_TRUE(req.Done(60s));
 }
 
+TEST(HedgeNotLaunchedWhileWorkWaitsForASlot) {
+    // By the placer's count this is the tail (one batch, running), but the run engine still has
+    // items waiting for a slot: a copy would take theirs.
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), d1("node-d1", key), d2("node-d2", key);
+    a.Start();
+    d1.Start();
+    d2.Start();
+    a.Admit(d1);
+    a.Admit(d2);
+    a.peers->Upsert(d1.AsPeer()); // the primary lands on d1
+    std::atomic<bool> backlog{true}; // outlives the placer, whose hedge thread reads it
+    HedgeRequester req(a);
+    auto cfg = Eager([](const std::string& node, double) { return node == "node-d1" ? 0.1 : 0.99; });
+    cfg.backlog = [&backlog] { return backlog.load(); };
+    req.placer->SetHedging(cfg);
+
+    req.Submit(1, "sleep 3; echo ok");
+    ASSERT_TRUE(WaitUntil([&] { return req.placer->InFlightOn("node-d1") == 1; }, 10s));
+    a.peers->Upsert(d2.AsPeer());
+    std::this_thread::sleep_for(600ms);
+    ASSERT_EQ(req.placer->Hedging().launched, static_cast<uint64_t>(0));
+    backlog = false; // nothing waits any more: the tail
+    ASSERT_TRUE(WaitUntil([&] { return req.placer->Hedging().launched == 1; }, 10s));
+    ASSERT_TRUE(req.Done(60s));
+}
+
 TEST(HedgeNeverExceedsMaxCopies) {
     auto key = zeromesh::net::GenerateTeamKey();
     TestNodeFull a("node-a", key), d1("node-d1", key), d2("node-d2", key), d3("node-d3", key);

@@ -90,6 +90,7 @@ public:
     static constexpr int kRetryOwnerBusyMs = 5000;
     static constexpr int kRetryDuplicateMs = 100;
     static constexpr int kRetryFairShareMs = 500;
+    static constexpr int kRetryHeldMs = 100; // what this node's own placer took a moment ago may end soon
     // A requester turned down for capacity this recently is waiting: fair share then applies.
     static constexpr std::chrono::seconds kWaitingWindow{3};
     void SetComfortLevelProvider(std::function<int()> provider);
@@ -138,6 +139,9 @@ public:
     int TickDeparture(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
     // The donor is back: thaw every frozen task and accept work again. Returns how many it thawed.
     int EndDeparture();
+    // Call about once a second: ends offers whose batch never came (a requester that went away
+    // between Offer and RunBatch) and gives back the cores and memory they held in the executor.
+    void ExpireOffers(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
     [[nodiscard]] bool Departing() const;
 
 private:
@@ -154,6 +158,8 @@ private:
 
     // Remote execution.
     using BatchKey = std::pair<std::string, std::string>; // (caller node id, batch id)
+    // An accepted offer: its cores and memory are held in the executor until RunBatch hands the
+    // batch over, or the reservation ends otherwise (expiry, cancel, a new offer, a drain).
     struct Reservation {
         v1::BatchSpec spec;
         std::vector<store::Digest> needed;
@@ -174,7 +180,9 @@ private:
         std::set<std::string> kept; // preemptible batches running through the grace window
         std::map<std::string, std::chrono::steady_clock::time_point> frozen; // exec id -> kill deadline
     };
-    void PurgeExpiredLocked();
+    void PurgeExpiredLocked(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+    // Ends the reservations `drop` picks and gives back what they held.
+    void DropReservationsLocked(const std::function<bool(const BatchKey&, const Reservation&)>& drop);
     int CoresInUseLocked() const;
     int64_t MemPromisedLocked() const;
     int GpusInUseLocked() const;

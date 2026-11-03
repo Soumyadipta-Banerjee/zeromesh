@@ -30,6 +30,7 @@ AnnounceFields SampleFields(uint64_t seq = 1, int64_t timestamp_ms = 0) {
                                .mem_total = 1000,
                                .mem_available = 600,
                                .work_mem = 750,
+                               .work_cores = 6,
                                .cpu_load_pct = 25.5,
                                .battery_pct = 42,
                                .on_ac = false,
@@ -91,6 +92,7 @@ TEST(AnnounceRoundTrip) {
     ASSERT_EQ(parsed->peer.mem_available, 600u);
     ASSERT_EQ(parsed->peer.memory_bytes, 1000u);
     ASSERT_EQ(parsed->peer.work_memory_bytes, 750u);
+    ASSERT_EQ(parsed->peer.work_cores, 6);
     ASSERT_EQ(parsed->peer.cpu_load_pct, 25.5);
     ASSERT_EQ(parsed->peer.battery_pct, 42);
     ASSERT_FALSE(parsed->peer.is_charging);

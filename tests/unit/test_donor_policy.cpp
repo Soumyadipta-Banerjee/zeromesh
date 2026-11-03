@@ -15,6 +15,7 @@ zeromesh::net::Telemetry Laptop(int battery, bool on_ac) {
     zeromesh::net::Telemetry t;
     t.cores_total = 8;
     t.cores_free = 8;
+    t.work_cores = 7; // what zmd announces for it: the default policy's 7 of 8 cores
     t.mem_available = 1ull << 30;
     t.battery_pct = battery;
     t.on_ac = on_ac;
@@ -58,7 +59,7 @@ TEST(DonorPolicyDefaults) {
     ASSERT_TRUE(p.ShouldDrain(Laptop(10, false)));
     ASSERT_FALSE(p.ShouldDrain(Laptop(10, true)));
 
-    // At most cores_total - 1 cores, counting what is already promised.
+    // At most its work_cores, counting what is already promised.
     ASSERT_FALSE(Why(p, Laptop(-1, true), Echo(), 6).has_value());
     ASSERT_TRUE(Why(p, Laptop(-1, true), Echo(), 7).has_value());
     auto big = Echo();
@@ -213,7 +214,7 @@ TEST(DrainControllerHysteresis) {
 
 TEST(DonorPolicyRefusalKinds) {
     using zeromesh::node::RefusalKind;
-    DonorPolicy p; // donates cores_total - 1 = 7 of 8 cores
+    DonorPolicy p; // the laptop lets work hold 7 of its 8 cores
     auto spec = Echo();
 
     auto battery = p.Evaluate(Laptop(30, false), spec, 0);

@@ -78,7 +78,7 @@ message OfferReply {
   optional double hazard_per_hour = 5;    // the donor's own departure hazard, when it has a record
   RejectKind reject_kind = 6;
   uint32 retry_after_ms = 7;
-  optional uint32 core_limit = 8;         // cores the donor donates in total
+  reserved 8; // core_limit: donors announce work_cores instead
 }
 
 message RunRequest {

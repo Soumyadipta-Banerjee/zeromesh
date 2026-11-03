@@ -34,6 +34,13 @@ struct BatchCallbacks {
     std::function<void(BatchDone)> on_done; // exactly once per Execute
 };
 
+// Batches of one shape the team can run: at once (total), and right now (free: what this node's own
+// batches hold or still wait for is taken).
+struct Slots {
+    int total{1};
+    int free{0};
+};
+
 // Runs batches somewhere. Execute is asynchronous and makes one attempt: it may try several nodes
 // before one accepts, but once the batch ran (or could be run nowhere) it calls on_done exactly
 // once. Retrying is the caller's decision. Cancel of an unknown or finished batch is a no-op.

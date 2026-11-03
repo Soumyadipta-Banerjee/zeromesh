@@ -49,6 +49,7 @@ message PeerInfo {
   int64 mem_total = 15;
   int32 gpus = 16;
   int64 work_mem = 17;     // bytes all work there may use together (its donor policy's budget); 0: none
+  int32 work_cores = 18;   // cores the work of other nodes may hold there; 0: it runs no work
 }
 
 message Empty {}

@@ -128,6 +128,7 @@ struct Placer::Shared {
     std::mutex mu;
     std::map<std::string, std::shared_ptr<Batch>> batches;
     std::map<std::string, int> in_flight;         // node id -> batches we run there
+    std::map<std::string, int> cores_in_flight;   // node id -> cores those batches hold
     std::map<std::string, int64_t> mem_in_flight; // node id -> memory those batches declared
     std::map<std::string, int> gpus_in_flight;    // node id -> GPUs those batches declared
     std::condition_variable cv;                   // notified when a reservation is released
@@ -135,6 +136,10 @@ struct Placer::Shared {
     int InFlightLocked(const std::string& node) const {
         auto it = in_flight.find(node);
         return it == in_flight.end() ? 0 : it->second;
+    }
+    int CoresInFlightLocked(const std::string& node) const {
+        auto it = cores_in_flight.find(node);
+        return it == cores_in_flight.end() ? 0 : it->second;
     }
     int64_t MemInFlightLocked(const std::string& node) const {
         auto it = mem_in_flight.find(node);
@@ -144,8 +149,9 @@ struct Placer::Shared {
         auto it = gpus_in_flight.find(node);
         return it == gpus_in_flight.end() ? 0 : it->second;
     }
-    void AddLocked(const std::string& node, int delta, int64_t mem, int gpus) {
+    void AddLocked(const std::string& node, int delta, int cores, int64_t mem, int gpus) {
         if ((in_flight[node] += delta) <= 0) in_flight.erase(node);
+        if ((cores_in_flight[node] += delta * cores) <= 0) cores_in_flight.erase(node);
         if ((mem_in_flight[node] += delta * mem) <= 0) mem_in_flight.erase(node);
         if ((gpus_in_flight[node] += delta * gpus) <= 0) gpus_in_flight.erase(node);
     }
@@ -166,20 +172,37 @@ Placer::Placer(std::shared_ptr<node::LocalExecutor> local, std::shared_ptr<net::
         [this](const std::string& node_id, const std::string& reason) { OnPeerDrain(node_id, reason); });
 }
 
-int Placer::SlotsFor(const v1::Resources& resources, v1::Where where) const {
-    const int cores = std::max(resources.cores(), 1);
-    int slots = 0;
-    if (local_ && local_->Unavailable().empty() && where != v1::REMOTE_ONLY) slots += local_->CoreCapacity() / cores;
+node::Slots Placer::SlotsFor(const v1::Resources& resources, v1::Where where) const {
+    const int per = std::max(resources.cores(), 1);
+    node::Slots s{0, 0};
+    std::lock_guard lock(shared_->mu);
+    if (local_ && local_->Unavailable().empty() && where != v1::REMOTE_ONLY) {
+        // Its executor holds every batch here, other requesters' included.
+        s.total += local_->CoreCapacity() / per;
+        s.free += std::max(local_->CoreCapacity() - local_->CoresReserved(), 0) / per;
+    }
     if (where != v1::LOCAL_ONLY) {
         for (const auto& p : peers_->ListActive()) {
-            if (p.id == local_id_) continue;
-            int donated = std::max(p.cores - 1, 1);
-            if (const int limit = CoreLimitOf(p.id); limit >= 0) donated = limit;
-            if (resources.gpus() > 0 && p.gpus < resources.gpus()) continue;
-            slots += donated / cores;
+            if (p.id == local_id_ || (resources.gpus() > 0 && p.gpus < resources.gpus())) continue;
+            s.total += p.work_cores / per;
+            s.free += std::max(p.work_cores - shared_->CoresInFlightLocked(p.id), 0) / per;
         }
     }
-    return std::max(slots, 1);
+    // Our batches still looking for a node take the first slots that free. With no slot anywhere,
+    // one batch at a time goes to the placer all the same: it says why no node can run it.
+    if (s.total == 0) s = node::Slots{1, 1};
+    s.free = std::max(s.free - UnplacedLocked(), 0);
+    return s;
+}
+
+int Placer::UnplacedLocked() const {
+    int n = 0;
+    for (const auto& [id, b] : shared_->batches) {
+        if (b->is_hedge || b->finished.load()) continue;
+        std::lock_guard block(b->mu);
+        if (b->assigned_node.empty()) ++n;
+    }
+    return n;
 }
 
 void Placer::SetHazardModel(std::shared_ptr<const HazardModel> model) {
@@ -190,18 +213,6 @@ void Placer::SetHazardModel(std::shared_ptr<const HazardModel> model) {
 std::shared_ptr<const HazardModel> Placer::Hazard() const {
     std::lock_guard lock(hazard_mu_);
     return hazard_;
-}
-
-void Placer::NoteCoreLimit(const std::string& node_id, const v1::OfferReply& reply) {
-    if (!reply.has_core_limit()) return;
-    std::lock_guard lock(limits_mu_);
-    core_limit_[node_id] = static_cast<int>(reply.core_limit());
-}
-
-int Placer::CoreLimitOf(const std::string& node_id) const {
-    std::lock_guard lock(limits_mu_);
-    auto it = core_limit_.find(node_id);
-    return it == core_limit_.end() ? -1 : it->second;
 }
 
 int64_t Placer::InputTreeBytes(const v1::BatchSpec& spec) const {
@@ -509,8 +520,7 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             const int64_t budget = local_->MemoryBudget();
             Candidate c{.node_id = local_id_,
                         .is_local = true,
-                        .cores_total = local_->CoreCapacity(),
-                        .cores_free = self.cores_free,
+                        .work_cores = local_->CoreCapacity(),
                         .mem_available = budget > 0 ? static_cast<uint64_t>(budget) : self.mem_available,
                         .mem_total = budget > 0 ? static_cast<uint64_t>(budget) : self.mem_total,
                         .cpu_load_pct = self.cpu_load_pct,
@@ -520,8 +530,9 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             c.gpus = self.gpus;
             if (!for_reservation && c.mem_total > 0) c.mem_available = c.mem_total; // could it, given time?
             if (for_reservation) {
-                c.mem_committed = shared_->MemInFlightLocked(local_id_);
-                c.in_flight = shared_->InFlightLocked(local_id_);
+                // Its executor holds every batch here, other requesters' included.
+                c.cores_in_use = local_->CoresReserved();
+                c.mem_committed = local_->MemReserved();
                 c.gpus_in_flight = shared_->GpusInFlightLocked(local_id_);
             }
             out.push_back(std::move(c));
@@ -535,11 +546,9 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             const uint64_t budget = p.work_memory_bytes;
             Candidate c{.node_id = p.id,
                         .is_local = false,
-                        .cores_total = p.cores,
-                        .cores_free = p.cores_free,
+                        .work_cores = p.work_cores,
                         .mem_available = budget > 0 ? budget : p.mem_available,
                         .mem_total = budget > 0 ? budget : p.memory_bytes,
-                        .core_limit = CoreLimitOf(p.id),
                         .cpu_load_pct = p.cpu_load_pct,
                         .on_ac = p.is_charging,
                         .arch = p.arch,
@@ -549,8 +558,8 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             c.gpus = p.gpus;
             if (!for_reservation && c.mem_total > 0) c.mem_available = c.mem_total; // could it, given time?
             if (for_reservation) {
+                c.cores_in_use = shared_->CoresInFlightLocked(p.id);
                 c.mem_committed = shared_->MemInFlightLocked(p.id);
-                c.in_flight = shared_->InFlightLocked(p.id);
                 c.gpus_in_flight = shared_->GpusInFlightLocked(p.id);
             }
             if (use_hazard) c.expected_min_s = hazard->ExpectedMin(p.id, batch_s);
@@ -567,8 +576,10 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
     auto reserve_next = [&]() -> std::optional<Candidate> {
         std::lock_guard lock(shared_->mu);
         for (const Candidate& c : Rank(need, candidates(true), input_tree_bytes, batch_s)) {
+            // This node takes work only through its executor, where other requesters' batches are.
+            if (c.is_local && !local_->Hold(batch->id, spec)) continue;
             booked_mem = sched::HeldOn(c, need);
-            shared_->AddLocked(c.node_id, 1, booked_mem, gpus);
+            shared_->AddLocked(c.node_id, 1, need.cores, booked_mem, gpus);
             std::lock_guard block(batch->mu);
             batch->assigned_node = c.node_id;
             batch->is_local = c.is_local;
@@ -578,7 +589,8 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
     };
     auto release = [&](const std::string& node_id) {
         std::lock_guard lock(shared_->mu);
-        shared_->AddLocked(node_id, -1, booked_mem, gpus);
+        shared_->AddLocked(node_id, -1, need.cores, booked_mem, gpus);
+        if (local_ && node_id == local_id_) local_->Release(batch->id); // a hold never handed over
         {
             std::lock_guard block(batch->mu);
             if (batch->assigned_node == node_id) batch->assigned_node.clear();
@@ -629,8 +641,11 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
                     why = "has " + std::to_string(c.gpus) + " GPU(s), the batch needs " + std::to_string(gpus);
                 } else if (!need.arch.empty() && c.arch != need.arch) {
                     why = "is " + c.arch + ", the batch needs " + need.arch;
-                } else if (c.cores_total > 0 && c.cores_total < std::max(need.cores, 1)) {
-                    why = "has " + std::to_string(c.cores_total) + " cores, the batch needs " + std::to_string(need.cores);
+                } else if (c.work_cores == 0) {
+                    why = "takes no work from other nodes (zm doctor there says why)";
+                } else if (c.work_cores < std::max(need.cores, 1)) {
+                    why = "lets work hold " + std::to_string(c.work_cores) + " cores, the batch needs " +
+                          std::to_string(need.cores);
                 }
                 if (!why.empty()) reasons += (reasons.empty() ? "" : "; ") + c.node_id.substr(0, 8) + ": " + why;
             }
@@ -729,7 +744,6 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
             refused[node_id] = {v1::REJECT_UNSPECIFIED, err};
             continue;
         }
-        NoteCoreLimit(node_id, *reply);
         if (!reply->accepted()) {
             release(node_id);
             const Rejection rej = ClassifyRejection(*reply);
@@ -860,6 +874,8 @@ void Placer::HedgeScan() {
         cfg = hedge_cfg_;
     }
     if (!cfg.survival || cfg.max_copies < 2) return;
+    // Not the tail while work waits for a slot here: a copy would take one from it.
+    if (cfg.backlog && cfg.backlog()) return;
 
     struct Pick {
         std::shared_ptr<Batch> batch;

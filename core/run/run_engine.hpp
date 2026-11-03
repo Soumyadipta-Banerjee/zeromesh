@@ -6,8 +6,11 @@
 //   - items wait for the items they come after, whose outputs are then overlaid onto their inputs;
 //   - each ready item is looked up in the item cache, here and then on the team's nodes; a hit is
 //     placed at its destinations without running anything;
-//   - the rest are packed into batches: longest first (by learned cost), sized so the live slots
-//     stay busy without a long tail, consecutive items together where the stage combines them;
+//   - the rest are packed into batches when a slot is free to run them (never ahead of one, so an
+//     item is never stuck in a batch that waits while another slot frees): longest first (by
+//     learned cost), sized so the live slots stay busy without a long tail, a fixed number of
+//     items each balanced across the batches, consecutive items together where the stage combines
+//     them;
 //   - batches go to the executor (the placer) one attempt at a time. Each item's outcome arrives as
 //     soon as it finishes: its outputs are written to their destinations, it is cached, and its
 //     cost and memory are learned;
@@ -52,8 +55,8 @@ struct EngineDeps {
     std::shared_ptr<node::Executor> executor;
     std::shared_ptr<ResourceModel> resources;
     std::shared_ptr<Team> team; // may be null: this node's cache only
-    // Slots the team has right now for items needing `resources` placed by `where`.
-    std::function<int(const v1::Resources&, v1::Where)> slots;
+    // The team's slots for batches needing `resources` placed by `where`: at once, and free now.
+    std::function<node::Slots(const v1::Resources&, v1::Where)> slots;
     std::function<std::string(const std::string& node)> hostname;
     std::filesystem::path runs_dir; // run history: <id>.json reports and <id>.spec
     std::string node_id;
@@ -89,6 +92,9 @@ public:
     std::shared_ptr<RunEvents> Watch(const std::string& run_id, bool from_start);
     // Runs in memory (running first), then the history, newest first.
     [[nodiscard]] std::vector<v1::RunStatus> List() const;
+
+    // True while a run has items ready to run but not in a batch: they wait for a slot.
+    [[nodiscard]] bool Backlog() const;
 
     // Inputs of running runs and outputs of runs finished in the last few minutes: GC keeps these.
     [[nodiscard]] std::unordered_set<std::string> ProtectedBlobHashes() const;

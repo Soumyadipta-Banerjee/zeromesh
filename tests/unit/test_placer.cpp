@@ -261,19 +261,17 @@ TEST(PlacerSaysTheExcludedNodesLeftWhenNoneIsBack) {
 }
 
 TEST(PlacerInFlightCapSpread) {
-    // Rank alone: with 2 total cores and 1-core batches, a node with in_flight=2 is filtered out.
+    // Rank alone: with 2 work cores and 1-core batches, a node whose 2 cores are held is filtered out.
     zeromesh::sched::Need need;
     Candidate a;
     a.node_id = "a";
-    a.cores_total = 2;
-    a.cores_free = 2;
+    a.work_cores = 2;
     a.mem_available = 1ull << 30;
     a.arch = "x86_64";
     a.on_ac = true;
-    a.in_flight = 0;
     Candidate b = a;
     b.node_id = "b";
-    b.in_flight = 2;
+    b.cores_in_use = 2;
     auto ranked = zeromesh::sched::Rank(need, {a, b});
     ASSERT_EQ(ranked.size(), 1u);
     ASSERT_EQ(ranked[0].node_id, std::string("a"));
@@ -285,8 +283,8 @@ TEST(PlacerInFlightCapSpread) {
     donor.Start();
     requester.Admit(donor);
     auto peer = donor.AsPeer();
-    peer.cores = 1;      // hardware capacity used by the in-flight cap
-    peer.cores_free = 0; // a load spike must not change the cap
+    peer.work_cores = 1; // what it announces it lets work hold
+    peer.cores_free = 0; // a load spike must not change that
     requester.peers->Upsert(peer);
     AttemptLog one, two;
     auto placer = PlacerFor(requester);
@@ -308,6 +306,33 @@ TEST(PlacerInFlightCapSpread) {
     ASSERT_EQ(peak, 1);
 }
 
+TEST(PlacerRoutesAroundItsOwnNodeWhenOtherRequestersFillIt) {
+    // This node's executor also runs other requesters' batches. While they hold its slots, our
+    // batch goes to an idle peer instead of queueing behind them here.
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    a.peers->Upsert(b.AsPeer());
+    ASSERT_TRUE(a.executor->Hold("node-x/b1", ShBatch({{"x", "true"}})));
+    ASSERT_TRUE(a.executor->Hold("node-x/b2", ShBatch({{"y", "true"}})));
+    AttemptLog log;
+    auto placer = PlacerFor(a);
+    placer->Execute("run/b1", ShBatch({{"z", "echo ran"}}, {}, v1::ANYWHERE), {}, log.Callbacks());
+    ASSERT_TRUE(log.Wait());
+    Expect(log.result.failure == v1::FAILURE_NONE, log.result.message);
+    ASSERT_EQ(log.result.node, std::string("node-b"));
+
+    // Room again here: this node, holding the input already, runs the next one itself.
+    a.executor->Release("node-x/b1");
+    a.executor->Release("node-x/b2");
+    AttemptLog local;
+    placer->Execute("run/b2", ShBatch({{"w", "echo ran"}}, {}, v1::ANYWHERE), {}, local.Callbacks());
+    ASSERT_TRUE(local.Wait());
+    ASSERT_EQ(local.result.node, std::string("node-a"));
+}
+
 TEST(PlacerRoutesAroundADonorThatRefusesOnPolicy) {
     // The donor ranked first is on a low battery and refuses by policy. That is its answer, not
     // the batch's: the idle donor behind it must get the batch.
@@ -321,8 +346,7 @@ TEST(PlacerRoutesAroundADonorThatRefusesOnPolicy) {
     a.Admit(weak);
     a.Admit(ok);
     auto weak_peer = weak.AsPeer();
-    weak_peer.cores = 16; // looks like the better donor, so it is offered first
-    weak_peer.cores_free = 16;
+    weak_peer.work_cores = 16; // looks like the better donor, so it is offered first
     a.peers->Upsert(weak_peer);
     a.peers->Upsert(ok.AsPeer());
     AttemptLog log;
@@ -347,8 +371,8 @@ TEST(PlacerFailsABatchLargerThanEveryDonorsLimit) {
     spec.mutable_resources()->set_cores(4);
     placer->Execute("run/b1", spec, {}, log.Callbacks());
     ASSERT_TRUE(log.Wait(std::chrono::seconds(10)));
-    Expect(log.result.message.find("no node can run this batch: node-sma: ") == 0 &&
-               log.result.message.find("donor policy allows only 2") != std::string::npos,
+    Expect(log.result.message.find("no node can run this batch: node-sma: lets work hold 2 cores, the batch needs 4") ==
+               0,
            log.result.message);
     ASSERT_TRUE(log.result.failure == v1::FAILURE_NO_CAPACITY); // the node's size, not missing software
 }
@@ -387,21 +411,33 @@ TEST(PlacerCountsSlotsForTheRunEngine) {
     b.Start();
     a.Admit(b);
     auto pb = b.AsPeer();
-    pb.cores = 9; // donates 8
+    pb.work_cores = 8;
     a.peers->Upsert(pb);
     auto placer = PlacerFor(a);
     v1::Resources one;
     one.set_cores(1);
-    // Local: the executor's 2 cores. Peer: 8 donated cores.
-    ASSERT_EQ(placer->SlotsFor(one, v1::ANYWHERE), 10);
-    ASSERT_EQ(placer->SlotsFor(one, v1::LOCAL_ONLY), 2);
-    ASSERT_EQ(placer->SlotsFor(one, v1::REMOTE_ONLY), 8);
+    // Local: the executor's 2 cores. Peer: the 8 it announces. Nothing runs: all are free.
+    auto slots = [&](const v1::Resources& r, v1::Where w) {
+        const auto s = placer->SlotsFor(r, w);
+        return std::pair{s.total, s.free};
+    };
+    ASSERT_TRUE(slots(one, v1::ANYWHERE) == std::pair(10, 10));
+    ASSERT_TRUE(slots(one, v1::LOCAL_ONLY) == std::pair(2, 2));
+    ASSERT_TRUE(slots(one, v1::REMOTE_ONLY) == std::pair(8, 8));
     v1::Resources four;
     four.set_cores(4);
-    ASSERT_EQ(placer->SlotsFor(four, v1::REMOTE_ONLY), 2);
+    ASSERT_TRUE(slots(four, v1::REMOTE_ONLY) == std::pair(2, 2));
+    // No GPU donor: one slot all the same, so the batch goes to the placer and fails with why.
     v1::Resources gpu;
     gpu.set_gpus(1);
-    ASSERT_EQ(placer->SlotsFor(gpu, v1::REMOTE_ONLY), 1); // no GPU donor: at least one slot
+    ASSERT_TRUE(slots(gpu, v1::REMOTE_ONLY) == std::pair(1, 1));
+
+    // What this node's executor holds for anyone is taken; so is what our batches hold on a peer,
+    // and our batches still looking for a node.
+    ASSERT_TRUE(a.executor->Hold("other-requester/b9", ShBatch({{"x", "true"}})));
+    ASSERT_TRUE(slots(one, v1::LOCAL_ONLY) == std::pair(2, 1));
+    a.executor->Release("other-requester/b9");
+    ASSERT_TRUE(slots(one, v1::LOCAL_ONLY) == std::pair(2, 2));
 }
 
 TEST(PlacerWaitsForADonorThatIsBusyNowButBigEnough) {

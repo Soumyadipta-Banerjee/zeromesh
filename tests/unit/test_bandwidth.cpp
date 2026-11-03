@@ -31,8 +31,7 @@ bool Near(double a, double b, double rel = 1e-6) {
 Candidate Peer(std::string id, int64_t missing, double bandwidth = 0.0) {
     Candidate c;
     c.node_id = std::move(id);
-    c.cores_total = 4;
-    c.cores_free = 4;
+    c.work_cores = 4;
     c.mem_available = 1ull << 30;
     c.cpu_load_pct = 10;
     c.on_ac = true;
@@ -135,9 +134,9 @@ TEST(RankUsesTheDefaultBandwidthForNodesNeverMeasured) {
 TEST(RankWeighsTransferTimeAgainstTheTasksOwnLength) {
     zeromesh::sched::Need spec;
     Candidate roomy = Peer("roomy", 500'000'000, 1e6); // 500 s of transfer, but more free slots
-    roomy.cores_total = 16;
+    roomy.work_cores = 16;
     Candidate snug = Peer("snug", 0, 100e6);
-    snug.cores_total = 4;
+    snug.work_cores = 4;
     // A 60 s task would spend most of its time waiting for the input: the idle-but-ready donor wins.
     ASSERT_EQ(Ids(Rank(spec, {snug, roomy}, 0, 60.0)), (std::vector<std::string>{"snug", "roomy"}));
     // Against a task that runs for hours the same 500 s is noise, so the extra slots decide.

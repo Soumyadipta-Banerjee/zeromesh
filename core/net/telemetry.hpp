@@ -14,6 +14,8 @@ struct Telemetry {
     uint64_t mem_total{0};     // bytes
     uint64_t mem_available{0}; // bytes
     uint64_t work_mem{0};      // bytes all work here may use together (the donor policy's budget); 0: none
+    int work_cores{0};         // cores the work of other nodes may hold here (donor policy, within this
+                               // node's slots); 0: this node runs no work
     double cpu_load_pct{0.0};  // 0..100
     int battery_pct{-1};       // -1 when there is no battery
     bool on_ac{true};

@@ -244,10 +244,12 @@ int Daemon::Run() {
     std::mutex telemetry_mu;
     net::TelemetrySampler telemetry_sampler;
     std::atomic<uint64_t> work_mem{0}; // the memory budget of contained work, once it is set up
+    std::atomic<int> work_cores{0};    // the cores other nodes' work may hold here, once that is known
     auto telemetry_fn = [&]() {
         std::lock_guard lock(telemetry_mu);
         net::Telemetry t = telemetry_sampler.Sample();
         t.work_mem = work_mem.load();
+        t.work_cores = work_cores.load();
         return t;
     };
     DrainController drain_controller;
@@ -330,6 +332,13 @@ int Daemon::Run() {
         const exec::cgroup::Work work = exec::cgroup::SetUpWork(policy.MemoryBudget(telemetry_fn().mem_total));
         runner = std::make_shared<exec::BatchRunner>(cas, merkle, config_.state_dir / "scratch", work);
         work_mem = work.budget; // announced: requesters hold their reservations to it
+        // The cores batches may hold here at once. Leave a spare core on larger machines so zmd/OS
+        // stay responsive. On dual-core donors (common in small VMs) hw-1 leaves a single slot and
+        // loses to distcc-style N/N hosts.
+        const int hw = static_cast<int>(std::thread::hardware_concurrency());
+        const int slots = hw <= 2 ? std::max(1, hw) : std::max(1, hw - 1);
+        // Announced, and what offers are admitted against: requesters know a donor's room exactly.
+        work_cores = runner->unavailable().empty() ? std::min(policy.CoreLimit(hw), slots) : 0;
         work_pressure = std::make_unique<WorkPressure>(work.root, [r = runner] { return r->StopYoungestForMemory(); });
         if (!runner->unavailable().empty()) std::cerr << "zmd: this node runs no work: " << runner->unavailable() << "\n";
         registry = std::make_shared<plugin::Registry>();
@@ -383,10 +392,6 @@ int Daemon::Run() {
             auto peer = peers->Get(peer_id);
             return peer ? client_factory(*peer) : nullptr;
         };
-        int hw = static_cast<int>(std::thread::hardware_concurrency());
-        // Leave a spare core on larger machines so zmd/OS stay responsive. On dual-core donors
-        // (common in small VMs) hw-1 leaves a single slot and loses to distcc-style N/N hosts.
-        int slots = hw <= 2 ? std::max(1, hw) : std::max(1, hw - 1);
         local_executor =
             std::make_shared<LocalExecutor>(runner, registry, node_id, slots, config_.state_dir, cas, client_for_node);
 
@@ -471,6 +476,10 @@ int Daemon::Run() {
         // max_copies from donor.toml; the hazard model supplies each donor's survival odds.
         auto hedge_cfg = sched::Placer::HedgeConfig::FromPolicy(policy);
         hedge_cfg.survival = sched::HazardModel::MakeSurvivalFn(hazard);
+        hedge_cfg.backlog = [weak = std::weak_ptr<run::RunEngine>(engine)] {
+            auto e = weak.lock();
+            return e && e->Backlog();
+        };
         placer->SetHedging(std::move(hedge_cfg));
         node_service->SetHazardProvider([m = self_hazard, id = node_id] {
             return m->Observations(id) > 0 ? m->HazardPerHour(id) : -1.0; // -1: no record yet
@@ -627,8 +636,11 @@ int Daemon::Run() {
                             end_departure(kDepartSignal);
                     }
                 }
-                // Freeze kept tasks once the grace window is over; kill the ones whose ttl ran out.
-                if (node_service) node_service->TickDeparture();
+                if (node_service) {
+                    // Freeze kept tasks once the grace window is over; kill the ones whose ttl ran out.
+                    node_service->TickDeparture();
+                    node_service->ExpireOffers();
+                }
                 for (int i = 0; i < 10 && !admit_stop.load(); ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }

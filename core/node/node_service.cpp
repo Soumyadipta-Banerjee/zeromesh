@@ -17,6 +17,11 @@ namespace zeromesh::node {
 
 namespace {
 
+// The id a remote batch runs (and is held) under in the executor.
+std::string ExecId(const std::string& requester, const std::string& batch_id) {
+    return requester + "/" + batch_id;
+}
+
 grpc::Status Denied(const std::string& why) {
     return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, why);
 }
@@ -105,18 +110,30 @@ bool NodeService::RemoteExecConfigured() const {
     return cas_ && registry_ && executor_ && telemetry_;
 }
 
-void NodeService::PurgeExpiredLocked() {
-    const auto now = std::chrono::steady_clock::now();
-    std::erase_if(reserved_, [&](const auto& kv) { return kv.second.expires <= now; });
+void NodeService::ExpireOffers(std::chrono::steady_clock::time_point now) {
+    std::lock_guard lock(mu_);
+    PurgeExpiredLocked(now);
+}
+
+void NodeService::PurgeExpiredLocked(std::chrono::steady_clock::time_point now) {
+    DropReservationsLocked([&](const BatchKey&, const Reservation& r) { return r.expires <= now; });
+}
+
+void NodeService::DropReservationsLocked(const std::function<bool(const BatchKey&, const Reservation&)>& drop) {
+    for (auto it = reserved_.begin(); it != reserved_.end();) {
+        if (!drop(it->first, it->second)) {
+            ++it;
+            continue;
+        }
+        if (executor_) executor_->Release(ExecId(it->first.first, it->first.second));
+        it = reserved_.erase(it);
+    }
 }
 
 int NodeService::CoresInUseLocked() const {
-    // Offers not yet run, and every batch the executor accepted (queued or running, this node's own
+    // Every batch the executor holds, queued or runs (offers not yet run and this node's own
     // included): what is promised, not what happens to be busy this second.
-    int n = 0;
-    for (const auto& [key, r] : reserved_) n += std::max(r.spec.resources().cores(), 1);
-    if (executor_) n += executor_->CoresReserved();
-    return n;
+    return executor_ ? executor_->CoresReserved() : 0;
 }
 
 int NodeService::CoresOfLocked(const std::string& requester) const {
@@ -138,11 +155,7 @@ int NodeService::GpusInUseLocked() const {
 }
 
 int64_t NodeService::MemPromisedLocked() const {
-    int64_t n = 0;
-    const int64_t budget = executor_ ? executor_->MemoryBudget() : 0;
-    for (const auto& [key, r] : reserved_) n += HeldMemory(r.spec.resources().mem_bytes(), r.spec.alone(), budget);
-    if (executor_) n += executor_->MemReserved();
-    return n;
+    return executor_ ? executor_->MemReserved() : 0;
 }
 
 std::unordered_set<std::string> NodeService::ProtectedBlobHashes() const {
@@ -198,7 +211,7 @@ int NodeService::CancelPreemptible() {
             if (r.preemptible) exec_ids.push_back(r.exec_id);
         }
         // Drop reservations so requesters cannot start a run after we drain.
-        reserved_.clear();
+        DropReservationsLocked([](const BatchKey&, const Reservation&) { return true; });
     }
     for (const auto& id : exec_ids) {
         if (executor_) executor_->Cancel(id);
@@ -233,7 +246,8 @@ NodeService::DepartureReport NodeService::BeginDeparture(v1::DepartureReason rea
         draining_ = true;
         const int64_t ttl_ms = std::clamp<int64_t>(ttl.count(), 0, UINT32_MAX);
         drain_reason_ = FormatDepartureReason(reason, static_cast<uint32_t>(ttl_ms));
-        reserved_.clear(); // a requester must not start a run from an offer made before we left
+        // A requester must not start a run from an offer made before we left.
+        DropReservationsLocked([](const BatchKey&, const Reservation&) { return true; });
         departure_ = Departure{};
         departure_.active = true;
         departure_.ttl = ttl;
@@ -489,7 +503,6 @@ grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* 
     if (auto refusal = CheckEnv(spec.env(), probe)) return reject(refusal->reason, refusal->kind);
 
     const net::Telemetry telemetry = telemetry_();
-    resp->set_core_limit(static_cast<uint32_t>(policy_.CoreLimit(telemetry.cores_total)));
     std::vector<v1::Digest> missing;
     for (const auto& d : needed) {
         if (!cas_->HasBlob(d.hash)) missing.push_back(ToProto(d));
@@ -511,7 +524,8 @@ grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* 
     if (running_.contains(key)) {
         return reject("batch " + req->batch_id() + " is already running here", v1::REJECT_BUSY, kRetryDuplicateMs);
     }
-    reserved_.erase(key); // a repeated offer replaces the old reservation
+    // A repeated offer replaces the old reservation.
+    DropReservationsLocked([&](const BatchKey& k, const Reservation&) { return k == key; });
 
     Demand demand;
     demand.cores = std::max(spec.resources().cores(), 1);
@@ -535,7 +549,7 @@ grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* 
     for (const auto& [id, t] : waiting_) requesters.insert(id);
     const bool others_waiting = std::any_of(waiting_.begin(), waiting_.end(), [&](const auto& kv) { return kv.first != peer; });
     if (others_waiting && requesters.size() > 1) {
-        const int limit = policy_.CoreLimit(telemetry.cores_total);
+        const int limit = telemetry.work_cores;
         const int share = std::max(1, (limit + static_cast<int>(requesters.size()) - 1) / static_cast<int>(requesters.size()));
         if (CoresOfLocked(peer) + demand.cores > share) {
             return reject("fair share: " + std::to_string(requesters.size()) + " requesters share this node",
@@ -543,6 +557,12 @@ grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* 
         }
     }
 
+    // The executor is the one place this node takes work: the offer's room is held there, beside
+    // this node's own batches, which the policy check above may have raced.
+    if (!executor_->Hold(ExecId(peer, req->batch_id()), spec)) {
+        waiting_[peer] = now;
+        return reject("the cores and memory this node lets work hold are taken", v1::REJECT_BUSY, kRetryHeldMs);
+    }
     resp->set_accepted(true);
     for (auto& d : missing) *resp->add_missing() = std::move(d);
     reserved_[key] = Reservation{spec, std::move(needed), now + kOfferReservation};
@@ -653,7 +673,7 @@ grpc::Status NodeService::RunBatch(grpc::ServerContext* ctx, const v1::RunReques
 
     v1::BatchSpec spec;
     std::shared_ptr<RuntimeHistory> history;
-    const std::string exec_id = peer + "/" + req->batch_id();
+    const std::string exec_id = ExecId(peer, req->batch_id());
     {
         std::lock_guard lock(mu_);
         PurgeExpiredLocked();
@@ -748,7 +768,7 @@ grpc::Status NodeService::CancelBatch(grpc::ServerContext* ctx, const v1::BatchR
     std::string exec_id;
     {
         std::lock_guard lock(mu_);
-        reserved_.erase(key);
+        DropReservationsLocked([&](const BatchKey& k, const Reservation&) { return k == key; });
         auto it = running_.find(key);
         if (it != running_.end()) exec_id = it->second.exec_id;
     }

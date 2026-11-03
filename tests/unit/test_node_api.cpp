@@ -197,8 +197,8 @@ TEST(NodeApiOfferChecksTheEnvironment) {
 
 TEST(NodeApiFairShareMakesRoomForAWaitingRequester) {
     auto key = zeromesh::net::GenerateTeamKey();
-    TestNodeFull donor("node-d", key), r1("node-r1", key), r2("node-r2", key);
-    donor.telemetry.cores_total = 5; // donates 4
+    TestNodeFull donor("node-d", key, 4), r1("node-r1", key), r2("node-r2", key);
+    donor.telemetry.cores_total = 5; // donates 4, and runs 4 at once
     donor.Start();
     r1.Start();
     r2.Start();
@@ -233,6 +233,43 @@ TEST(NodeApiFairShareMakesRoomForAWaitingRequester) {
     Expect(over->reason().find("fair share") != std::string::npos, over->reason());
     auto mine = c2->Offer("b1", Shell("true"), {}, &err);
     Expect(mine && mine->accepted(), mine ? mine->reason() : err);
+}
+
+TEST(NodeApiTakesWorkOnlyThroughTheExecutorsHold) {
+    // The executor is the one place a node takes work: an offer is held there, beside the node's
+    // own batches, and given back when the requester cancels it.
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull donor("node-d", key), r("node-r", key);
+    donor.Start();
+    r.Start();
+    r.Admit(donor);
+    auto c = r.ClientTo(donor);
+    std::string err;
+    // The donor's own batches hold both of its slots: no room for anyone else's.
+    ASSERT_TRUE(donor.executor->Hold("node-d/own1", Shell("true")));
+    ASSERT_TRUE(donor.executor->Hold("node-d/own2", Shell("true")));
+    auto full = c->Offer("a0", Shell("true"), {}, &err);
+    ASSERT_TRUE(full && !full->accepted() && full->reject_kind() == v1::REJECT_BUSY);
+    donor.executor->Release("node-d/own1");
+    auto taken = c->Offer("a1", Shell("true"), {}, &err);
+    Expect(taken && taken->accepted(), taken ? taken->reason() : err);
+    ASSERT_EQ(donor.executor->CoresReserved(), 2); // its own batch and the offer
+    // While the offer holds the slot, the donor's own placer cannot take it.
+    ASSERT_FALSE(donor.executor->Hold("node-d/own3", Shell("true")));
+    v1::BatchRef ref;
+    ref.set_batch_id("a1");
+    grpc::ClientContext ctx;
+    v1::Empty empty;
+    ASSERT_TRUE(RawStub(r, donor)->CancelBatch(&ctx, ref, &empty).ok());
+    ASSERT_EQ(donor.executor->CoresReserved(), 1);
+    donor.executor->Release("node-d/own2");
+
+    // A requester that goes away between Offer and RunBatch: its offer expires and gives the room back.
+    auto gone = c->Offer("a2", Shell("true"), {}, &err);
+    Expect(gone && gone->accepted(), gone ? gone->reason() : err);
+    ASSERT_EQ(donor.executor->CoresReserved(), 1);
+    donor.service->ExpireOffers(std::chrono::steady_clock::now() + zeromesh::node::kOfferReservation);
+    ASSERT_EQ(donor.executor->CoresReserved(), 0);
 }
 
 TEST(NodeApiAnswersTeamCacheLookups) {

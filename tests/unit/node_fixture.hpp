@@ -72,14 +72,15 @@ struct TestNodeFull {
     std::unique_ptr<grpc::Server> server;
     int port = 0;
 
-    TestNodeFull(std::string name, net::TeamKey key)
+    // `slots`: the cores its executor runs batches on at once.
+    TestNodeFull(std::string name, net::TeamKey key, int slots = 2)
         : node_id(std::move(name)), id(net::Identity::LoadOrCreate(dir / "state", node_id)),
           pins(std::make_shared<net::PinStore>(dir / "state")), team(key),
           cas(std::make_shared<store::CasStore>(dir / "cas")), merkle(std::make_shared<store::MerkleBuilder>(cas)),
           registry(std::make_shared<plugin::Registry>()) {
         registry->RegisterEnv(envhost::Make());
         runner = std::make_shared<exec::BatchRunner>(cas, merkle, dir / "scratch", exec::cgroup::SetUpWork(0));
-        executor = std::make_shared<node::LocalExecutor>(runner, registry, node_id, 2, dir / "state", cas,
+        executor = std::make_shared<node::LocalExecutor>(runner, registry, node_id, slots, dir / "state", cas,
                                                          node::NodeClientFactory{});
     }
 
@@ -87,6 +88,14 @@ struct TestNodeFull {
 
     TestNodeFull(const TestNodeFull&) = delete;
     TestNodeFull& operator=(const TestNodeFull&) = delete;
+
+    // `telemetry` as zmd announces it: the cores other nodes' work may hold here are the donor
+    // policy's within the executor's slots.
+    net::Telemetry Announced() const {
+        net::Telemetry t = telemetry;
+        t.work_cores = executor->Unavailable().empty() ? std::min(policy.CoreLimit(t.cores_total), executor->CoreCapacity()) : 0;
+        return t;
+    }
 
     void Start(int want_port = 0) {
         service = std::make_unique<node::NodeService>(
@@ -96,7 +105,7 @@ struct TestNodeFull {
                 info.set_node_id(n);
                 return info;
             },
-            cas, registry, executor, [this] { return telemetry; }, policy, peers);
+            cas, registry, executor, [this] { return Announced(); }, policy, peers);
         grpc::ServerBuilder b;
         node::ApplyNodeApiMessageLimits(b);
         net::AllowKeepalivePings(b);
@@ -136,6 +145,7 @@ struct TestNodeFull {
         p.node_port = port;
         p.cores = telemetry.cores_total;
         p.cores_free = telemetry.cores_free;
+        p.work_cores = Announced().work_cores;
         p.memory_bytes = telemetry.mem_total;
         p.mem_available = telemetry.mem_available;
         p.cpu_load_pct = telemetry.cpu_load_pct;

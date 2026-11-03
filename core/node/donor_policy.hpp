@@ -49,7 +49,7 @@ int64_t HeldMemory(int64_t reserved, bool alone, int64_t budget);
 
 struct DonorPolicy {
     int allow_on_battery_above{50}; // percent; on battery, accept only above this
-    int max_cores{-1};              // -1 = cores_total - 1
+    int max_cores{-1};              // cores donated; -1: all of a machine with 2, else all but one
     // The share of this machine's memory all work run here may use together, the owner's own runs
     // included; at least kMemoryKept stays for the system, zmd and the owner. The kernel holds work
     // to it (exec/cgroup.hpp): an estimate that is too small ends in an OOM kill of that batch,
@@ -87,7 +87,8 @@ struct DonorPolicy {
     // The parser behind Load; warnings go to `warn` (prefixed with `origin:line:`).
     static DonorPolicy Parse(std::string_view text, std::ostream& warn, std::string_view origin = "donor.toml");
 
-    // The number of cores this node donates in total.
+    // The cores this node donates in total; what it announces and admits against (work_cores) is
+    // this within its executor's slots.
     [[nodiscard]] int CoreLimit(int cores_total) const;
     // max_memory_pct of mem_total, leaving kMemoryKept (half of a tiny machine), in bytes; 0 when
     // mem_total is unknown.
@@ -101,8 +102,9 @@ struct DonorPolicy {
     // callers that only care about the battery threshold).
     [[nodiscard]] bool ShouldDrain(const net::Telemetry& t) const;
 
-    // nullopt when a batch with `demand` is acceptable right now given the node's telemetry, the
-    // cores, memory and GPUs already promised to other batches; otherwise why not, and for how long.
+    // nullopt when a batch with `demand` is acceptable right now given the node's telemetry (its
+    // work_cores and memory budget), the cores, memory and GPUs already promised to other batches;
+    // otherwise why not, and for how long.
     [[nodiscard]] std::optional<Refusal> Evaluate(const net::Telemetry& t, const Demand& demand, int cores_in_use,
                                                   int64_t mem_promised = 0, int gpus_in_use = 0) const;
 };

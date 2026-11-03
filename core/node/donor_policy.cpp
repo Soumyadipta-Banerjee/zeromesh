@@ -215,17 +215,17 @@ std::optional<Refusal> DonorPolicy::Evaluate(const net::Telemetry& t, const Dema
         return Refusal{RefusalKind::Unsupported, "the batch needs arch " + arch + ", this node is " + t.arch, 0};
     }
     const int need = std::max(demand.cores, 1);
-    const int limit = CoreLimit(t.cores_total);
+    const int limit = t.work_cores;
     if (need > limit) {
         return Refusal{RefusalKind::Unsupported,
-                       "the batch needs " + std::to_string(need) + " cores; donor policy allows only " +
+                       "the batch needs " + std::to_string(need) + " cores; this node lets work hold " +
                            std::to_string(limit),
                        0};
     }
     if (cores_in_use + need > limit) {
         return Refusal{RefusalKind::Busy,
-                       "the batch needs " + std::to_string(need) + " cores; donor policy allows " + std::to_string(limit) +
-                           " and " + std::to_string(cores_in_use) + " are in use",
+                       "the batch needs " + std::to_string(need) + " cores; this node lets work hold " +
+                           std::to_string(limit) + " and " + std::to_string(cores_in_use) + " are held",
                        kRetryCoresBusyMs};
     }
     // Memory against the budget the kernel holds all work to, never what is free this second: what

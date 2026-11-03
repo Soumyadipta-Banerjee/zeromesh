@@ -29,6 +29,11 @@ using NodeClientFactory = std::function<std::shared_ptr<NodeClient>(const std::s
 // provider), and hand it to the BatchRunner. The kernel holds all work to the memory budget
 // (exec/cgroup.hpp), so admission counts reservations against it and never guesses from what is
 // free this second.
+//
+// Every batch this node takes is held first (Hold): a donor's accepted offer, a batch its own placer
+// puts here. A hold succeeds only when the batch fits beside everything held, queued and running, so
+// a held batch starts as soon as it is handed over, and no batch waits here that another node could
+// run.
 class LocalExecutor final : public Executor {
 public:
     // `core_capacity` is how many cores batches may hold at once; the memory budget is the runner's
@@ -42,13 +47,20 @@ public:
     LocalExecutor(const LocalExecutor&) = delete;
     LocalExecutor& operator=(const LocalExecutor&) = delete;
 
-    // `exclude` is ignored: this executor is one node.
+    // `exclude` is ignored: this executor is one node. A batch held under `batch_id` goes ahead of
+    // any that was not; one handed over without a hold waits in the queue until it fits.
     void Execute(const std::string& batch_id, const v1::BatchSpec& spec, std::set<std::string> exclude,
                  BatchCallbacks cb) override;
+    // Reserves the cores and memory of a batch that Execute hands over shortly under the same id:
+    // true when they fit beside everything held, queued and running; nothing else can take them
+    // then. False also for an id already held or here.
+    bool Hold(const std::string& batch_id, const v1::BatchSpec& spec);
+    // Gives back a hold whose batch never came. A no-op once it was handed over.
+    void Release(const std::string& batch_id);
     // A queued batch completes at once as cancelled; a running one is stopped (SIGTERM, then SIGKILL).
     void Cancel(const std::string& batch_id) override;
 
-    // Cores and memory held by batches this executor has accepted, queued or running.
+    // Cores and memory reserved here: held, queued or running.
     [[nodiscard]] int CoresReserved() const;
     [[nodiscard]] int64_t MemReserved() const;
     [[nodiscard]] int CoreCapacity() const { return core_capacity_; }
@@ -80,7 +92,10 @@ private:
         std::string current;
     };
 
+    [[nodiscard]] std::shared_ptr<Item> MakeItem(const std::string& batch_id, const v1::BatchSpec& spec) const;
     void Worker(std::stop_token st);
+    [[nodiscard]] int CoresReservedLocked() const;
+    [[nodiscard]] int64_t MemReservedLocked() const;
     [[nodiscard]] bool FitsLocked(const Item& item) const;
     BatchDone Run(Item& item);
 
@@ -99,7 +114,10 @@ private:
     int64_t mem_in_use_{0};
     std::deque<std::shared_ptr<Item>> queue_;
     std::unordered_map<std::string, std::shared_ptr<Item>> items_; // queued and running
-    std::vector<std::jthread> workers_;                            // last: joined first
+    std::unordered_map<std::string, std::shared_ptr<Item>> held_;  // held, not yet handed over
+    int held_cores_{0};
+    int64_t held_mem_{0};
+    std::vector<std::jthread> workers_; // last: joined first
 };
 
 } // namespace zeromesh::node

@@ -25,18 +25,18 @@ struct Need {
 struct Candidate {
     std::string node_id;
     bool is_local{false};
-    int cores_total{0}; // fixed machine size (slot capacity); not live free cores
-    int cores_free{0};  // informational / load hint only
+    // Cores work may hold there: what a peer announces (work_cores), this node's executor slots.
+    // Not what is idle this second: a busy render must not make the machine look gone.
+    int work_cores{0};
+    int cores_in_use{0}; // of those, held now: by our batches on a peer, by every batch in this node's executor
     uint64_t mem_available{0};
     uint64_t mem_total{0};      // 0 = unknown; then mem_committed is ignored
-    int64_t mem_committed{0};   // memory the tasks we already run there declared (resources.mem_bytes)
-    int core_limit{-1};         // cores the donor says it donates in total (its donor policy); -1 = unknown
+    int64_t mem_committed{0};   // memory held there, as cores_in_use (the batches' reservations)
     double cpu_load_pct{0.0};
     bool on_ac{true};
     std::string arch;
     std::chrono::milliseconds latency{0};
     int64_t missing_bytes{-1}; // input bytes the node lacks; -1 = unknown
-    int in_flight{0};          // tasks this node already runs for us
     // E[min(remaining life, task time)] in seconds from the departure-hazard model (sched/hazard.hpp);
     // <= 0 or non-finite = unknown (no history).
     double expected_min_s{-1.0};
@@ -61,10 +61,7 @@ double TransferCostSeconds(const Candidate& c, int64_t unknown_missing_bytes);
 // Filter:
 //   - arch equals need.arch; an empty one means the local candidate's
 //     arch (no arch filter when there is neither)
-//   - slots = min(cores_total, core_limit)/cores - in_flight >= 1 (cores 0 means 1). Uses
-//     cores_total so a busy Cycles job does not shrink capacity to zero mid-job; core_limit
-//     (what the donor's policy lets it donate, once it has told us) caps it, since a donor
-//     refuses what its limit does not cover however big the machine is.
+//   - free slots = (work_cores - cores_in_use) / cores >= 1 (cores 0 means 1)
 //   - mem_need and mem_limit at most mem_total (the memory the node lets work use), and what the
 //     batch holds there (HeldOn) at most mem_available and mem_total - mem_committed: the batches
 //     we already placed there have not necessarily touched their memory yet

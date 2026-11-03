@@ -7,10 +7,11 @@
 //     lacks (or let it seed them from another donor), RunBatch while forwarding its events, and
 //     pull each item's outputs into the local CAS as soon as the donor reports the item.
 // Capacity is reserved atomically before Offer/Run so concurrent batches do not all pile onto the
-// top-ranked node (at most min(cores_total, core_limit)/cores in flight per node; the memory and
-// GPUs declared by batches already placed there are held against the node's totals). A rejection
-// is that donor's answer only: a passing one (busy, owner at the keyboard, draining, fair share)
-// defers the donor for the retry_after it names, any other skips it for this attempt.
+// top-ranked node: a peer takes batches up to the work_cores it announces (and the memory it lets
+// work use), less what our batches hold there; this node takes them only through its executor's
+// hold, beside what other requesters run here. A rejection is that donor's answer only: a passing
+// one (busy, owner at the keyboard, draining, fair share) defers the donor for the retry_after it
+// names, any other skips it for this attempt.
 //
 // One Execute is one attempt. It ends when the batch ran (every item reported, or the donor was
 // lost, drained or failed the sandbox), or when no node can run it at all; deciding whether to try
@@ -68,8 +69,11 @@ public:
                  node::BatchCallbacks cb) override;
     void Cancel(const std::string& batch_id) override;
 
-    // How many batches needing `resources` the team could run at once right now (at least 1).
-    [[nodiscard]] int SlotsFor(const v1::Resources& resources, v1::Where where) const;
+    // How many batches needing `resources` the team could run at once (total, at least 1), and how
+    // many could start now (free): what our batches hold, and our batches still looking for a
+    // node, are taken. Where no node has a slot for them at all, one at a time (so the batch fails
+    // with why).
+    [[nodiscard]] node::Slots SlotsFor(const v1::Resources& resources, v1::Where where) const;
 
     // Rank donors by expected committed work (slots x E[min(remaining life, batch time)]) from
     // this departure-hazard model. Without a model, or until it has any history, placement
@@ -112,6 +116,9 @@ public:
         double default_horizon_s{120.0}; // assumed remaining runtime; capped by the batch's timeout
         std::chrono::milliseconds check_interval{200};
         std::chrono::milliseconds retry_after{1000}; // pause between two hedge launches for one batch
+        // True while this node has work waiting for a slot (the run engine's items not yet in a
+        // batch): it is not the tail then, and a copy would take a slot from real work.
+        std::function<bool()> backlog;
 
         static HedgeConfig FromPolicy(const node::DonorPolicy& policy);
     };
@@ -145,9 +152,8 @@ private:
     // Lets `target` fetch what it misses from donors known to hold it; returns what is still missing.
     std::vector<v1::Digest> SeedFromPeers(const std::string& target, node::NodeClient& client,
                                           std::vector<v1::Digest> missing);
-    // Remembers the core limit a donor reported in an OfferReply; Rank uses it as the donor's capacity.
-    void NoteCoreLimit(const std::string& node_id, const v1::OfferReply& reply);
-    [[nodiscard]] int CoreLimitOf(const std::string& node_id) const; // -1 until the donor has told us
+    // Our batches (copies excepted) not on a node yet. Needs shared_->mu.
+    [[nodiscard]] int UnplacedLocked() const;
     void NoteHolders(const std::string& node_id, const std::vector<v1::Digest>& digests);
     void AddSeeded(const std::string& node_id, uint64_t bytes);
     void HedgeScan();
@@ -176,9 +182,6 @@ private:
 
     std::mutex sent_mu_;
     std::map<std::string, std::shared_ptr<DonorSent>> sent_;
-
-    mutable std::mutex limits_mu_;
-    std::unordered_map<std::string, int> core_limit_; // node id -> cores it donates in total
 
     mutable std::mutex seed_mu_;
     SeedConfig seed_cfg_;

@@ -50,30 +50,71 @@ LocalExecutor::~LocalExecutor() {
         std::lock_guard lock(mu_);
         left.swap(queue_);
         items_.clear();
+        held_.clear();
     }
     for (auto& item : left) {
         if (item->cb.on_done) item->cb.on_done(Done(node_id_, v1::FAILURE_CANCELLED, "node shutting down", true));
     }
 }
 
-void LocalExecutor::Execute(const std::string& batch_id, const v1::BatchSpec& spec, std::set<std::string>,
-                            BatchCallbacks cb) {
+std::shared_ptr<LocalExecutor::Item> LocalExecutor::MakeItem(const std::string& batch_id,
+                                                             const v1::BatchSpec& spec) const {
     auto item = std::make_shared<Item>();
     item->batch_id = batch_id;
     item->spec = spec;
-    item->cb = std::move(cb);
     item->cores = std::clamp(spec.resources().cores(), 1, core_capacity_);
     item->mem = HeldMemory(spec.resources().mem_bytes(), spec.alone(), mem_budget_);
     item->never_fits = mem_budget_ > 0 && (spec.mem_need() > mem_budget_ || spec.mem_limit() > mem_budget_);
+    return item;
+}
+
+void LocalExecutor::Execute(const std::string& batch_id, const v1::BatchSpec& spec, std::set<std::string>,
+                            BatchCallbacks cb) {
+    auto item = MakeItem(batch_id, spec);
+    item->cb = std::move(cb);
     {
         std::lock_guard lock(mu_);
         items_[batch_id] = item;
-        queue_.push_back(item);
+        if (auto h = held_.find(batch_id); h != held_.end()) {
+            // Its room was promised: it starts before anything that came without a hold.
+            held_cores_ -= h->second->cores;
+            held_mem_ -= h->second->mem;
+            held_.erase(h);
+            queue_.push_front(item);
+        } else {
+            queue_.push_back(item);
+        }
     }
     cv_.notify_all();
 }
 
+bool LocalExecutor::Hold(const std::string& batch_id, const v1::BatchSpec& spec) {
+    auto item = MakeItem(batch_id, spec);
+    if (item->never_fits) return false;
+    std::lock_guard lock(mu_);
+    if (held_.contains(batch_id) || items_.contains(batch_id)) return false;
+    if (CoresReservedLocked() + item->cores > core_capacity_) return false;
+    if (mem_budget_ > 0 && MemReservedLocked() + item->mem > mem_budget_) return false;
+    held_cores_ += item->cores;
+    held_mem_ += item->mem;
+    held_[batch_id] = std::move(item);
+    return true;
+}
+
+void LocalExecutor::Release(const std::string& batch_id) {
+    {
+        std::lock_guard lock(mu_);
+        auto h = held_.find(batch_id);
+        if (h == held_.end()) return;
+        held_cores_ -= h->second->cores;
+        held_mem_ -= h->second->mem;
+        held_.erase(h);
+    }
+    cv_.notify_all(); // what it held may let a queued batch start
+}
+
 void LocalExecutor::Cancel(const std::string& batch_id) {
+    Release(batch_id); // held only: nothing was handed over, so nothing to report
     std::shared_ptr<Item> dequeued;
     {
         std::lock_guard lock(mu_);
@@ -94,14 +135,22 @@ void LocalExecutor::Cancel(const std::string& batch_id) {
 
 int LocalExecutor::CoresReserved() const {
     std::lock_guard lock(mu_);
-    int n = 0;
-    for (const auto& [id, item] : items_) n += item->cores;
-    return n;
+    return CoresReservedLocked();
 }
 
 int64_t LocalExecutor::MemReserved() const {
     std::lock_guard lock(mu_);
-    int64_t n = 0;
+    return MemReservedLocked();
+}
+
+int LocalExecutor::CoresReservedLocked() const {
+    int n = held_cores_;
+    for (const auto& [id, item] : items_) n += item->cores;
+    return n;
+}
+
+int64_t LocalExecutor::MemReservedLocked() const {
+    int64_t n = held_mem_;
     for (const auto& [id, item] : items_) n += item->mem;
     return n;
 }
@@ -118,10 +167,11 @@ std::vector<LocalExecutor::Active> LocalExecutor::ListActive() const {
     return out;
 }
 
-// A batch starts when its cores and its memory reservation fit beside the running batches'.
+// A batch starts when its cores and its memory reservation fit beside the running batches' and what
+// is held for batches not yet handed over.
 bool LocalExecutor::FitsLocked(const Item& item) const {
-    if (cores_in_use_ + item.cores > core_capacity_) return false;
-    return mem_budget_ <= 0 || mem_in_use_ + item.mem <= mem_budget_;
+    if (cores_in_use_ + held_cores_ + item.cores > core_capacity_) return false;
+    return mem_budget_ <= 0 || mem_in_use_ + held_mem_ + item.mem <= mem_budget_;
 }
 
 void LocalExecutor::Worker(std::stop_token st) {

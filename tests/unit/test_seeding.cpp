@@ -191,8 +191,7 @@ TEST(SeedingDonorFetchesSharedInputFromPeerNotRequester) {
     auto loaded_b = b.AsPeer();
     // Placement ranks transfer time ahead of load, and b already holds the big blob, so "busy" must
     // mean "no free slot" for c to be chosen.
-    loaded_b.cores = 0;
-    loaded_b.cores_free = 0;
+    loaded_b.work_cores = 0;
     a.peers->Upsert(loaded_b);
     auto idle_c = c.AsPeer();
     idle_c.cpu_load_pct = 1;
@@ -231,8 +230,7 @@ TEST(SeedingFallsBackToRequesterWhenPeerCannotBeReached) {
     auto loaded_b = b.AsPeer();
     // Placement ranks transfer time ahead of load, and b already holds the big blob, so "busy" must
     // mean "no free slot" for c to be chosen.
-    loaded_b.cores = 0;
-    loaded_b.cores_free = 0;
+    loaded_b.work_cores = 0;
     a.peers->Upsert(loaded_b);
     auto idle_c = c.AsPeer();
     idle_c.cpu_load_pct = 1;
@@ -267,8 +265,7 @@ TEST(SeedingCanBeDisabled) {
     auto loaded_b = b.AsPeer();
     // Placement ranks transfer time ahead of load, and b already holds the big blob, so "busy" must
     // mean "no free slot" for c to be chosen.
-    loaded_b.cores = 0;
-    loaded_b.cores_free = 0;
+    loaded_b.work_cores = 0;
     a.peers->Upsert(loaded_b);
     auto idle_c = c.AsPeer();
     idle_c.cpu_load_pct = 1;

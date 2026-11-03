@@ -855,22 +855,24 @@ void RunEngine::Dispatch(const RunPtr& run) {
             return std::max(deps_.resources->Need(st.kind(), it.spec.cost()).value_or(0), it.need_override);
         };
 
-        int limit = 1;
-        for (const auto& [key, members] : groups) {
-            const v1::Stage& st = run->stages[key.stage];
-            const int slots = deps_.slots ? deps_.slots(st.resources(), key.local_only ? v1::LOCAL_ONLY : st.where()) : 1;
-            limit = std::max(limit, std::max(slots, 1) + std::max(1, slots / 2));
-        }
-        int in_flight = static_cast<int>(run->batches.size());
-
+        // A batch is formed only for a slot free to run it now: its items are bound to it when they
+        // can start, the longest first, and the rest wait here, not in a batch queued somewhere.
+        int launched = 0; // formed in this call: the placer does not count them yet
+        std::map<std::pair<size_t, v1::Where>, node::Slots> slots_of; // asked once per stage and placement
         for (auto& [key, members] : groups) {
-            if (in_flight >= limit) break;
             const v1::Stage& st = run->stages[key.stage];
-            const int slots = std::max(1, deps_.slots ? deps_.slots(st.resources(), st.where()) : 1);
+            const v1::Where where = key.local_only ? v1::LOCAL_ONLY : st.where();
+            auto [known, fresh] = slots_of.try_emplace({key.stage, where});
+            if (fresh) known->second = deps_.slots ? deps_.slots(st.resources(), where) : node::Slots{1, 1};
+            const node::Slots slots = known->second;
+            const int room = slots.free - launched;
+            if (room <= 0) continue;
             double total = 0;
             for (size_t i : members) total += seconds(run->items[i]);
-            const double target = std::clamp(total / (2.0 * slots), kMinBatchSeconds, kMaxBatchSeconds);
-            const int fixed = run->policy.batch();
+            const double target = std::clamp(total / (2.0 * std::max(slots.total, 1)), kMinBatchSeconds, kMaxBatchSeconds);
+            const size_t fixed =
+                run->policy.batch() > 0 ? std::min(static_cast<size_t>(run->policy.batch()), kMaxItemsPerBatch) : 0;
+            auto full_up = [&](const auto& chunks) { return static_cast<int>(chunks.size()) >= room; };
 
             std::vector<std::vector<size_t>> chunks;
             if (!st.combine().argv().empty()) {
@@ -884,16 +886,17 @@ void RunEngine::Dispatch(const RunPtr& run) {
                     const Item& it = run->items[i];
                     const bool consecutive = !cur.empty() && it.spec.seq() == run->items[cur.back()].spec.seq() + 1 &&
                                              it.spec.cwd() == run->items[cur.back()].spec.cwd();
-                    const bool full = fixed > 0 ? static_cast<int>(cur.size()) >= fixed : cur_s >= target;
+                    const bool full = fixed > 0 ? cur.size() >= fixed : cur_s >= target;
                     if (!cur.empty() && (!consecutive || full || cur.size() >= kMaxItemsPerBatch)) {
                         chunks.push_back(std::move(cur));
                         cur.clear();
                         cur_s = 0;
+                        if (full_up(chunks)) break;
                     }
                     cur.push_back(i);
                     cur_s += seconds(it);
                 }
-                if (!cur.empty()) chunks.push_back(std::move(cur));
+                if (!cur.empty() && !full_up(chunks)) chunks.push_back(std::move(cur));
             } else {
                 // Longest first, so the slowest items do not end up in the tail.
                 std::sort(members.begin(), members.end(), [&](size_t a, size_t b) {
@@ -902,24 +905,39 @@ void RunEngine::Dispatch(const RunPtr& run) {
                     if (x.spec.priority() != y.spec.priority()) return x.spec.priority() > y.spec.priority();
                     return seconds(x) > seconds(y);
                 });
-                std::vector<size_t> cur;
-                double cur_s = 0;
-                for (size_t i : members) {
-                    cur.push_back(i);
-                    cur_s += seconds(run->items[i]);
-                    const bool full = fixed > 0 ? static_cast<int>(cur.size()) >= fixed : cur_s >= target;
-                    if (full || cur.size() >= kMaxItemsPerBatch) {
-                        chunks.push_back(std::move(cur));
-                        cur.clear();
-                        cur_s = 0;
+                if (fixed > 0) {
+                    // `fixed` items a batch, as many batches as can start now. Each item goes to the
+                    // batch with the least work so far: no batch gets all the long ones.
+                    const size_t n = std::min(static_cast<size_t>(room), (members.size() + fixed - 1) / fixed);
+                    chunks.resize(n);
+                    std::vector<double> work(n, 0.0);
+                    for (size_t k = 0; k < members.size() && k < n * fixed; ++k) {
+                        size_t best = n;
+                        for (size_t b = 0; b < n; ++b) {
+                            if (chunks[b].size() < fixed && (best == n || work[b] < work[best])) best = b;
+                        }
+                        chunks[best].push_back(members[k]);
+                        work[best] += seconds(run->items[members[k]]);
                     }
+                } else {
+                    std::vector<size_t> cur;
+                    double cur_s = 0;
+                    for (size_t i : members) {
+                        cur.push_back(i);
+                        cur_s += seconds(run->items[i]);
+                        if (cur_s >= target || cur.size() >= kMaxItemsPerBatch) {
+                            chunks.push_back(std::move(cur));
+                            cur.clear();
+                            cur_s = 0;
+                            if (full_up(chunks)) break;
+                        }
+                    }
+                    if (!cur.empty() && !full_up(chunks)) chunks.push_back(std::move(cur));
                 }
-                if (!cur.empty()) chunks.push_back(std::move(cur));
             }
 
+            launched += static_cast<int>(chunks.size());
             for (auto& chunk : chunks) {
-                if (in_flight >= limit) break;
-                ++in_flight;
                 const std::string bid = "b" + std::to_string(++run->batch_seq);
                 v1::BatchSpec b;
                 b.set_name(run->id + "/" + bid);
@@ -1504,6 +1522,17 @@ std::vector<v1::RunStatus> RunEngine::List() const {
         if (auto rep = Report(id)) out.push_back(rep->run());
     }
     return out;
+}
+
+bool RunEngine::Backlog() const {
+    std::lock_guard lock(mu_);
+    for (const auto& [id, run] : runs_) {
+        if (run->done || run->finishing || run->cancelled) continue;
+        for (const auto& it : run->items) {
+            if (it.state == v1::ITEM_QUEUED && it.batch.empty()) return true;
+        }
+    }
+    return false;
 }
 
 std::unordered_set<std::string> RunEngine::ProtectedBlobHashes() const {

@@ -147,7 +147,9 @@ struct Engine {
         d.executor = exec;
         d.resources = resources;
         d.team = std::move(team);
-        d.slots = [this](const v1::Resources&, v1::Where) { return slots; };
+        d.slots = [this](const v1::Resources&, v1::Where) {
+            return zeromesh::node::Slots{slots, std::max(slots - exec->active.load(), 0)};
+        };
         d.hostname = [](const std::string& id) { return "host-" + id; };
         d.runs_dir = s.dir / "runs";
         d.node_id = "requester";
@@ -677,6 +679,46 @@ TEST(EngineCombinesConsecutiveItemsAndBatchesLongestFirst) {
     *spec2.add_items() = big;
     e2.Wait(e2.engine->Submit(spec2));
     ASSERT_EQ(e2.exec->batches.front().items(0).id(), std::string("big"));
+}
+
+TEST(EngineFormsABatchOnlyForAFreeSlot) {
+    // Never ahead of a slot: an item bound to a batch that waits for one could not run on the next
+    // slot that frees.
+    Engine e;
+    TempDir ws;
+    e.slots = 2;
+    auto spec = e.Spec(ws.path());
+    spec.mutable_policy()->set_batch(1);
+    for (int i = 0; i < 10; ++i) *spec.add_items() = MakeItem("i" + std::to_string(i), {"t", std::to_string(i)});
+    auto rep = e.Wait(e.engine->Submit(spec));
+    ASSERT_EQ(rep.run().succeeded(), 10);
+    ASSERT_EQ(e.exec->peak_active, 2);
+}
+
+TEST(EngineSpreadsTheLongItemsOfAFixedBatchSize) {
+    // --batch 4 over 4 long and 12 short items, 4 slots: each batch gets one long item, not one
+    // batch all four (the run would last as long as that batch).
+    Engine e;
+    TempDir ws;
+    e.slots = 4;
+    e.resources->Record("k", 1, 50000, 0);
+    e.resources->Record("k", 1 << 20, 900000, 0);
+    auto spec = e.Spec(ws.path());
+    spec.mutable_stages(0)->set_kind("k");
+    spec.mutable_policy()->set_batch(4);
+    for (int i = 0; i < 16; ++i) {
+        auto it = MakeItem("i" + std::to_string(i), {"t", std::to_string(i)});
+        it.set_cost(i < 4 ? (1 << 20) : 1); // i0..i3 are long
+        *spec.add_items() = it;
+    }
+    e.Wait(e.engine->Submit(spec));
+    ASSERT_EQ(e.exec->batches.size(), static_cast<size_t>(4));
+    for (const auto& b : e.exec->batches) {
+        ASSERT_EQ(b.items_size(), 4);
+        int long_items = 0;
+        for (const auto& it : b.items()) long_items += std::stoi(it.id().substr(1)) < 4 ? 1 : 0;
+        ASSERT_EQ(long_items, 1);
+    }
 }
 
 TEST(EngineSessionsTakeItemsUntilClosedAndResumeUsesTheCache) {
