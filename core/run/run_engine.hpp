@@ -16,8 +16,9 @@
 //     most twice). An item no node could run gets one try on this node (local fallback);
 //   - checkpoints an item saved come back with the next attempt;
 //   - a run ends when every item is done (sessions: once closed), on the first failure unless
-//     keep_going, on cancel, or at its deadline or budget. Its report is written to the adapter's
-//     report_path and kept in the run history, with the run's spec so it can be resumed.
+//     keep_going, on cancel, or at its deadline or budget. A session no client has watched for
+//     session_grace is cancelled: whoever was adding its items is gone. Its report is written to the
+//     adapter's report_path and kept in the run history, with the run's spec so it can be resumed.
 
 #include "node/executor.hpp"
 #include "run/event_stream.hpp"
@@ -28,6 +29,7 @@
 #include "store/store.hpp"
 #include "zeromesh/v1/run.pb.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
@@ -56,6 +58,9 @@ struct EngineDeps {
     std::filesystem::path runs_dir; // run history: <id>.json reports and <id>.spec
     std::string node_id;
     std::string arch;
+    // How long an open run may go unwatched before it is cancelled: time for a session whose
+    // process restarted to attach again.
+    std::chrono::milliseconds session_grace{std::chrono::minutes(1)};
 };
 
 using RunEvents = EventStream<v1::RunEvent>;

@@ -97,7 +97,8 @@ message RunSpec {
   repeated Stage stages = 4;     // an item names its stage; "" is a valid name
   repeated Item items = 5;
   Policy policy = 6;
-  bool open = 7;                 // a session: AddItems until CloseRun
+  bool open = 7;                 // a session: AddItems until CloseRun. Its client watches it (WatchRun)
+                                 // meanwhile: unwatched for a minute, it is cancelled ("disconnect")
   string report_path = 8;        // absolute; written when the run ends
   bool stream_logs = 9;          // RunEvents carry item stdout and stderr
 }
@@ -231,7 +232,7 @@ message RunStatus {
   repeated NodeShare nodes = 18;
   string report_path = 19;
   string workspace_path = 20;
-  string ended_by = 21;   // "" | "failure" | "cancel" | "deadline" | "budget"
+  string ended_by = 21;   // "" | "failure" | "cancel" | "deadline" | "budget" | "disconnect"
 }
 
 message RunEvent {

@@ -154,6 +154,7 @@ struct RunEngine::Run {
     std::vector<Item> items;
     std::unordered_map<std::string, size_t> index;
     bool open{false};
+    int64_t watched_ms{0}; // an open run: when a client last watched it
     bool cancelled{false};
     bool finishing{false}; // the report is being written; `done` (and the finished event) follow
     bool done{false};
@@ -248,6 +249,7 @@ std::string RunEngine::Submit(v1::RunSpec spec) {
     run->policy = Normalized(spec.policy());
     run->open = spec.open();
     run->started_ms = NowMs();
+    run->watched_ms = run->started_ms;
     if (!spec.workspace().hash().empty()) {
         if (!store::CasStore::IsValidHash(spec.workspace().hash()) || !deps_.cas->HasBlob(spec.workspace().hash())) {
             throw std::invalid_argument("workspace " + spec.workspace().hash() + " is not in this node's store");
@@ -528,6 +530,15 @@ bool RunEngine::Pump(const RunPtr& run) {
         if (!run->cancelled && run->policy.has_budget_core_s() && run->policy.budget_core_s() > 0 &&
             run->core_s >= run->policy.budget_core_s()) {
             CancelLocked(*run, "budget");
+        }
+        // Only a session's client adds its items and closes it, and it watches the run while it lives.
+        // Watched by none for the grace, that client is gone: the run ends instead of staying open.
+        if (!run->cancelled && run->open) {
+            std::erase_if(run->watchers, [](const auto& w) { return w->closed(); });
+            if (!run->watchers.empty())
+                run->watched_ms = now;
+            else if (now - run->watched_ms >= deps_.session_grace.count())
+                CancelLocked(*run, "disconnect");
         }
         if (run->cancelled) {
             for (auto& [id, b] : run->batches) {

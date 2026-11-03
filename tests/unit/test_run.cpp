@@ -138,7 +138,7 @@ struct Engine {
     int slots = 4;
     std::unique_ptr<run::RunEngine> engine;
 
-    explicit Engine(std::shared_ptr<run::Team> team = nullptr) {
+    explicit Engine(std::shared_ptr<run::Team> team = nullptr, std::chrono::milliseconds session_grace = 1min) {
         exec->cas = s.cas;
         run::EngineDeps d;
         d.cas = s.cas;
@@ -152,6 +152,7 @@ struct Engine {
         d.runs_dir = s.dir / "runs";
         d.node_id = "requester";
         d.arch = "x86_64";
+        d.session_grace = session_grace;
         engine = std::make_unique<run::RunEngine>(std::move(d));
     }
 
@@ -698,6 +699,47 @@ TEST(EngineSessionsTakeItemsUntilClosedAndResumeUsesTheCache) {
     ASSERT_EQ(e.exec->batches.size(), ran); // nothing ran
     auto runs = e.engine->List();
     ASSERT_TRUE(runs.size() >= 2);
+}
+
+TEST(EngineCancelsASessionNoClientWatches) {
+    Engine e(nullptr, 400ms);
+    TempDir ws;
+    auto spec = e.Spec(ws.path());
+    spec.set_open(true);
+    *spec.add_items() = MakeItem("one", {"t", "1"});
+
+    // Watched, it stays open past the grace and takes items.
+    const std::string id = e.engine->Submit(spec);
+    auto events = e.engine->Watch(id, true);
+    std::this_thread::sleep_for(1s);
+    e.engine->AddItems(id, {MakeItem("two", {"t", "2"})});
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (e.engine->Status(id)->succeeded() < 2) {
+        ASSERT_TRUE(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(20ms);
+    }
+    ASSERT_FALSE(e.engine->Status(id)->done());
+    // Its client gone (its watch ends with its process), the run is cancelled after the grace.
+    events->Close();
+    auto rep = e.Wait(id);
+    ASSERT_EQ(rep.run().ended_by(), std::string("disconnect"));
+    ASSERT_EQ(rep.run().succeeded(), 2);
+    bool refused = false;
+    try {
+        e.engine->AddItems(id, {MakeItem("three", {"t", "3"})});
+    } catch (const std::invalid_argument&) {
+        refused = true;
+    }
+    ASSERT_TRUE(refused);
+
+    // Never watched: the same.
+    ASSERT_EQ(e.Wait(e.engine->Submit(spec)).run().ended_by(), std::string("disconnect"));
+    // Closed, it needs no watcher: it ends once its items are done.
+    const std::string closed = e.engine->Submit(spec);
+    e.engine->Close(closed);
+    auto done = e.Wait(closed);
+    ASSERT_EQ(done.run().ended_by(), std::string());
+    ASSERT_EQ(done.run().succeeded(), 1);
 }
 
 TEST(EngineCancelEndsTheRunAndKeepsFinishedItems) {

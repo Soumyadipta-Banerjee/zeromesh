@@ -47,6 +47,13 @@ def _error(e: grpc.RpcError) -> ZeroMeshError:
     return ZeroMeshError(e.details() or str(e.code()))
 
 
+def _events(call) -> Iterator[run_pb2.RunEvent]:
+    try:
+        yield from call
+    except grpc.RpcError as e:
+        raise _error(e) from None
+
+
 class Client:
     """A connection to the local zmd. Every method raises ZeroMeshError with zmd's message when the
     call fails, and DaemonNotRunning when zmd went away."""
@@ -117,11 +124,10 @@ class Client:
 
     def watch(self, run_id: str, from_start: bool = True) -> Iterator[run_pb2.RunEvent]:
         """The run's events until its last one (`finished`). With `from_start`, what already happened
-        is replayed first."""
-        try:
-            yield from self.stub.WatchRun(client_pb2.WatchRequest(run_id=run_id, from_start=from_start))
-        except grpc.RpcError as e:
-            raise _error(e) from None
+        is replayed first. The watch starts here, not at the first event read: while it lasts, it
+        keeps an open run open (see Session)."""
+        call = self.stub.WatchRun(client_pb2.WatchRequest(run_id=run_id, from_start=from_start))
+        return _events(call)
 
     def get_run(self, run_id: str) -> run_pb2.RunStatus:
         return self._call(self.stub.GetRun, client_pb2.RunRef(run_id=run_id))

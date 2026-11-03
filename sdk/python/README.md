@@ -97,6 +97,11 @@ with Session("zm-explore", workspace=".") as s:
             s.close()                      # no more items; the loop ends when they are done
 ```
 
+Only the session adds items, so zmd keeps a session's run open only while a client watches it, as
+a `Session` does from the start. If its process dies before closing, the run is cancelled a minute
+later (`ended_by` "disconnect"), unless a restarted process takes it over first with
+`Session.attach(run_id)`.
+
 ## Reports
 
 ```python
