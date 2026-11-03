@@ -99,8 +99,8 @@ bool MerkleBuilder::IsSafeName(std::string_view name) {
 }
 
 bool MerkleBuilder::Skipped(const std::string& rel, bool is_dir, const TreeOptions& opts) {
-    if (opts.ignore && opts.ignore->Ignored(rel, is_dir)) return true;
-    if (opts.deny && opts.deny->Ignored(rel, is_dir)) {
+    if (opts.ignore && opts.ignore->IgnoredEntry(rel, is_dir)) return true;
+    if (opts.deny && opts.deny->IgnoredEntry(rel, is_dir)) {
         if (opts.denied) opts.denied->push_back(rel);
         return true;
     }

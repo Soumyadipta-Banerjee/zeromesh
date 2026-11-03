@@ -58,7 +58,7 @@ bool SizeWithinLimit(const fs::path& dir, const std::string& rel, const store::I
         struct stat st{};
         if (lstat(it->path().c_str(), &st) != 0) continue;
         const bool is_dir = S_ISDIR(st.st_mode);
-        if (rules.Ignored(child_rel, is_dir)) continue;
+        if (rules.IgnoredEntry(child_rel, is_dir)) continue;
         if (is_dir) {
             if (!SizeWithinLimit(it->path(), child_rel, rules, limit, total)) return false;
         } else if (S_ISREG(st.st_mode)) {
@@ -285,7 +285,7 @@ grpc::Status ClientService::Snapshot(grpc::ServerContext*, const v1::SnapshotReq
              !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
             const std::string rel = fs::relative(it->path(), root, ec).string();
             const bool dir = it->is_directory(ec) && !it->is_symlink(ec);
-            if (ignore.Ignored(rel, dir) || deny.Ignored(rel, dir)) {
+            if (ignore.IgnoredEntry(rel, dir) || deny.IgnoredEntry(rel, dir)) {
                 if (dir) it.disable_recursion_pending();
                 continue;
             }

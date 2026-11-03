@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace zeromesh::store {
@@ -22,6 +24,10 @@ public:
     // rel_path uses '/' separators and is relative to the root.
     [[nodiscard]] bool Ignored(std::string_view rel_path, bool is_dir) const;
 
+    // The same for a walk that never enters an ignored directory: rel_path's directories have
+    // passed already, so only rel_path itself is matched.
+    [[nodiscard]] bool IgnoredEntry(std::string_view rel_path, bool is_dir) const;
+
 private:
     struct Rule {
         std::vector<std::string> segments; // pattern split on '/'
@@ -34,6 +40,12 @@ private:
     [[nodiscard]] bool MatchesSelf(const std::vector<std::string>& path, bool is_dir) const;
 
     std::vector<Rule> rules_;
+    // Rules without a wildcard are looked up instead of tried in turn, so a long list of exact
+    // paths (an adapter's excludes) costs one lookup per entry: anchored ones by the path they
+    // name, the others by the entry's name. Each maps to its rules' indices in rules_, ascending.
+    std::unordered_map<std::string, std::vector<size_t>> exact_paths_;
+    std::unordered_map<std::string, std::vector<size_t>> exact_names_;
+    std::vector<size_t> patterns_; // the other rules' indices, ascending
 };
 
 } // namespace zeromesh::store
