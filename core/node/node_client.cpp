@@ -66,10 +66,15 @@ struct FirstSeenFingerprint {
     }
 };
 
+// `node_id`, when known, is the name the peer's certificate carries (its subject): the TLS server
+// name asked for must be that, not the address, or the peer logs "No match found for server name"
+// at every handshake. Who the peer is stays the fingerprint check.
 std::shared_ptr<grpc::Channel> MakeNodeApiChannel(const std::string& address,
-                                                  std::shared_ptr<grpc::ChannelCredentials> creds, bool keepalive) {
+                                                  std::shared_ptr<grpc::ChannelCredentials> creds, bool keepalive,
+                                                  const std::optional<std::string>& node_id) {
     grpc::ChannelArguments args;
     args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
+    if (node_id && !node_id->empty()) args.SetSslTargetNameOverride(*node_id);
     args.SetMaxReceiveMessageSize(kNodeApiMaxMessageSize);
     args.SetMaxSendMessageSize(kNodeApiMaxMessageSize);
     if (keepalive) {
@@ -111,7 +116,8 @@ void NodeClient::SetDeadline(grpc::ClientContext& ctx) {
 bool NodeClient::Admit(const net::TeamKey& key, std::string* error) {
     auto seen = std::make_shared<FirstSeenFingerprint>();
     auto channel = MakeNodeApiChannel(
-        address_, net::ClientCreds(self_, [seen](std::string_view fp) { return seen->Accept(fp); }), false);
+        address_, net::ClientCreds(self_, [seen](std::string_view fp) { return seen->Accept(fp); }), false,
+        peer_node_id());
     auto stub = v1::NodeApi::NewStub(channel);
 
     const std::string nonce_c = AdmitNonce();
@@ -172,7 +178,8 @@ std::shared_ptr<v1::NodeApi::Stub> NodeClient::PinnedStub(std::string* error) {
             auto pinned = pins->FingerprintFor(node);
             return pinned && *pinned == fp;
         };
-        pinned_stub_ = v1::NodeApi::NewStub(MakeNodeApiChannel(address_, net::ClientCreds(self_, accept), true));
+        pinned_stub_ =
+            v1::NodeApi::NewStub(MakeNodeApiChannel(address_, net::ClientCreds(self_, accept), true, peer_node_id_));
     }
     return pinned_stub_;
 }

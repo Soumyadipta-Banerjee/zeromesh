@@ -130,7 +130,7 @@ struct TestNodeFull {
 
     // Runs admission with `peer`; afterwards both have pinned each other.
     void Admit(const TestNodeFull& peer) const {
-        node::NodeClient c(peer.address(), id, pins);
+        node::NodeClient c(peer.address(), id, pins, peer.node_id); // as the daemon: the id discovery announced
         std::string err;
         if (!c.Admit(team, &err)) throw std::runtime_error("admission failed: " + err);
     }
