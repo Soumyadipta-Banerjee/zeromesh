@@ -18,10 +18,15 @@
 #include <sys/types.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
+#include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace zeromesh::exec::cgroup {
@@ -58,6 +63,28 @@ std::optional<std::filesystem::path> CreateChild(const std::filesystem::path& ba
 // Kills what is left in `dir` and below, waits up to `wait` for it to empty, then removes the
 // cgroups bottom-up. False when something could not be removed.
 bool Remove(const std::filesystem::path& dir, std::chrono::milliseconds wait = std::chrono::seconds(5));
+
+// Removes cgroups beside the work, in order. A finished item's sandbox goes on tearing down after its
+// result is in (bwrap's own init dies with it, and dropping its namespaces waits for RCU grace periods,
+// which on a VM whose host is busy can take a second); nothing needs to wait for that. The destructor
+// removes what is still queued.
+class Reaper {
+public:
+    Reaper();
+    ~Reaper();
+    Reaper(const Reaper&) = delete;
+    Reaper& operator=(const Reaper&) = delete;
+
+    void Remove(std::filesystem::path dir);
+
+private:
+    void Loop(std::stop_token st);
+
+    std::mutex mu_;
+    std::condition_variable_any cv_;
+    std::deque<std::filesystem::path> queue_;
+    std::jthread thread_; // last: stopped and joined first
+};
 
 // cgroup.procs of `dir`, opened for writing (close-on-exec), or -1. A forked child joins `dir` by
 // writing "0" to it: no allocation between fork and exec.

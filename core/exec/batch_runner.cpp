@@ -351,7 +351,7 @@ BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& 
         tagged_.erase(spec.tag);
     }
     if (cgroup_observer_) cgroup_observer_(*batch_cg, false);
-    cgroup::Remove(*batch_cg);
+    reaper_.Remove(*batch_cg);
     ForceRemove(scratch);
     return result;
 }
@@ -478,9 +478,10 @@ void BatchRunner::RunGroup(const BatchRunSpec& spec, Group& g, const fs::path& l
     }
     const fs::path cg = *made_cg;
     struct RemoveCgroup {
+        cgroup::Reaper& reaper;
         fs::path dir;
-        ~RemoveCgroup() { cgroup::Remove(dir); }
-    } remove_cg{cg};
+        ~RemoveCgroup() { reaper.Remove(dir); }
+    } remove_cg{reaper_, cg};
     const int procs_fd = cgroup::OpenProcs(cg);
     if (procs_fd < 0) {
         fail_all(ItemFailure::Sandbox, "cannot open " + (cg / "cgroup.procs").string() + ": " + std::strerror(errno));

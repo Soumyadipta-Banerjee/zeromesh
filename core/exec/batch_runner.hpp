@@ -166,6 +166,7 @@ private:
     std::filesystem::path scratch_base_;
     InputCache inputs_;
     cgroup::Work work_;
+    cgroup::Reaper reaper_; // a finished item's or batch's cgroup, removed beside the next
     std::string bwrap_path_;
     std::string bwrap_error_;
     std::string unavailable_;

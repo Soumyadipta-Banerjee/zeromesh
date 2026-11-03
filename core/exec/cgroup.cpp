@@ -314,6 +314,35 @@ bool Remove(const fs::path& dir, std::chrono::milliseconds wait) {
     return ok;
 }
 
+Reaper::Reaper() : thread_([this](std::stop_token st) { Loop(st); }) {}
+
+Reaper::~Reaper() {
+    thread_.request_stop();
+    cv_.notify_all();
+}
+
+void Reaper::Remove(fs::path dir) {
+    {
+        std::lock_guard lock(mu_);
+        queue_.push_back(std::move(dir));
+    }
+    cv_.notify_all();
+}
+
+void Reaper::Loop(std::stop_token st) {
+    for (;;) {
+        fs::path dir;
+        {
+            std::unique_lock lock(mu_);
+            cv_.wait(lock, st, [this] { return !queue_.empty(); });
+            if (queue_.empty()) return; // stopping, and nothing left to remove
+            dir = std::move(queue_.front());
+            queue_.pop_front();
+        }
+        cgroup::Remove(dir);
+    }
+}
+
 int OpenProcs(const fs::path& dir) {
     return open((dir / "cgroup.procs").c_str(), O_WRONLY | O_CLOEXEC);
 }

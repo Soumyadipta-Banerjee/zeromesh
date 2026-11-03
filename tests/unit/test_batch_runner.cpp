@@ -9,6 +9,8 @@
 #include "plugins/env-host/env_host.hpp"
 
 #include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -508,4 +510,39 @@ TEST(BatchItemStoppedForMemoryIsAnOomOfTheBudget) {
     ASSERT_FALSE(f.results["long"].oom_at_limit);
     ASSERT_EQ(f.results["long"].budget, 512ll << 20);
     ASSERT_TRUE(f.results["long"].message.find("stalled on memory") != std::string::npos);
+}
+
+TEST(CgroupReaperRemovesBesideTheCaller) {
+    // Handing a cgroup to the reaper returns at once, even with a process still in it; the reaper
+    // kills what is left and removes the cgroups, the item's before its batch's.
+    const auto work = zeromesh::exec::cgroup::SetUpWork(0);
+    if (work.root.empty()) {
+        std::cout << "[SKIP] " << work.problem << "\n";
+        return;
+    }
+    std::string err;
+    const auto batch = zeromesh::exec::cgroup::CreateBatch(work.root, 1, 0, &err);
+    ASSERT_TRUE(batch.has_value());
+    const auto item = zeromesh::exec::cgroup::CreateChild(*batch, "g0", &err);
+    ASSERT_TRUE(item.has_value());
+    const pid_t pid = fork();
+    if (pid == 0) {
+        const int fd = zeromesh::exec::cgroup::OpenProcs(*item);
+        if (fd < 0 || write(fd, "0", 1) != 1) _exit(1);
+        signal(SIGTERM, SIG_IGN); // a teardown that does not end on its own
+        for (;;) pause();
+    }
+    while (zeromesh::exec::cgroup::Procs(*item).empty()) std::this_thread::sleep_for(5ms);
+    {
+        zeromesh::exec::cgroup::Reaper reaper;
+        const auto start = std::chrono::steady_clock::now();
+        reaper.Remove(*item);
+        reaper.Remove(*batch);
+        ASSERT_TRUE(std::chrono::steady_clock::now() - start < 50ms);
+    } // the destructor removes what is still queued
+    ASSERT_FALSE(std::filesystem::exists(*item));
+    ASSERT_FALSE(std::filesystem::exists(*batch));
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    ASSERT_TRUE(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
 }
