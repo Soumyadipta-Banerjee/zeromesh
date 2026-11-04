@@ -13,12 +13,13 @@ unchanged on this machine) otherwise.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import shlex
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -50,6 +51,9 @@ class Unit:
     driver_remote: str
     object_path: Optional[Path]  # where the object ends up; None when no object is produced
     reason: str = ""  # non-empty: this unit runs locally, and this is why
+    # Resolves a path; a plan's units share one that remembers, since they name the same
+    # directories (a compilation database repeats its -I list in every entry).
+    real: Callable[[str], str] = field(default=os.path.realpath, compare=False, repr=False)
 
     @property
     def remote(self) -> bool:
@@ -79,15 +83,16 @@ class Unit:
         the object and the depfile land next to it under their unique names."""
         assert self.source is not None
         return self.command.compile_argv(self.source, self.driver_remote, self.object_name,
-                                         depfile=self.depfile_name, root=str(root), cwd=str(self.directory))
+                                         depfile=self.depfile_name, root=str(root), cwd=str(self.directory),
+                                         real=self.real)
 
     def working_dir_under(self, root: Path) -> str:
         """The unit's directory relative to the uploaded tree root.
 
         Raises ``PlanError`` when ``directory`` is outside ``root`` (donors reject ``..``).
         """
-        root_r = root.resolve()
-        dir_r = self.directory.resolve()
+        root_r = self.real(str(root))
+        dir_r = self.real(str(self.directory))
         try:
             rel = os.path.relpath(dir_r, root_r)
         except ValueError as e:  # different drives on Windows
@@ -137,13 +142,14 @@ def infer_workspace_root(units: Sequence[Unit], explicit: Optional[Path] = None)
     remote = [u for u in units if u.remote and u.directory is not None]
     if not remote:
         raise PlanError("no remote units to infer --root from; pass --root PATH")
-    paths = [u.directory.resolve() for u in remote]
+    real = remote[0].real
+    paths = [real(str(u.directory)) for u in remote]
     for u in remote:
         if u.path is not None:
-            paths.append(u.path.resolve().parent)
-        paths.extend((u.directory / v).resolve() for v in u.command.path_values() if not os.path.isabs(v))
+            paths.append(os.path.dirname(real(str(u.path))))
+        paths.extend(real(os.path.join(u.directory, v)) for v in u.command.path_values() if not os.path.isabs(v))
     try:
-        return Path(os.path.commonpath([str(p) for p in paths]))
+        return Path(os.path.commonpath(paths))
     except ValueError as e:
         raise PlanError(
             "remote units do not share a common directory; pass --root PATH"
@@ -220,6 +226,9 @@ def build_plan(
     """
     units: list[Unit] = []
     seen: dict[str, tuple[str, ...]] = {}
+    # Every entry names the same compiler and include directories: look each up once.
+    real = functools.cache(os.path.realpath)
+    which = functools.cache(which)
     for entry_index, entry in enumerate(entries):
         argv = strip_launcher(expand_response_files(list(entry.argv), entry.directory))
         if not argv:
@@ -258,6 +267,7 @@ def build_plan(
                     driver_remote=resolve_remote(cmd.driver, which),
                     object_path=object_path,
                     reason="; ".join(reasons),
+                    real=real,
                 )
             )
     return Plan(units=tuple(units), out_dir=out_dir)

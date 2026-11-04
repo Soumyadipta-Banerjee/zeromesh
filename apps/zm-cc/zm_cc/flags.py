@@ -24,7 +24,7 @@ import shlex
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import PurePath
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 
 class Kind(Enum):
@@ -215,6 +215,7 @@ class Command:
         depfile: Optional[str] = None,
         root: Optional[str] = None,
         cwd: Optional[str] = None,
+        real: Callable[[str], str] = os.path.realpath,
     ) -> list[str]:
         """The compile of ``src`` alone: ``driver ... -c SRC -o OUTPUT`` with the command's codegen,
         preprocessor and language options; its own -c/-o/-M* are dropped. ``depfile`` adds
@@ -222,28 +223,29 @@ class Command:
 
         With ``root`` and ``cwd``, preprocessor paths and an absolute source that lie under ``root``
         are rewritten relative to ``cwd`` (the same directory inside an uploaded copy of ``root``);
-        paths outside it, such as ``/usr/include``, stay as they are.
+        paths outside it, such as ``/usr/include``, stay as they are. ``real`` resolves a path
+        (a plan passes one that remembers: its units name the same directories).
         """
         if src.lang is None:
             raise ValueError(f"{src.text}: unsplittable input has no compile")
-        root_r = os.path.realpath(root) if root is not None else None
-        cwd_r = os.path.realpath(cwd) if cwd is not None else None
+        root_r = real(root) if root is not None else None
+        cwd_r = real(cwd) if cwd is not None else None
         args = [driver]
         src_arg = src.text
         path_value_pending = False
         for t in self.tokens:
             if t.kind in (Kind.SOURCE, Kind.OUTPUT, Kind.DRIVER):
                 if t.kind is Kind.SOURCE and t.text == src.text and root_r and os.path.isabs(src.text):
-                    src_arg = _path_under_tree(src.text, root_r, cwd_r) or src.text
+                    src_arg = _path_under_tree(src.text, root_r, cwd_r, real) or src.text
                 path_value_pending = False
                 continue
             if t.kind is Kind.PREPROC and root_r is not None:
                 if path_value_pending:
-                    new = _path_under_tree(t.text, root_r, cwd_r)
+                    new = _path_under_tree(t.text, root_r, cwd_r, real)
                     args.append(new if new is not None else t.text)
                     path_value_pending = False
                     continue
-                rewritten = _rewrite_glued_path_flag(t.text, root_r, cwd_r)
+                rewritten = _rewrite_glued_path_flag(t.text, root_r, cwd_r, real)
                 args.append(rewritten if rewritten is not None else t.text)
                 path_value_pending = _is_path_flag_name(t.text)
                 continue
@@ -289,27 +291,27 @@ def _glued_path(text: str) -> Optional[tuple[str, str, str]]:
     return None
 
 
-def _rewrite_glued_path_flag(text: str, root: str, cwd: str) -> Optional[str]:
+def _rewrite_glued_path_flag(text: str, root: str, cwd: str, real: Callable[[str], str]) -> Optional[str]:
     """Rewrite glued ``-Idir`` / ``--sysroot=dir``; return None when not a glued path flag."""
     glued = _glued_path(text)
     if glued is None:
         return None
     name, sep, val = glued
-    new = _path_under_tree(val, root, cwd)
+    new = _path_under_tree(val, root, cwd, real)
     return f"{name}{sep}{new}" if new is not None else text
 
 
-def _path_under_tree(val: str, root: str, cwd: str) -> Optional[str]:
+def _path_under_tree(val: str, root: str, cwd: str, real: Callable[[str], str]) -> Optional[str]:
     """If ``val`` resolves under ``root``, return a path relative to ``cwd``; else None."""
     if not val:
         return None
     p = val if os.path.isabs(val) else os.path.normpath(os.path.join(cwd, val))
     try:
-        real = os.path.realpath(p)
+        resolved = real(p)
     except OSError:
         return None
-    if real == root or real.startswith(root + os.sep):
-        return os.path.relpath(real, cwd)
+    if resolved == root or resolved.startswith(root + os.sep):
+        return os.path.relpath(resolved, cwd)
     return None
 
 
