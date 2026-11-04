@@ -101,6 +101,16 @@ void InputCache::Release(const std::string& key) {
     cv_.notify_all();
 }
 
+std::shared_ptr<InputCache::Lease> InputCache::AcquireCached(const store::Digest& root) {
+    const std::string key = root.hash.empty() ? kEmptyKey : root.hash;
+    std::lock_guard lock(mu_);
+    auto it = entries_.find(key);
+    if (it == entries_.end() || !it->second.ready) return nullptr;
+    ++it->second.leases;
+    it->second.last_used = std::chrono::steady_clock::now();
+    return std::make_shared<Lease>(this, key, dir_ / key);
+}
+
 void InputCache::Prune(std::chrono::seconds idle) {
     std::vector<fs::path> doomed;
     {
@@ -109,7 +119,18 @@ void InputCache::Prune(std::chrono::seconds idle) {
         for (auto it = entries_.begin(); it != entries_.end();) {
             const Entry& e = it->second;
             if (e.leases <= 0 && !e.materializing && (!e.ready || now - e.last_used >= idle)) {
-                if (e.ready) doomed.push_back(dir_ / it->first);
+                if (e.ready) {
+                    // Detach the old path while locked. A new acquisition can then materialize
+                    // the same root while slow removal runs beside it, without losing its tree.
+                    const auto removed = dir_ / (it->first + ".prune-" + RandomHex(8));
+                    std::error_code ec;
+                    fs::rename(dir_ / it->first, removed, ec);
+                    if (ec) {
+                        ++it;
+                        continue;
+                    }
+                    doomed.push_back(removed);
+                }
                 it = entries_.erase(it);
             } else {
                 ++it;

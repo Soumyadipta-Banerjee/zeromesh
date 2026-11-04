@@ -153,8 +153,9 @@ TEST(InputCacheMaterializesOnceAndPrunesIdleEntries) {
     WriteFile(d / "src/x.txt", "x");
     auto root = merkle->BuildTree(d / "src");
     zeromesh::exec::InputCache cache(d / "inputs", merkle);
+    ASSERT_FALSE(cache.AcquireCached(root)); // a lookup never materializes or stats every blob
     auto a = cache.Acquire(root);
-    auto b = cache.Acquire(root);
+    auto b = cache.AcquireCached(root);
     ASSERT_TRUE(a && b);
     ASSERT_EQ(a->path(), b->path());
     ASSERT_EQ(ReadFile(a->path() / "x.txt"), "x");
@@ -165,7 +166,30 @@ TEST(InputCacheMaterializesOnceAndPrunesIdleEntries) {
     b.reset();
     cache.Prune(0s);
     ASSERT_EQ(cache.Entries(), 0u);
+    ASSERT_FALSE(cache.AcquireCached(root));
     ASSERT_FALSE(cache.Acquire(zeromesh::store::Digest{std::string(64, 'a'), 1})); // not in the store
+}
+
+TEST(InputCacheLeaseSurvivesCasGarbageCollection) {
+    TempDir d;
+    auto cas = std::make_shared<zeromesh::store::CasStore>(d / "cas");
+    auto merkle = std::make_shared<zeromesh::store::MerkleBuilder>(cas);
+    WriteFile(d / "src/x.txt", "cached input");
+    auto root = merkle->BuildTree(d / "src");
+    zeromesh::exec::InputCache cache(d / "inputs", merkle);
+    auto lease = cache.Acquire(root);
+    ASSERT_TRUE(lease);
+    ASSERT_TRUE(cas->CollectGarbage(0, {}).blobs_removed > 0);
+    ASSERT_FALSE(cas->HasBlob(root.hash));
+    auto cached = cache.AcquireCached(root);
+    ASSERT_TRUE(cached);
+    cache.Prune(0s);
+    ASSERT_EQ(ReadFile(cached->path() / "x.txt"), "cached input");
+    lease.reset();
+    cached.reset();
+    cache.Prune(0s);
+    ASSERT_FALSE(cache.AcquireCached(root));
+    ASSERT_FALSE(cache.Acquire(root)); // manifests were collected, too
 }
 
 TEST(BatchRunsEachItemInItsOwnSandboxWithItsOwnResult) {

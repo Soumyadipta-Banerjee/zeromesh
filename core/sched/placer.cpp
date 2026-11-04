@@ -803,7 +803,28 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
                                            "input tree too large to offer: " + std::to_string(needed->size()) + " digests")));
         }
         std::string err;
-        auto reply = client->Offer(batch->id, spec, *needed, &err);
+        auto donor_inputs = SentFor(node_id);
+        bool cached_input = false;
+        const bool checkpoints = std::any_of(spec.items().begin(), spec.items().end(),
+                                            [](const auto& it) { return !it.checkpoint().hash().empty(); });
+        if (!checkpoints) {
+            std::lock_guard lock(donor_inputs->mu);
+            cached_input = donor_inputs->cached_inputs.contains(input_root_hash);
+        }
+        const std::vector<v1::Digest> no_digests;
+        auto offered_at = std::chrono::steady_clock::now();
+        auto reply = client->Offer(batch->id, spec, cached_input ? no_digests : *needed, &err, cached_input);
+        // A prune or restart invalidates the hint. An older daemon may ignore the new request
+        // field: only an explicit cached acknowledgement permits a compact offer to run.
+        if (cached_input && reply && (reply->reject_kind() == v1::REJECT_INPUT_MISSING ||
+                                     (reply->accepted() && !reply->input_cached()))) {
+            {
+                std::lock_guard lock(donor_inputs->mu);
+                donor_inputs->cached_inputs.erase(input_root_hash);
+            }
+            offered_at = std::chrono::steady_clock::now();
+            reply = client->Offer(batch->id, spec, *needed, &err);
+        }
         if (!reply) {
             release(node_id);
             skip.insert(node_id);
@@ -850,7 +871,10 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
                 std::lock_guard lock(donor->mu);
                 std::erase_if(donor->sent, [&](const auto& kv) { return now - kv.second > kSentTtl; });
                 for (const auto& d : missing) {
-                    if (!donor->sent.contains(d.hash())) to_send.push_back(d);
+                    auto sent = donor->sent.find(d.hash());
+                    // The offer's missing list wins over older pushes (GC or a donor restart).
+                    // Only a sibling push since this offer can have filled the reported miss.
+                    if (sent == donor->sent.end() || sent->second < offered_at) to_send.push_back(d);
                 }
             }
             const std::vector<v1::Digest> wanted = to_send;
@@ -889,6 +913,11 @@ void Placer::Place(const std::shared_ptr<Batch>& batch) {
         // The donor's slot is free as soon as it has run the batch; fetching the last outputs does not
         // hold it, and the batch is still on the node (not waiting for one) until they are here.
         node::BatchDone d = RunRemote(batch, node_id, client, [&] { free_slot(node_id); });
+        if (!checkpoints && reply->has_input_cached() && d.failure == v1::FAILURE_NONE && !d.cancelled) {
+            std::lock_guard lock(donor_inputs->mu);
+            if (donor_inputs->cached_inputs.size() >= kCachedInputsMax) donor_inputs->cached_inputs.clear();
+            donor_inputs->cached_inputs.insert(input_root_hash);
+        }
         leave(node_id);
         d.bytes_pushed = wire_pushed;
         {

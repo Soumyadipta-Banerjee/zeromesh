@@ -86,6 +86,42 @@ TEST(PlacerRunsABatchOnAPeerAndPullsEachItemsOutputs) {
     }
 }
 
+TEST(PlacerReoffersPrunedInputsAndResendsBlobsAfterGc) {
+    auto key = zeromesh::net::GenerateTeamKey();
+    TestNodeFull a("node-a", key), b("node-b", key);
+    a.Start();
+    b.Start();
+    a.Admit(b);
+    a.peers->Upsert(b.AsPeer());
+    auto placer = PlacerFor(a);
+    TempDir src;
+    zeromesh::testing::WriteFile(src / "in.txt", "input survives");
+    auto root = a.merkle->BuildTree(src.path());
+    auto spec = ShBatch({{"one", "cat in.txt > out.txt"}}, zeromesh::node::ToProto(root));
+    spec.mutable_items(0)->add_outputs("out.txt");
+    auto run = [&](const std::string& id, bool expect_push) {
+        AttemptLog log;
+        placer->Execute(id, spec, {}, log.Callbacks());
+        ASSERT_TRUE(log.Wait());
+        Expect(log.result.failure == v1::FAILURE_NONE, log.result.message);
+        ASSERT_EQ(log.items.size(), 1u);
+        Expect(log.items[0].first.failure() == v1::FAILURE_NONE, log.items[0].first.message());
+        ASSERT_EQ(log.result.bytes_pushed > 0, expect_push);
+        ASSERT_EQ(a.cas->GetBlob(log.items[0].first.outputs(0).digest().hash()),
+                  std::optional<std::string>("input survives"));
+    };
+    run("first", true);
+    b.cas->CollectGarbage(0, {});
+    run("cached", false); // only hard links remain: no input blobs need to be pushed
+    for (int i = 0; i < 100; ++i) {
+        b.runner->PruneInputs(std::chrono::seconds(0));
+        if (!b.runner->CachedInput(root)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    b.cas->CollectGarbage(0, {});
+    run("pruned", true); // stale hint gets a full re-offer; old sent timestamps cannot suppress it
+}
+
 TEST(PlacerReportsWhyNoNodeCanRunABatch) {
     auto key = zeromesh::net::GenerateTeamKey();
     TestNodeFull a("node-a", key), b("node-b", key);

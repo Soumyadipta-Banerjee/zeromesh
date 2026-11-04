@@ -64,7 +64,8 @@ public:
     // Offers a batch; `needed` lists every blob it reads (the input tree's blobs).
     // nullopt (with *error) when the call itself failed.
     std::optional<v1::OfferReply> Offer(const std::string& batch_id, const v1::BatchSpec& spec,
-                                        const std::vector<v1::Digest>& needed, std::string* error = nullptr);
+                                        const std::vector<v1::Digest>& needed, std::string* error = nullptr,
+                                        bool cached_input = false);
 
     // Uploads `digests` from `cas` to the peer, which verifies every object. When `bytes_sent`
     // is given, the payload bytes written to the wire are added to it, even on failure.

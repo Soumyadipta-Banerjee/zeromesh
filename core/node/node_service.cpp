@@ -482,6 +482,20 @@ grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* 
     // A node that cannot sandbox and contain work runs none.
     if (!executor_->Unavailable().empty()) return reject(executor_->Unavailable(), v1::REJECT_UNSUPPORTED);
 
+    const bool checkpoints = std::any_of(spec.items().begin(), spec.items().end(),
+                                        [](const auto& it) { return !it.checkpoint().hash().empty(); });
+    if (req->cached_input() && (!req->needed().empty() || checkpoints)) {
+        return Invalid("cached_input offers must omit needed and have no checkpoints");
+    }
+    auto input = checkpoints ? nullptr : executor_->CachedInput(root);
+    if (req->cached_input() && !input) {
+        return reject("input tree is no longer materialized; offer its digests", v1::REJECT_INPUT_MISSING);
+    }
+    // The lease keeps the tree's hard links alive from offer through execution, even after CAS GC
+    // or a prune. Checkpoints still follow the ordinary full-digest path.
+    resp->set_input_cached(static_cast<bool>(input));
+    if (input) needed.clear();
+
     // The environment: provider first, then what the batch asks of it.
     const bool tree = spec.env().has_tree();
     plugin::IEnvProvider* env = registry_->Env(tree ? "tree" : "host");
@@ -559,7 +573,7 @@ grpc::Status NodeService::OfferBatch(grpc::ServerContext* ctx, const v1::Offer* 
 
     // The executor is the one place this node takes work: the offer's room is held there, beside
     // this node's own batches, which the policy check above may have raced.
-    if (!executor_->Hold(ExecId(peer, req->batch_id()), spec)) {
+    if (!executor_->Hold(ExecId(peer, req->batch_id()), spec, std::move(input))) {
         waiting_[peer] = now;
         return reject("the cores and memory this node lets work hold are taken", v1::REJECT_BUSY, kRetryHeldMs);
     }

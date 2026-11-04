@@ -203,12 +203,14 @@ std::optional<std::chrono::milliseconds> NodeClient::PingRtt(std::string* error)
 }
 
 std::optional<v1::OfferReply> NodeClient::Offer(const std::string& batch_id, const v1::BatchSpec& spec,
-                                                const std::vector<v1::Digest>& needed, std::string* error) {
+                                                const std::vector<v1::Digest>& needed, std::string* error,
+                                                bool cached_input) {
     auto stub = PinnedStub(error);
     if (!stub) return std::nullopt;
     v1::Offer req;
     req.set_batch_id(batch_id);
     *req.mutable_spec() = spec;
+    req.set_cached_input(cached_input);
     for (const auto& d : needed) *req.add_needed() = d;
     grpc::ClientContext ctx;
     // A version probe may run a program once on the donor: give the offer more than a ping.

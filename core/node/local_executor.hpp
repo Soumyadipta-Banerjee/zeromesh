@@ -54,7 +54,9 @@ public:
     // Reserves the cores and memory of a batch that Execute hands over shortly under the same id:
     // true when they fit beside everything held, queued and running; nothing else can take them
     // then. False also for an id already held or here.
-    bool Hold(const std::string& batch_id, const v1::BatchSpec& spec);
+    bool Hold(const std::string& batch_id, const v1::BatchSpec& spec,
+              std::shared_ptr<exec::InputCache::Lease> input = {});
+    std::shared_ptr<exec::InputCache::Lease> CachedInput(const v1::Digest& root) const;
     // Gives back a hold whose batch never came. A no-op once it was handed over.
     void Release(const std::string& batch_id);
     // A queued batch completes at once as cancelled; a running one is stopped (SIGTERM, then SIGKILL).
@@ -83,6 +85,7 @@ private:
         std::string batch_id;
         v1::BatchSpec spec;
         BatchCallbacks cb;
+        std::shared_ptr<exec::InputCache::Lease> input;
         std::stop_source stop;
         bool started{false};
         int cores{1};

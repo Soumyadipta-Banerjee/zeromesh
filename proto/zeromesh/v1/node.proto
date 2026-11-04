@@ -59,6 +59,7 @@ message Offer {
   string batch_id = 1;
   BatchSpec spec = 2;
   repeated Digest needed = 3;  // every blob the batch reads
+  bool cached_input = 4;       // input_root must already be materialized; omit needed
 }
 
 enum RejectKind {
@@ -68,6 +69,7 @@ enum RejectKind {
   REJECT_UNSUPPORTED = 3;  // policy: needs network or more than the donor gives
   REJECT_ENV = 4;          // a program is missing or its version does not satisfy the constraint
   REJECT_TOOLCHAIN = 5;    // the program is there, but not the requester's exact build
+  REJECT_INPUT_MISSING = 6; // cached input was pruned or the donor restarted; offer the digests now
 }
 
 message OfferReply {
@@ -79,6 +81,7 @@ message OfferReply {
   RejectKind reject_kind = 6;
   uint32 retry_after_ms = 7;
   reserved 8; // core_limit: donors announce work_cores instead
+  optional bool input_cached = 9; // present: supports cached_input; true: offer holds a materialized tree
 }
 
 message RunRequest {

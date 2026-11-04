@@ -43,6 +43,9 @@ public:
     // manifest is missing. Concurrent calls for one tree materialize it once.
     std::shared_ptr<Lease> Acquire(const store::Digest& root);
 
+    // Holds an already materialized tree without walking or checking the CAS. Nullptr on a miss.
+    std::shared_ptr<Lease> AcquireCached(const store::Digest& root);
+
     // Removes entries no lease holds that were last used longer ago than `idle`.
     void Prune(std::chrono::seconds idle);
 

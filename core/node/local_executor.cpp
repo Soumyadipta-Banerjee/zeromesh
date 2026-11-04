@@ -79,6 +79,7 @@ void LocalExecutor::Execute(const std::string& batch_id, const v1::BatchSpec& sp
             // Its room was promised: it starts before anything that came without a hold.
             held_cores_ -= h->second->cores;
             held_mem_ -= h->second->mem;
+            item->input = std::move(h->second->input);
             held_.erase(h);
             queue_.push_front(item);
         } else {
@@ -88,8 +89,10 @@ void LocalExecutor::Execute(const std::string& batch_id, const v1::BatchSpec& sp
     cv_.notify_all();
 }
 
-bool LocalExecutor::Hold(const std::string& batch_id, const v1::BatchSpec& spec) {
+bool LocalExecutor::Hold(const std::string& batch_id, const v1::BatchSpec& spec,
+                         std::shared_ptr<exec::InputCache::Lease> input) {
     auto item = MakeItem(batch_id, spec);
+    item->input = std::move(input);
     if (item->never_fits) return false;
     std::lock_guard lock(mu_);
     if (held_.contains(batch_id) || items_.contains(batch_id)) return false;
@@ -99,6 +102,10 @@ bool LocalExecutor::Hold(const std::string& batch_id, const v1::BatchSpec& spec)
     held_mem_ += item->mem;
     held_[batch_id] = std::move(item);
     return true;
+}
+
+std::shared_ptr<exec::InputCache::Lease> LocalExecutor::CachedInput(const v1::Digest& root) const {
+    return runner_ ? runner_->CachedInput(FromProto(root)) : nullptr;
 }
 
 void LocalExecutor::Release(const std::string& batch_id) {
@@ -332,7 +339,7 @@ BatchDone LocalExecutor::Run(Item& item) {
 
         exec::BatchRunResult rr;
         try {
-            rr = runner_->Run(rs, cb, item.stop.get_token());
+            rr = runner_->Run(rs, cb, item.stop.get_token(), item.input);
         } catch (const std::exception& e) {
             env->Release(ctx);
             std::filesystem::remove_all(scratch, ec);

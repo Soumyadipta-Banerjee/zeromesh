@@ -128,7 +128,10 @@ public:
 
     // Runs the items in order until all are done or `stop` is requested. on_item is called once for
     // every item that ran to an outcome; items not reached (stop, sandbox failure) get no call.
-    BatchRunResult Run(const BatchRunSpec& spec, const BatchCallbacks& cb, std::stop_token stop);
+    BatchRunResult Run(const BatchRunSpec& spec, const BatchCallbacks& cb, std::stop_token stop,
+                       std::shared_ptr<InputCache::Lease> input = {});
+
+    std::shared_ptr<InputCache::Lease> CachedInput(const store::Digest& root) { return inputs_.AcquireCached(root); }
 
     // Why batches cannot run here (no sandbox, or work cannot be contained); empty when they can.
     [[nodiscard]] const std::string& unavailable() const { return unavailable_; }

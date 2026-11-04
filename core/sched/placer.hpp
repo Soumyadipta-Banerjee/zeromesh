@@ -183,9 +183,11 @@ private:
         std::mutex push_mu;
         std::mutex mu;
         std::unordered_map<std::string, std::chrono::steady_clock::time_point> sent;
+        std::set<std::string> cached_inputs; // donor has executed this root and supports cached offers
     };
     std::shared_ptr<DonorSent> SentFor(const std::string& node_id);
     static constexpr std::chrono::seconds kSentTtl{30};
+    static constexpr size_t kCachedInputsMax = 128;
 
     std::mutex sent_mu_;
     std::map<std::string, std::shared_ptr<DonorSent>> sent_;

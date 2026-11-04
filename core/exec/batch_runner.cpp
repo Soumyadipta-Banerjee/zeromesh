@@ -317,7 +317,8 @@ bool BatchRunner::StopYoungestForMemory() {
     return true;
 }
 
-BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& cb, std::stop_token stop) {
+BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& cb, std::stop_token stop,
+                                std::shared_ptr<InputCache::Lease> lease) {
     BatchRunResult result;
     if (!unavailable_.empty()) {
         result.error = unavailable_;
@@ -355,7 +356,7 @@ BatchRunResult BatchRunner::Run(const BatchRunSpec& spec, const BatchCallbacks& 
         }
     }
 
-    auto lease = inputs_.Acquire(spec.input_root);
+    if (!lease) lease = inputs_.Acquire(spec.input_root);
     if (!lease) {
         result.error = "input tree " + spec.input_root.hash + " is incomplete in this node's store";
         return result;

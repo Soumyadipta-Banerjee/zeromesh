@@ -85,6 +85,9 @@ TEST(NodeApiRemoteRun) {
 
     auto client = a.ClientTo(b);
     std::string err;
+    auto cold = client->Offer("cached-cold", spec, {}, &err, true);
+    Expect(cold && !cold->accepted() && cold->reject_kind() == v1::REJECT_INPUT_MISSING, err);
+    ASSERT_EQ(b.executor->CoresReserved(), 0);
     // Running without an accepted offer is refused.
     Expect(!client->Run("t1", nullptr, &err).has_value() && err.find("no reservation") != std::string::npos, err);
 
@@ -122,6 +125,32 @@ TEST(NodeApiRemoteRun) {
 
     // The reservation was used up.
     Expect(!client->Run("t1", nullptr, &err).has_value(), "second run of t1 succeeded");
+
+    reply = client->Offer("cached", spec, {}, &err, true);
+    Expect(reply && reply->accepted() && reply->input_cached(), reply ? reply->reason() : err);
+    ASSERT_TRUE(reply->has_input_cached());
+    ASSERT_EQ(reply->missing_size(), 0);
+    b.runner->PruneInputs(std::chrono::seconds(0)); // the offer's hold protects the input tree
+    b.cas->CollectGarbage(0, {});
+    ASSERT_FALSE(b.cas->HasBlob(root.hash));
+    std::string stdout_tail;
+    finished = client->Run("cached", [&](const v1::BatchEvent& ev) {
+        if (ev.has_done()) stdout_tail = ev.done().stdout_tail();
+    }, &err);
+    Expect(finished && finished->error().empty() && !finished->cancelled(), err);
+    ASSERT_EQ(stdout_tail, "hello from A\n"); // executor inherited the offer's lease despite CAS GC
+
+    for (int i = 0; i < 100; ++i) {
+        b.runner->PruneInputs(std::chrono::seconds(0));
+        if (!b.runner->CachedInput(root)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    reply = client->Offer("pruned", spec, {}, &err, true);
+    Expect(reply && !reply->accepted() && reply->reject_kind() == v1::REJECT_INPUT_MISSING, err);
+
+    // Checkpoint digests must never disappear into the workspace-only fast path.
+    *spec.mutable_items(0)->mutable_checkpoint() = zeromesh::node::ToProto(root);
+    ASSERT_FALSE(client->Offer("checkpoint", spec, {}, &err, true));
 }
 
 TEST(NodeApiLargeOfferAccepts) {
