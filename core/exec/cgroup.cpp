@@ -14,6 +14,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <mutex>
+#include <optional>
 #include <sstream>
 
 extern char** environ;
@@ -283,22 +284,44 @@ std::optional<fs::path> CreateChild(const fs::path& batch, const std::string& na
     return dir;
 }
 
+bool WaitEmpty(const fs::path& dir, std::chrono::milliseconds wait) {
+    const int fd = open((dir / "cgroup.events").c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    // "populated", read through `fd` itself. kernfs reports POLLPRI on a descriptor until the file
+    // has been read through it since its last change, and a new descriptor starts out behind: poll
+    // only sleeps on a descriptor that is read. (Read through another, it returned at once, and
+    // this loop spun on a whole CPU for as long as a sandbox took to tear down.)
+    auto populated = [fd]() -> std::optional<bool> {
+        char buf[256];
+        ssize_t n;
+        do {
+            n = pread(fd, buf, sizeof(buf) - 1, 0);
+        } while (n < 0 && errno == EINTR);
+        if (n <= 0) return std::nullopt;
+        buf[n] = '\0';
+        const char* p = std::strstr(buf, "populated ");
+        if (p == nullptr) return std::nullopt;
+        return p[std::strlen("populated ")] == '1';
+    };
+    const auto deadline = Clock::now() + wait;
+    std::optional<bool> now = populated();
+    while (now.value_or(false)) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+        if (left <= 0) break;
+        pollfd p{fd, POLLPRI, 0};
+        if (poll(&p, 1, static_cast<int>(std::min<int64_t>(left, 100))) < 0 && errno != EINTR) break;
+        now = populated();
+    }
+    close(fd);
+    return now.has_value() && !*now;
+}
+
 bool Remove(const fs::path& dir, std::chrono::milliseconds wait) {
     std::error_code ec;
     if (!fs::exists(dir, ec)) return true;
-    const fs::path events = dir / "cgroup.events";
-    if (ReadKeyed(events, "populated").value_or(0) == 1) {
+    if (ReadKeyed(dir / "cgroup.events", "populated").value_or(0) == 1) {
         KillAll(dir);
-        // cgroup.events wakes poll(POLLPRI) when "populated" changes; the cap only rechecks.
-        const int fd = open(events.c_str(), O_RDONLY | O_CLOEXEC);
-        const auto deadline = Clock::now() + wait;
-        while (fd >= 0 && ReadKeyed(events, "populated").value_or(0) == 1) {
-            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
-            if (left <= 0) break;
-            pollfd p{fd, POLLPRI, 0};
-            poll(&p, 1, static_cast<int>(std::min<int64_t>(left, 100)));
-        }
-        if (fd >= 0) close(fd);
+        WaitEmpty(dir, wait);
     }
     std::vector<fs::path> dirs;
     for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator();

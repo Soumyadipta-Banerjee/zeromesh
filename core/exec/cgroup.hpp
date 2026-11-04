@@ -60,6 +60,10 @@ std::optional<std::filesystem::path> CreateBatch(const std::filesystem::path& wo
 std::optional<std::filesystem::path> CreateChild(const std::filesystem::path& batch, const std::string& name,
                                                  std::string* error = nullptr);
 
+// Waits up to `wait` for no process to be left in `dir` and below ("populated 0" in its
+// cgroup.events), asleep until the kernel says that changed. True once it is empty.
+bool WaitEmpty(const std::filesystem::path& dir, std::chrono::milliseconds wait);
+
 // Kills what is left in `dir` and below, waits up to `wait` for it to empty, then removes the
 // cgroups bottom-up. False when something could not be removed.
 bool Remove(const std::filesystem::path& dir, std::chrono::milliseconds wait = std::chrono::seconds(5));

@@ -8,6 +8,7 @@
 #include "exec/tree_watch.hpp"
 #include "plugins/env-host/env_host.hpp"
 
+#include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -545,4 +546,64 @@ TEST(CgroupReaperRemovesBesideTheCaller) {
     int status = 0;
     ASSERT_EQ(waitpid(pid, &status, 0), pid);
     ASSERT_TRUE(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+}
+
+TEST(CgroupWaitEmptySleepsUntilTheCgroupEmpties) {
+    // Waiting for an item's cgroup to empty (a sandbox still tearing down) must sleep on the
+    // kernel's notification, not spin: a spinning zmd thread starves the idle-priority compiles
+    // on a small machine, which slows the teardown it waits for.
+    const auto work = zeromesh::exec::cgroup::SetUpWork(0);
+    if (work.root.empty()) {
+        std::cout << "[SKIP] " << work.problem << "\n";
+        return;
+    }
+    std::string err;
+    const auto batch = zeromesh::exec::cgroup::CreateBatch(work.root, 1, 0, &err);
+    ASSERT_TRUE(batch.has_value());
+    const auto item = zeromesh::exec::cgroup::CreateChild(*batch, "g0", &err);
+    ASSERT_TRUE(item.has_value());
+    int ready[2];
+    ASSERT_EQ(pipe(ready), 0);
+    const pid_t pid = fork();
+    if (pid == 0) {
+        close(ready[0]);
+        const int fd = zeromesh::exec::cgroup::OpenProcs(*item);
+        if (fd < 0 || write(fd, "0", 1) != 1) _exit(1);
+        close(fd);
+        if (write(ready[1], "1", 1) != 1) _exit(1);
+        close(ready[1]);
+        usleep(300 * 1000);
+        _exit(0);
+    }
+    close(ready[1]);
+    if (pid < 0) {
+        close(ready[0]);
+        zeromesh::exec::cgroup::Remove(*batch);
+        ASSERT_TRUE(pid >= 0);
+    }
+    std::jthread reap([pid] { waitpid(pid, nullptr, 0); });
+    pollfd notification{ready[0], POLLIN, 0};
+    char entered = 0;
+    const bool child_ready = poll(&notification, 1, 1000) > 0 && read(ready[0], &entered, 1) == 1 && entered == '1';
+    close(ready[0]);
+    if (!child_ready) {
+        kill(pid, SIGKILL);
+        reap.join();
+        zeromesh::exec::cgroup::Remove(*batch);
+        ASSERT_TRUE(child_ready);
+    }
+    auto cpu_now = [] {
+        timespec ts{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+        return std::chrono::seconds(ts.tv_sec) + std::chrono::nanoseconds(ts.tv_nsec);
+    };
+    const auto wall0 = std::chrono::steady_clock::now();
+    const auto cpu0 = cpu_now();
+    ASSERT_TRUE(zeromesh::exec::cgroup::WaitEmpty(*item, 5s));
+    const auto cpu = cpu_now() - cpu0;
+    const auto wall = std::chrono::steady_clock::now() - wall0;
+    reap.join();
+    ASSERT_TRUE(wall >= 150ms);  // it did wait for the process
+    ASSERT_TRUE(cpu < 30ms);     // asleep meanwhile
+    ASSERT_TRUE(zeromesh::exec::cgroup::Remove(*batch));
 }
