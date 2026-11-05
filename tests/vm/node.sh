@@ -10,13 +10,18 @@
 #   tests/vm/node.sh HOST start|stop|log|wipe
 #   tests/vm/node.sh HOST zm ARGS...   run zm there
 #   tests/vm/node.sh HOST sh 'CMD'     run a shell command there, with the stage on PATH
+#   ZM_VM_PROFILE=bench-old           separate state/config/runtime when comparing architectures
 set -euo pipefail
 host=$1; cmd=$2; shift 2
 key=${ZM_VM_KEY:-$HOME/Desktop/zm-qemu/id_zm}
 user=${ZM_VM_USER:-zm}
+profile=${ZM_VM_PROFILE:-}
+[[ $profile =~ ^[a-zA-Z0-9_-]*$ ]] || { echo "node.sh: invalid ZM_VM_PROFILE" >&2; exit 2; }
+node_home=".zm${profile:+-$profile}"
 ssh_opts=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
 remote() { ssh "${ssh_opts[@]}" "$user@$host" "$@"; }
 env_line='source ~/zeromesh-stage/env.sh'
+env_line+="; export ZM_STATE_DIR=\"\$HOME/$node_home/state\" ZM_RUNTIME_DIR=\"\$HOME/$node_home/run\" ZM_CONFIG_DIR=\"\$HOME/$node_home/config\""
 
 case $cmd in
 setup)
@@ -40,8 +45,11 @@ E
   "$0" "$host" start
   ;;
 start)
-  remote "$env_line; mkdir -p ~/.zm/config && [ -f ~/.zm/config/donor.toml ] || echo 'max_step = 0' > ~/.zm/config/donor.toml;
-          setsid nohup zmd > ~/.zm/zmd.log 2>&1 < /dev/null & for i in \$(seq 50); do [ -S ~/.zm/run/zmd.sock ] && exit 0; sleep 0.1; done; tail -5 ~/.zm/zmd.log; exit 1"
+  remote "$env_line; zm status >/dev/null 2>&1 && exit 0;
+          mkdir -p ~/$node_home/config || exit 1;
+          [ -f ~/$node_home/config/donor.toml ] || echo 'max_step = 0' > ~/$node_home/config/donor.toml;
+          setsid nohup zmd > ~/$node_home/zmd.log 2>&1 < /dev/null &
+          for i in \$(seq 50); do [ -S ~/$node_home/run/zmd.sock ] && zm status >/dev/null 2>&1 && exit 0; sleep 0.1; done; tail -5 ~/$node_home/zmd.log; exit 1"
   ;;
 stop)  remote 'pkill -x zmd; for i in $(seq 50); do pgrep -x zmd >/dev/null || exit 0; sleep 0.2; done; pkill -9 -x zmd' ;;
 shape)
@@ -54,8 +62,8 @@ shape)
   remote "dev=\$(ip -o route show default | awk '{print \$5}'); sudo tc qdisc del dev \$dev root 2>/dev/null;
           [ -z '$spec' ] || sudo tc qdisc add dev \$dev root netem $spec; tc qdisc show dev \$dev | head -1"
   ;;
-wipe)  remote 'pkill -x zmd || true; rm -rf ~/.zm/state ~/.zm/run ~/.zm/zmd.log' ;;
-log)   remote 'cat ~/.zm/zmd.log' ;;
+wipe)  remote "pkill -x zmd || true; rm -rf ~/$node_home/state ~/$node_home/run ~/$node_home/zmd.log" ;;
+log)   remote "cat ~/$node_home/zmd.log" ;;
 zm)    remote "$env_line; zm $(printf '%q ' "$@")" ;;
 sh)    remote "$env_line; $1" ;;
 *)     echo "node.sh: unknown command $cmd" >&2; exit 2 ;;

@@ -62,6 +62,8 @@ public:
     std::optional<std::chrono::milliseconds> PingRtt(std::string* error = nullptr);
 
     // Offers a batch; `needed` lists every blob it reads (the input tree's blobs).
+    // With cached_input, needed must be empty and the donor must acknowledge a leased tree;
+    // a missing tree requires an immediate full offer. Do not use it for checkpoints.
     // nullopt (with *error) when the call itself failed.
     std::optional<v1::OfferReply> Offer(const std::string& batch_id, const v1::BatchSpec& spec,
                                         const std::vector<v1::Digest>& needed, std::string* error = nullptr,

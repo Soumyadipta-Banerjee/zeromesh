@@ -3,12 +3,13 @@
 # (Ubuntu 24.04): zmd, zm, a bubblewrap new enough to run tasks, the shared libraries zmd links
 # beyond the base system, the Python SDK and the apps.
 #
-#   tests/vm/stage.sh [BUILD_DIR] [OUT_DIR]      default: build, build/vm-stage
+#   tests/vm/stage.sh [BUILD_DIR] [OUT_DIR] [SOURCE_DIR]  default: this checkout
 #   BWRAP=/path/to/bwrap                         default: the first bwrap >= 0.12 found
 set -euo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
 build=$(cd "${1:-$here/build}" && pwd)
 out=${2:-$build/vm-stage}
+source_dir=$(cd "${3:-$here}" && pwd)
 
 rm -rf "$out"
 mkdir -p "$out/bin" "$out/lib" "$out/apps"
@@ -31,8 +32,9 @@ for bin in "$build/zmd" "$build/zm"; do
   done
 done
 
-cp -r "$here/sdk/python" "$out/apps/sdk-python"
-for app in zm-render zm-cc zm-cfd; do cp -r "$here/apps/$app" "$out/apps/$app"; done
+cp -r "$source_dir/sdk/python" "$out/apps/sdk-python"
+for app in zm-render zm-cc zm-cfd; do cp -r "$source_dir/apps/$app" "$out/apps/$app"; done
+cp "$here/tests/vm/bench_compile.py" "$out/bench_compile.py"
 find "$out/apps" -name __pycache__ -o -name '*.egg-info' -o -name .pytest_cache | xargs rm -rf
 
 echo "staged $(ls "$out/lib" | wc -l) libraries and bwrap $("$out/bin/bwrap" --version | awk '{print $2}') in $out"

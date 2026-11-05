@@ -12,10 +12,14 @@ export ZM_STATE_DIR=$dir/state ZM_RUNTIME_DIR=$dir/run ZM_CONFIG_DIR=$dir/config
 cmd=${1:-}; shift || true
 case $cmd in
 start)
+  "$build/zm" status >/dev/null 2>&1 && exit 0
   mkdir -p "$ZM_CONFIG_DIR"
   [[ -f $ZM_CONFIG_DIR/donor.toml ]] || echo 'max_step = 0' > "$ZM_CONFIG_DIR/donor.toml"
   setsid nohup "$build/zmd" > "$dir/zmd.log" 2>&1 < /dev/null &
-  for _ in $(seq 50); do [[ -S $ZM_SOCKET ]] && exit 0; sleep 0.1; done
+  for _ in $(seq 50); do
+    [[ -S $ZM_SOCKET ]] && "$build/zm" status >/dev/null 2>&1 && exit 0
+    sleep 0.1
+  done
   tail -5 "$dir/zmd.log"; exit 1 ;;
 stop) pkill -f "^$build/zmd$" || true ;;
 wipe) pkill -f "^$build/zmd$" || true; rm -rf "$dir/state" "$dir/run" "$dir/zmd.log" ;;
