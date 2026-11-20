@@ -29,8 +29,9 @@ It is designed, not built; PLAN.md M7–M11 track it.
   task on another donor when one is lost. Covered by automated tests on one host.
 - The `env-mirror` plugin (FUSE lazy fetch of the requester's binaries; needs `/dev/fuse`) and the
   `frontend-reapi` plugin (CMake builds through `recc`; enable with `ZM_ENABLE_REAPI=1`).
-- A Python SDK (`sdk/python`) and three apps built on it: `zm-render` (Blender), `zm-cfd` (OpenFOAM
-  sweeps) and `zm-cc` (C/C++/Fortran compilation from a compilation database).
+- A Python SDK (`sdk/python`) and four apps built on it: `zm-render` (Blender), `zm-cfd` (OpenFOAM
+  sweeps), `zm-cc` (C/C++/Fortran compilation from a compilation database) and `zm-ffmpeg`
+  (independent media conversions).
 - The action-cache key includes a digest of the host toolchain, and a donor whose toolchain differs
   refuses the task, so a different compiler can't return a wrong cache hit.
 
@@ -89,7 +90,7 @@ zmd/        the daemon executable
 cli/        the zm command-line client
 proto/      zeromesh.v1 gRPC contracts
 sdk/        Python SDK (sdk/python)
-apps/       zm-render, zm-cfd, zm-cc
+apps/       zm-render, zm-cfd, zm-cc, zm-ffmpeg
 packaging/  Debian and Arch packaging, systemd unit
 scripts/    install helpers and demo scripts
 tests/      unit, integration and acceptance tests

@@ -4,8 +4,11 @@
 //
 // The command key ("weak") covers everything about an item except the content of its inputs: argv,
 // environment variables, cwd, declared outputs, depfile and search directories, the environment's
-// identity, the architecture and network access. Where outputs are written on the requester does
-// not count.
+// identity, the architecture and network access. Effective per-process resources and the warm
+// directory's opt-in namespace are included because programs can observe them; scheduling-only
+// metadata such as stage names, placement and priorities is excluded. Cores zero and one are
+// canonicalized to the single core both actually dispatch. Output destinations are not part of a
+// key. When a batch raises an item's effective memory limit, result storage uses that value.
 //
 // The full key adds the inputs, in one of three ways:
 //   - Whole: the item reads the whole workspace (plus the outputs of the items it comes after):

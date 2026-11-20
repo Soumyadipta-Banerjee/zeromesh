@@ -122,6 +122,9 @@ struct RunEngine::Item {
     bool looked_up{false};
     bool in_lookup{false};
     std::string weak;
+    // Usually empty: set when a batch raises the hard memory limit exposed to an item, so a result
+    // is stored under the execution that actually happened rather than under its initial request.
+    std::string execution_weak;
     int infra_failures{0};
     int exit_failures{0};
     int oom_retries{0};
@@ -502,6 +505,7 @@ void RunEngine::Terminal(Run& run, size_t i, v1::ItemState state, v1::Failure fa
 void RunEngine::Requeue(Run& run, size_t i, const std::string& why) {
     Item& it = run.items[i];
     it.batch.clear();
+    it.execution_weak.clear(); // each new dispatch defines the effective execution identity
     Update(run, i, v1::ITEM_QUEUED, {}, why);
 }
 
@@ -965,6 +969,12 @@ void RunEngine::Dispatch(const RunPtr& run) {
                 b.mutable_resources()->set_mem_bytes(std::max(Reserve(need), mem_limit));
                 b.set_mem_limit(mem_limit);
                 b.set_mem_need(need);
+                const bool adjusted_memory = mem_limit != std::max<int64_t>(st.resources().mem_bytes(), 0);
+                v1::Stage dispatched_stage;
+                if (adjusted_memory) {
+                    dispatched_stage = st;
+                    dispatched_stage.mutable_resources()->set_mem_bytes(mem_limit);
+                }
                 b.set_alone(key.alone);
                 b.set_kind(st.kind());
                 b.set_warm(st.warm());
@@ -981,6 +991,12 @@ void RunEngine::Dispatch(const RunPtr& run) {
                 for (size_t i : chunk) {
                     Item& it = run->items[i];
                     it.batch = bid;
+                    if (adjusted_memory) {
+                        it.execution_weak = WeakKey(it.spec, dispatched_stage, run->env_ids[it.stage],
+                                                    dispatched_stage.resources().arch());
+                    } else {
+                        it.execution_weak.clear();
+                    }
                     br.items.push_back(i);
                     auto* bi = b.add_items();
                     bi->set_id(it.spec.id());
@@ -1097,6 +1113,7 @@ void RunEngine::OnItem(const RunPtr& run, const std::string& batch, const v1::It
     v1::Stage stage;
     store::Digest root;
     std::string weak;
+    std::string stored_key;
     bool use_cache = true;
     int64_t started = 0;
     size_t i = 0;
@@ -1112,7 +1129,7 @@ void RunEngine::OnItem(const RunPtr& run, const std::string& batch, const v1::It
         spec = it.spec;
         stage = run->stages[it.stage];
         root = it.root;
-        weak = it.weak;
+        weak = it.execution_weak.empty() ? it.weak : it.execution_weak;
         use_cache = run->policy.cache();
         started = it.started_ms > 0 ? it.started_ms : NowMs() - o.wall_ms();
     }
@@ -1165,7 +1182,8 @@ void RunEngine::OnItem(const RunPtr& run, const std::string& batch, const v1::It
                 ci.set_peak_mem(o.peak_mem());
                 ci.set_node(node);
                 for (const auto& f : o.footprint()) ci.add_footprint(f);
-                deps_.cache->Put(FullKey(weak, observed), ci);
+                stored_key = FullKey(weak, observed);
+                deps_.cache->Put(stored_key, ci);
                 deps_.cache->AddFootprint(weak, observed);
             }
             deps_.resources->Record(stage.kind(), spec.cost(), o.wall_ms(), o.peak_mem());
@@ -1175,6 +1193,7 @@ void RunEngine::OnItem(const RunPtr& run, const std::string& batch, const v1::It
     std::lock_guard lock(mu_);
     Item& it = run->items[i];
     if (IsTerminal(it.state) || it.batch != batch) return;
+    if (!stored_key.empty()) it.result.mutable_cache()->set_key(stored_key);
     run->core_s += static_cast<double>(o.wall_ms()) / 1000.0 * std::max(stage.resources().cores(), 1);
     auto& share = run->nodes[node];
     share.set_node(node);

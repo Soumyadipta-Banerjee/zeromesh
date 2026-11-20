@@ -47,6 +47,73 @@ class SharedDaemon(unittest.TestCase):
         self.assertEqual(self.run_ok("run", "--", "echo", "a", cwd=cwd).stdout, "a\n")
         self.assertEqual(self.run_ok("run", "--", "echo", "b", cwd=cwd).stdout, "b\n")
 
+    def test_resource_requests_change_cache_identity(self):
+        cwd = tempdir(self)
+
+        def exercise(name, initial_options, changed_options, initial_stdout, changed_stdout):
+            def run(label, options):
+                report = os.path.join(cwd, "..", os.path.basename(cwd) + f"-{name}-{label}.json")
+                trace = report.replace(".json", ".trace.json")
+                self.addCleanup(lambda: [os.remove(p) for p in (report, trace) if os.path.exists(p)])
+                result = self.run_ok("run", "--report", report, *options, "--", "sh", "-c",
+                                     'printf "%s|%s\\n" "$ZM_CORES" "$ZM_MEM_BYTES"', cwd=cwd)
+                with open(report) as f:
+                    item = json.load(f)["items"][0]
+                return result.stdout, item["cache"].get("hit", False)
+
+            first_stdout, first_hit = run("first", initial_options)
+            self.assertEqual(first_stdout, initial_stdout)
+            self.assertFalse(first_hit)
+
+            changed_result, changed_hit = run("changed", changed_options)
+            self.assertEqual(changed_result, changed_stdout)
+            self.assertFalse(changed_hit)  # the changed execution contract must not reuse the old output
+
+            restored_result, restored_hit = run("restored", initial_options)
+            self.assertEqual(restored_result, initial_stdout)
+            self.assertTrue(restored_hit)  # restoring the contract must reuse its original entry, not the changed one
+
+        exercise("cores", ["--cores", "1"], ["--cores", "2"], "1|0\n", "2|0\n")
+        exercise("memory", ["--mem", "64M"], ["--mem", "128M"],
+                 f"1|{64 << 20}\n", f"1|{128 << 20}\n")
+
+    def test_warm_directories_use_their_mount_namespace_as_cache_identity(self):
+        work = tempdir(self)
+        specs = tempdir(self)
+        run_spec = os.path.join(specs, "run.json")
+
+        def run(label, kind):
+            spec = {
+                "name": "warm-cache",
+                "workspace_path": work,
+                "stream_logs": True,
+                "stages": [{"name": "", "kind": kind, "warm": True}],
+                "items": [{
+                    "id": "item",
+                    "argv": ["sh", "-c", "if [ -f \"$ZM_WARM_DIR/owner\" ]; then "
+                                        "printf 'present\\n'; else "
+                                        "printf 'new\\n' > \"$ZM_WARM_DIR/owner\"; printf 'new\\n'; fi"],
+                }],
+            }
+            with open(run_spec, "w") as f:
+                json.dump(spec, f)
+            report = os.path.join(specs, label + ".json")
+            result = self.run_ok("run", "--report", report, "--from", run_spec, cwd=work)
+            with open(report) as f:
+                data = json.load(f)
+            return result.stdout, data["items"][0]["cache"].get("hit", False)
+
+        first_stdout, first_hit = run("first", "namespace-a")
+        self.assertEqual(first_stdout, "new\n")
+        self.assertFalse(first_hit)
+
+        changed_stdout, changed_hit = run("changed", "namespace-b")
+        self.assertEqual(changed_stdout, "new\n")  # a distinct mount starts without namespace-a's state
+        self.assertFalse(changed_hit)
+
+        _, restored_hit = run("restored", "namespace-a")
+        self.assertTrue(restored_hit)
+
     def test_exit_code(self):
         r = self.zmd.zm("run", "--", "sh", "-c", "echo oops >&2; exit 3", cwd=tempdir(self))
         self.assertEqual(r.returncode, 3)
