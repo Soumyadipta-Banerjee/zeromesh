@@ -71,7 +71,7 @@ std::string WeakKey(const v1::Item& item, const v1::Stage& stage, const std::str
                     const std::string& arch) {
     KeyWriter w;
     w.Tag('V');
-    w.Str("zm-item-1");
+    w.Str("zm-item-2");
     w.Tag('A');
     for (const auto& a : item.argv()) w.Str(a);
     w.Tag('C');
@@ -100,6 +100,12 @@ std::string WeakKey(const v1::Item& item, const v1::Stage& stage, const std::str
     w.Str(env_identity);
     w.Tag('R');
     w.Str(arch);
+    w.Str(std::to_string(std::max(stage.resources().cores(), 1)));
+    w.Str(std::to_string(std::max<int64_t>(stage.resources().mem_bytes(), 0)));
+    w.Str(std::to_string(std::max(stage.resources().gpus(), 0)));
+    w.Tag('M');
+    w.Str(stage.warm() ? "warm" : "");
+    if (stage.warm()) w.Str(stage.kind()); // warm dirs are keyed by kind and EnvIdentity
     w.Tag('N');
     w.Str(stage.network() ? "net" : "");
     return w.Hash();

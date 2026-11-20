@@ -206,6 +206,54 @@ TEST(ItemKeyChangesWithTheCommandNotWithWhereOutputsGo) {
     ASSERT_EQ(ka, run::WeakKey(d, stage, "host", "x86_64"));
 }
 
+TEST(ItemKeyCacheIdentityIncludesExecutionAndWarmResources) {
+    const auto item = MakeItem("resource-sensitive", {"tool"});
+    v1::Stage base;
+    base.mutable_resources()->set_cores(1);
+    const auto key = [&](const v1::Stage& stage) {
+        return run::WeakKey(item, stage, "host", "x86_64");
+    };
+    const std::string original = key(base);
+
+    v1::Stage changed = base;
+    ASSERT_EQ(original, key(changed)); // a deterministic baseline
+    changed.mutable_resources()->set_cores(0);
+    ASSERT_EQ(original, key(changed)); // zero and one both dispatch one core
+    changed.mutable_resources()->set_cores(2);
+    ASSERT_NE(original, key(changed));
+
+    changed = base;
+    changed.mutable_resources()->set_mem_bytes(64ll << 20);
+    ASSERT_NE(original, key(changed));
+    changed.mutable_resources()->set_mem_bytes(-1);
+    ASSERT_EQ(original, key(changed)); // a negative limit has the same effect as no limit
+
+    changed = base;
+    changed.mutable_resources()->set_gpus(1);
+    ASSERT_NE(original, key(changed));
+    changed.mutable_resources()->set_gpus(-1);
+    ASSERT_EQ(original, key(changed));
+
+    changed = base;
+    changed.set_kind("compiler-a");
+    ASSERT_EQ(original, key(changed)); // without /warm, kind only guides scheduling
+    changed.set_warm(true);
+    const std::string warm_a = key(changed);
+    ASSERT_NE(original, warm_a);
+    changed.set_kind("compiler-b");
+    ASSERT_NE(warm_a, key(changed)); // the actual warm namespace changes
+    changed.set_warm(false);
+    ASSERT_EQ(original, key(changed));
+
+    changed = base;
+    changed.set_name("display-only");
+    changed.set_where(v1::LOCAL_ONLY);
+    ASSERT_EQ(original, key(changed)); // placement and display metadata do not affect execution
+    auto prioritized = item;
+    prioritized.set_priority(100);
+    ASSERT_EQ(original, run::WeakKey(prioritized, base, "host", "x86_64"));
+}
+
 TEST(ItemKeyWholeInputsAndDepfileModes) {
     Stores s;
     TempDir ws;
@@ -452,6 +500,93 @@ TEST(EngineServesUnchangedItemsFromTheCacheAndExplainsMisses) {
     off.mutable_policy()->set_cache(false);
     auto third = e.Wait(e.engine->Submit(off));
     ASSERT_EQ(third.run().cached(), 0);
+}
+
+TEST(EngineCacheIdentitySeparatesResourceSettings) {
+    using A = ScriptedExecutor::Answer;
+    auto exercise = [&](const char* id, std::function<void(v1::Stage&, bool)> configure, const std::string& first,
+                        const std::string& second) {
+        Engine e;
+        TempDir ws, out;
+        e.exec->script["item"] = {A{.output_text = first}, A{.output_text = second}};
+        auto make = [&](bool changed) {
+            auto spec = e.Spec(ws.path());
+            configure(*spec.mutable_stages(0), changed);
+            auto item = MakeItem("item", {"tool", id});
+            item.add_outputs()->set_path("result.txt");
+            item.mutable_outputs(0)->set_dest((out / "result.txt").string());
+            *spec.add_items() = item;
+            return spec;
+        };
+        auto run = [&](bool changed) {
+            auto report = e.Wait(e.engine->Submit(make(changed)));
+            return Result(report, "item");
+        };
+        auto one = run(false);
+        ASSERT_FALSE(one.cache().hit());
+        ASSERT_EQ(ReadFile(out / "result.txt"), first + ":item");
+        std::filesystem::remove(out / "result.txt");
+
+        auto two = run(true);
+        ASSERT_FALSE(two.cache().hit());
+        ASSERT_EQ(ReadFile(out / "result.txt"), second + ":item");
+        std::filesystem::remove(out / "result.txt");
+
+        auto three = run(false);
+        ASSERT_TRUE(three.cache().hit());
+        ASSERT_EQ(ReadFile(out / "result.txt"), first + ":item");
+        ASSERT_EQ(e.exec->batches.size(), 2u); // only the original and changed requests executed
+    };
+    exercise("cores", [](v1::Stage& stage, bool changed) {
+        stage.mutable_resources()->set_cores(changed ? 2 : 1);
+    }, "one-core", "two-cores");
+    exercise("memory", [](v1::Stage& stage, bool changed) {
+        stage.mutable_resources()->set_mem_bytes(changed ? 128ll << 20 : 64ll << 20);
+    }, "64MiB", "128MiB");
+    exercise("gpus", [](v1::Stage& stage, bool changed) {
+        stage.mutable_resources()->set_gpus(changed ? 1 : 0);
+    }, "no-gpu", "one-gpu");
+    exercise("warm", [](v1::Stage& stage, bool changed) {
+        stage.set_kind("compiler");
+        stage.set_warm(changed);
+    }, "cold", "warm");
+}
+
+TEST(EngineCacheIdentityUsesDispatchedMemoryLimitAfterOomRetry) {
+    using A = ScriptedExecutor::Answer;
+    Engine e;
+    TempDir ws, out;
+    e.exec->script["item"] = {
+        A{.item_failure = v1::FAILURE_OOM, .peak_mem = 256ll << 20, .oom_at_limit = true},
+        A{.output_text = "raised"},
+    };
+    auto make = [&](int64_t mem_bytes) {
+        auto spec = e.Spec(ws.path());
+        spec.mutable_stages(0)->mutable_resources()->set_mem_bytes(mem_bytes);
+        auto item = MakeItem("item", {"tool"});
+        item.add_outputs()->set_path("result.txt");
+        item.mutable_outputs(0)->set_dest((out / "result.txt").string());
+        *spec.add_items() = item;
+        return spec;
+    };
+    constexpr int64_t original = 256ll << 20;
+    constexpr int64_t raised = 384ll << 20;
+
+    auto first = e.Wait(e.engine->Submit(make(original)));
+    ASSERT_TRUE(Result(first, "item").state() == v1::ITEM_SUCCEEDED);
+    ASSERT_EQ(e.exec->batches.size(), 2u);
+    ASSERT_EQ(e.exec->batches.back().mem_limit(), raised);
+
+    auto lower = e.Wait(e.engine->Submit(make(original)));
+    ASSERT_FALSE(Result(lower, "item").cache().hit()); // the stored execution actually used `raised`
+    ASSERT_EQ(e.exec->batches.size(), 3u);
+    ASSERT_EQ(ReadFile(out / "result.txt"), "raised:item");
+    std::filesystem::remove(out / "result.txt");
+
+    auto exact = e.Wait(e.engine->Submit(make(raised)));
+    ASSERT_TRUE(Result(exact, "item").cache().hit());
+    ASSERT_EQ(ReadFile(out / "result.txt"), "raised:item");
+    ASSERT_EQ(e.exec->batches.size(), 3u); // the exact raised identity was reused without another execution
 }
 
 TEST(EngineDepfileItemsHitUntilAFileTheyReadChanges) {
